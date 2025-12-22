@@ -1,0 +1,2 @@
+﻿Run_Time,Target_Regime,Strategy,Best_Params,In_Sample_Period,In_Return(%),In_MDD(%),In_Trades,Out_Sample_Period,Out_Return(%),Out_BH_Return(%),Out_MDD(%),Out_Trades,Final_Asset
+2025-12-15 18:20:05,BEAR_TREND,macd,"{'macd_fast_period': 8, 'macd_slow_period': 20, 'macd_signal_period': 9}",2015-01-01~2020-12-31,10.93,-2.4,4,2021-01-01~2025-11-30,6.35,27.64,-2.56,3,10635.29

@@ -1,0 +1,52 @@
+## 🧭 '설계도 v4.0: 백테스터' (연구소)
+1. 프로젝트 목적: "견고한(Robust) 규칙"의 발굴
+    이 시스템은 v3.2의 '실행기'에 탑재할 **'규칙(Rules)'**을 찾는 **'연구소(Brain)'**입니다.
+    목표: 과최적화(Overfitting)를 피해, 미래에도 작동할 가능성이 높은(Robust) 전략과 파라미터 셋을 발굴합니다.
+    최종 산출물: v3.2가 사용할 config.py의 MARKET_RULE_MAP.
+
+2. 백본: '설계도 v2'의 완벽한 재사용 및 확장
+    우리가 완성한 설계도 v2 (백테스터)의 모든 모듈을 그대로 재사용합니다.
+    backtesting/engine.py, metrics.py, report.py, indicator.py, strategy.py, run_backtest.py (단일 실행기)는 수정할 필요가 없습니다.
+    v4.0은 이 모듈들을 수백, 수천 번 호출하여 최적의 값을 찾는 **'최적화 실행기'**를 새로 만듭니다.
+
+3. 핵심 워크플로우: '과최적화 방지(OOS) 검증'
+    [1단계: 데이터/시장 분할] -> [2단계: 파라미터 정의] -> [3단계: 1차 최적화 (In-Sample)] -> [4단계: 2차 검증 (Out-of-Sample)] -> [5단계: 최종 규칙 확정]
+
+4. 워크플로우 상세
+    [1단계: 데이터/시장 분할]
+    config.py에 검증 기간을 정의합니다. (예: IN_SAMPLE_START, IN_SAMPLE_END, OUT_OF_SAMPLE_START...)
+    market_analyzer.py를 재사용하여, In-Sample 기간 내의 시장을 'BULL', 'BEAR' 등으로 미리 분할합니다.
+
+    [2단계: 파라미터 정의]
+    config.py에 최적화할 파라미터 '그리드(Grid)'를 정의합니다.
+    (예: MACD_GRID = { 'fast': [10, 12, 15], 'slow': [20, 26, 30], 'signal': [9] })
+
+    [3단계: 1차 최적화 (In-Sample)] (담당: run_optimization.py)
+    "In-Sample 데이터" (2015-2019) 안에서만 실행합니다.
+    (예: 'BEAR' 시장 구간만 필터링)
+    MACD_GRID의 모든 파라미터 조합(3x3x1=9개)을 루프(Loop)로 실행합니다.
+    run_single_backtest를 반복 호출하여 9번의 백테스트를 수행하고, 이 중 'BEAR' 시장에서 MDD가 가장 낮았던 최적의 파라미터(예: 12,26,9)를 "승자"로 뽑습니다.
+
+    [4단계: 2차 검증 (Out-of-Sample)] (담당: run_optimization.py)
+    3단계의 "승자"(예: MACD(12,26,9))를 "Out-of-Sample 데이터" (2020-2023)의 'BEAR' 시장(예: 2022년)에 처음으로 적용합니다.
+    여기서도 B&H 대비 하락을 방어하는 등 In-Sample과 '유사한 성격'을 보인다면, 이 전략은 '견고하다'고 잠정 결론 내립니다.
+
+    [5단계: 최종 규칙 확정]
+    4단계 검증을 통과한 규칙들만 config.py의 MARKET_RULE_MAP에 등록합니다.
+    (예: {'BEAR': {'strategy': 'macd', 'params': {'macd_fast_period': 12, ...}}})
+
+5. 주요 모듈 변경 사항 (To-Do List)
+    config.py:
+    IN_SAMPLE_START, OUT_OF_SAMPLE_END 등 OOS 날짜 정의.
+    MACD_GRID, DEMA_GRID 등 파라미터 그리드 정의.
+
+    run_optimization.py (신규):
+    v4.0의 메인 실행기.
+    3, 4, 5단계의 최적화 및 검증 워크플로우를 실행하는 오케스트레이터입니다.
+    run_single_backtest를 루프(Loop)로 호출하는 역할을 합니다.
+
+    backtesting/logger.py:
+    단일 테스트 결과(v2) 외에, '최적화 결과'를 별도로 저장하도록 기능 확장.
+
+    run_backtest.py 및 backtesting/ 패키지:
+    (핵심) 수정할 필요 없음. (v2 모듈 재사용)

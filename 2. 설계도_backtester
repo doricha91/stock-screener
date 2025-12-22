@@ -1,0 +1,105 @@
+1. 백테스팅 모듈의 목적 (역할)
+이 모듈의 목적은 screener와 다릅니다.
+스크리너(Screener): "오늘" 날짜에, "여러 종목" 중 'Buy' 신호가 뜬 종목을 찾습니다. (넓고 얕게)
+백테스터(Backtester): "과거 전체 기간" 동안, **"한 개의 종목"**에 특정 전략을 적용했을 때의 수익성과 위험성을 검증합니다. (깊고 좁게)
+
+2. 프로젝트 구성요소 (신규 파일)
+backtester.py라는 단일 파일 대신, backtesting이라는 **폴더(패키지)**를 만듭니다.
+
+StockScreener/
+├── backtesting/       <-- [신규 폴더]
+│   ├── __init__.py    <-- [신규] (폴더를 패키지로 만듦)
+│   ├── engine.py      <-- [신규] (가상 매매 시뮬레이션 엔진)
+│   ├── metrics.py     <-- [신규] (수익률, MDD 등 통계 계산)
+│   └── report.py      <-- [신규] (결과를 깔끔하게 출력)
+│
+├── data/
+├── reports/
+│
+├── config.py
+├── data_manager.py    (재사용)
+├── indicator.py       (재사용)
+├── strategy.py        (재사용)
+├── screener.py
+├── utils.py
+├── main.py            (스크리너 실행용)
+│
+└── run_backtest.py    <-- [신규] (백테스트를 실행하는 메인 파일)
+
+3. 코드 모듈들 (신규 4개 파일 상세)
+backtesting/engine.py (시뮬레이션 엔진)
+역할: strategy.py가 생성한 'Buy'/'Sell' 신호를 바탕으로, 초기 자본금($10,000)을 가지고 가상 매매를 실행합니다.
+
+핵심 기능:
+
+run_backtest(df_signals, initial_capital) 함수를 제공합니다.
+
+DataFrame을 순회하며 'Buy'/'Sell' 신호에 따라 현금(cash)과 보유 주식 수(shares)를 변경합니다.
+
+매일매일의 포트폴리오 가치 (현금 + 보유 주식 평가액)를 계산하여 기록합니다.
+
+최종적으로 "일별 포트폴리오 가치 내역(DataFrame)"과 "모든 거래 내역(list)"을 반환합니다.
+
+backtesting/metrics.py (통계 계산기)
+역할: engine.py가 반환한 "일별 포트폴리오 가치" 데이터를 받아, 전략의 성과를 측정하는 다양한 통계 지표를 계산합니다.
+
+핵심 기능:
+
+calculate_metrics(daily_portfolio_value, list_of_trades) 함수를 제공합니다.
+
+총 수익률 (Total Return %): (최종 자산 / 초기 자본금) - 1
+
+승률 (Win Rate %): 수익을 낸 거래 횟수 / 총 거래 횟수
+
+최대 손실폭 (MDD, Max Drawdown %): (가장 중요) 역사적 최고점에서 가장 많이 하락했던 비율.
+
+(향후 확장) 샤프 비율, 소르티노 비율, 연평균 수익률(CAGR) 등
+
+backtesting/report.py (결과 리포터)
+역할: metrics.py가 계산한 통계 지표(딕셔너리)를 받아, 사용자가 보기 쉽게 콘솔에 출력합니다.
+
+핵심 기능:
+
+show_console_report(metrics_dict) 함수를 제공합니다.
+
+"--- 백테스트 결과 (AAPL / 터틀) ---", "총 수익률: +XX.X%", "MDD: -XX.X%" 와 같이 깔끔하게 포맷팅하여 print 합니다.
+
+(향후 확장) matplotlib을 이용해 포트폴리오 가치 추이 그래프를 그려주는 기능을 추가할 수 있습니다.
+
+run_backtest.py (백테스트 실행기)
+역할: main.py가 스크리너의 '시작 버튼'이듯, run_backtest.py는 백테스터의 '시작 버튼'입니다.
+
+핵심 기능 (프로세스):
+
+백테스트 설정 (예: SYMBOL = 'AAPL', INITIAL_CAPITAL = 10000)
+
+data_manager.get_stock_data(SYMBOL, output_size='full') 호출 (100일이 아닌 'full' 데이터 사용!)
+
+indicator.add_all_indicators(...) 호출
+
+strategy.generate_signals(...) 호출 (여기까지 v1.0 모듈 재사용)
+
+backtesting.engine.run_backtest(...) 호출
+
+backtesting.metrics.calculate_metrics(...) 호출
+
+backtesting.report.show_console_report(...) 호출
+
+4. (추가 제안) 개발 단계 (Roadmap)
+이 설계도를 바탕으로 다음과 같은 순서로 개발하는 것을 제안합니다.
+
+1단계 (환경 설정): 위 구조대로 backtesting 폴더와 신규 파일 4개를 생성합니다.
+
+2단계 (실행기 작성): run_backtest.py 파일을 먼저 작성합니다. (v1.0 모듈 재사용 ~ report.py 호출까지)
+
+3단계 (엔진 구현): backtesting/engine.py에 간단한 매매 시뮬레이션 로직을 구현합니다.
+
+4단계 (기본 통계): backtesting/metrics.py에 총 수익률과 승률만 먼저 계산합니다.
+
+5단계 (리포트): backtesting/report.py에 이 기본 통계만 출력합니다.
+
+(여기까지 완료되면, "AAPL을 터틀 전략으로 돌렸더니 10년간 XX% 벌었고, 승률은 XX%다"를 알 수 있습니다.)
+
+6단계 (고급 통계): (가장 중요하지만 복잡한) MDD(최대 손실폭) 계산 로직을 metrics.py에 추가합니다.
+
+이 설계도 초안에 대해 어떻게 생각하시나요? 수정하거나 추가하고 싶은 부분이 있다면 알려주세요.
