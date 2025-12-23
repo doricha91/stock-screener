@@ -24,8 +24,8 @@ STRATEGY_WEIGHTS = {
 }
 
 # 매수 추천을 위한 최소 합산 점수
-# 예: 터틀(2점) + MACD(1점) = 3점 이상이면 추천
-SCORE_THRESHOLD = 3.0
+# 의미: "터틀 전략(2점) 하나만 성공해도 매수 후보에 올린다."
+SCORE_THRESHOLD = 2.0
 
 # 지표 계산에 사용할 기본 파라미터 (백테스트 최적값 적용 가능)
 DEFAULT_PARAMS = {
