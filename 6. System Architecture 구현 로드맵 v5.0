@@ -5,26 +5,29 @@
     기존 CSV 방식에서 SQLite DB 방식으로 전면 개편
 
 2.1. 데이터베이스 구조 (market_data.db)단일 파일인 SQLite를 사용하여 관리가 용이하게 함.
-    Table 1:
-        tickers (종목 정보)
-        symbol (PK): 종목코드 (예: AAPL, MSFT)
-        name: 기업명sector: 섹터 (예: Technology)
-        sp500_included: S&P500 포함 여부 (Boolean)
+    Table 1: tickers (종목 마스터)
+        종목의 소속 그룹을 유연하게 관리하기 위해 컬럼을 확장했습니다.
+        symbol (PK): 종목코드
+        name: 기업명
+        sector: 섹터
+        industry: 세부 산업군
+        listing_board: 소속 시장 (예: SP500, NASDAQ100, RUSSELL2000) - 확장성 고려
 
-    Table 2:
-        daily_price (일별 시세)
-        id: Auto Increment
-        symbol: 종목코드 (FK)
-        date: 날짜 (YYYY-MM-DD)
-        open, high, low, close, adj_close: 가격 정보
-        volume: 거래량
+    Table 2: daily_price (일별 시세)
+        symbol (FK), date
+        open, high, low, close, adj_close
+        volume
 
-    Table 3:
-        market_index (시장 지수)
-        symbol: SPY(S&P500), QQQ(Nasdaq), VIX(변동성) 등
-        date: 날짜
-        close: 종가
-        moving_avg_200: 200일 이동평균 (시장 판단용 미리 계산)
+    Table 3: market_index (지수 및 거시경제)
+        symbol: SPY, QQQ, ^VIX(변동성), ^TNX(10년물 금리), DX-Y.NYB(달러인덱스) 등
+        date, close, adj_close
+        moving_avg_200: (선택 사항) DB에 저장하기보다 코드에서 계산하는 것이 관리에 용이하나, 빠른 조회를 위해 유지.
+
+    Table 4: financials (분기별 재무 데이터 - 신규)
+        가치투자를 위해 추가합니다. (yfinance의 ticker.quarterly_financials 등으로 수집)
+        symbol (FK), date (발표일/기준일)
+        revenue (매출), net_income (순이익)
+        eps (주당순이익), total_assets (총자산), total_equity (자본)
 
 2.2. 데이터 수집기 (data_collector.py)
     S&P500 리스트 확보: Wikipedia 등에서 최신 S&P500 티커 리스트 크롤링.
