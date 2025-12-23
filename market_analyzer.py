@@ -1,83 +1,123 @@
-# [ 📄 market_analyzer.py (신규) ]
+import sqlite3
+import pandas as pd
+import pandas_ta as ta  # 지표 계산용
+#10년물 금리, 달러인덱스 확장 예정
+# DB 경로 설정
+DB_PATH = "market_data.db"
 
-import pandas_ta as ta
-import config
 
-
-def analyze_market_regime(df_benchmark):
+def get_index_data_from_db(symbol):
     """
-    벤치마크(SPY) 데이터프레임을 받아 '시장 상태(Regime)'를 분석하여 컬럼을 추가합니다.
-
-    :param df_benchmark: SPY의 OHLCV 데이터프레임
-    :return: regime 정보가 추가된 DataFrame
+    DB의 'market_index' 테이블에서 지수 데이터를 가져옵니다.
+    (SPY, QQQ 등)
     """
-    df = df_benchmark.copy()
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT date, close, adj_close 
+        FROM market_index 
+        WHERE symbol = ? 
+        ORDER BY date ASC
+    """
+    try:
+        df = pd.read_sql(query, conn, params=[symbol])
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            # 숫자형 변환
+            df['close'] = pd.to_numeric(df['close'])
+            df['adj_close'] = pd.to_numeric(df['adj_close'])
+        return df
+    except Exception as e:
+        print(f"❌ [Market Analyzer] {symbol} 데이터 로드 실패: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
 
-    # 1. 필요 지표 계산
-    # (1) SMA 200 (장기 추세선)
-    df['regime_sma'] = ta.sma(df['close'], length=config.REGIME_SMA_PERIOD)
+def save_market_log(date, status, vix, description):
+    """
+    [신규] 분석 결과를 DB(market_status_log 테이블)에 저장합니다.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT OR REPLACE INTO market_status_log (date, status, vix_value, description)
+            VALUES (?, ?, ?, ?)
+        """, (date, status, vix, description))
+        conn.commit()
+        # print(f"💾 시장 상태 기록 완료: {date} [{status}]") # 로그 확인용
+    except Exception as e:
+        print(f"❌ 시장 상태 저장 실패: {e}")
+    finally:
+        conn.close()
 
-    # (2) ADX (추세 강도)
-    # pandas_ta의 adx 함수는 ADX, DMP, DMN 세 개의 컬럼을 반환합니다.
-    adx_df = ta.adx(df['high'], df['low'], df['close'], length=config.REGIME_ADX_PERIOD)
 
-    # 반환된 컬럼명 예: ADX_14, DMP_14, DMN_14 -> 'regime_adx'로 통일
-    adx_col_name = f"ADX_{config.REGIME_ADX_PERIOD}"
-    if adx_col_name in adx_df.columns:
-        df['regime_adx'] = adx_df[adx_col_name]
+def analyze_market_status():
+    """
+    SPY, QQQ, VIX를 분석하여 시장 상태를 판단하고 DB에 기록합니다.
+    """
+    # 1. 데이터 로드
+    df_spy = get_index_data_from_db('SPY')
+    df_qqq = get_index_data_from_db('QQQ')
+    df_vix = get_index_data_from_db('^VIX')
+
+    if df_spy.empty or df_qqq.empty:
+        return {'status': 'ERROR', 'reason': '데이터 부족'}
+
+    # 2. 지표 계산 (200일선)
+    df_spy['sma_200'] = df_spy['close'].rolling(window=200).mean()
+    df_qqq['sma_200'] = df_qqq['close'].rolling(window=200).mean()
+
+    # 오늘 기준 데이터
+    last_spy = df_spy.iloc[-1]
+    last_qqq = df_qqq.iloc[-1]
+
+    # VIX (데이터 없으면 0 처리)
+    current_vix = df_vix.iloc[-1]['close'] if not df_vix.empty else 0.0
+
+    # 3. 판단 로직
+    spy_bull = last_spy['close'] > last_spy['sma_200']
+    qqq_bull = last_qqq['close'] > last_qqq['sma_200']
+
+    status = "NEUTRAL"
+    description = ""
+
+    # (1) 공포장 (VIX 필터)
+    if current_vix > 30.0:
+        status = "PANIC"
+        description = f"🚨 공포 구간 (VIX {current_vix:.1f}) - 매매 중단"
+    # (2) 상승장
+    elif spy_bull and qqq_bull:
+        status = "BULL"
+        description = "📈 상승장 (SPY, QQQ 모두 200일선 위)"
+    # (3) 하락장
+    elif not spy_bull and not qqq_bull:
+        status = "BEAR"
+        description = "📉 하락장 (모두 200일선 아래)"
+    # (4) 혼조세
     else:
-        # 혹시 컬럼명이 다를 경우 첫 번째 컬럼 사용
-        df['regime_adx'] = adx_df.iloc[:, 0]
+        status = "UNSTABLE"
+        desc_spy = "SPY상승" if spy_bull else "SPY하락"
+        desc_qqq = "QQQ상승" if qqq_bull else "QQQ하락"
+        description = f"⚠️ 혼조세 ({desc_spy}, {desc_qqq})"
 
-    # 2. 시장 상태(Regime) 정의 로직
-    # 초기값: 'UNCERTAIN' (알 수 없음)
-    df['market_regime'] = 'UNCERTAIN'
+    today_date = last_spy.name.strftime('%Y-%m-%d')
 
-    # 로직 적용 (벡터화 연산 대신 이해하기 쉬운 apply 또는 루프 사용 가능하지만, 여기선 apply 사용)
-    def determine_regime(row):
-        # 데이터가 부족해 지표가 계산 안 된 경우
-        if pd.isna(row['regime_sma']) or pd.isna(row['regime_adx']):
-            return 'UNCERTAIN'
-
-        price = row['close']
-        sma = row['regime_sma']
-        adx = row['regime_adx']
-        threshold_adx = config.REGIME_ADX_THRESHOLD
-
-        # A. 강세장 (Bull Market): 주가가 200일선 위에 있음
-        if price > sma:
-            if adx >= threshold_adx:
-                return 'BULL_TREND'  # 강한 상승장 (추세 추종 전략 유리)
-            else:
-                return 'BULL_SIDEWAYS'  # 완만한 상승/횡보 (눌림목/스윙 유리)
-
-        # B. 약세장 (Bear Market): 주가가 200일선 아래에 있음
-        else:
-            if adx >= threshold_adx:
-                return 'BEAR_TREND'  # 강한 하락장 (현금 보유 or 숏 전략 유리)
-            else:
-                return 'BEAR_SIDEWAYS'  # 지루한 하락/횡보 (변동성 돌파 유리)
-
-    # 행별로 함수 적용
-    import pandas as pd  # 내부 사용을 위해 import
-    df['market_regime'] = df.apply(determine_regime, axis=1)
-
-    return df
-
-
-def get_current_market_regime(df_benchmark):
-    """
-    가장 최근(오늘)의 시장 상태를 반환합니다. (스크리너용)
-    """
-    df_analyzed = analyze_market_regime(df_benchmark)
-
-    # 마지막 행 가져오기
-    latest = df_analyzed.iloc[-1]
+    # 4. [중요] 결과 DB 저장
+    save_market_log(today_date, status, current_vix, description)
 
     return {
-        'date': latest.name.strftime('%Y-%m-%d'),
-        'regime': latest['market_regime'],
-        'adx': round(latest['regime_adx'], 2),
-        'close': latest['close'],
-        'sma_200': round(latest['regime_sma'], 2)
+        'date': today_date,
+        'status': status,
+        'description': description,
+        'spy_close': round(last_spy['close'], 2),
+        'qqq_close': round(last_qqq['close'], 2),
+        'vix': round(current_vix, 2)
     }
+
+
+if __name__ == "__main__":
+    # 테스트 실행
+    res = analyze_market_status()
+    print(f"\n[결과] {res['date']} : {res['status']}")
+    print(f"설명: {res['description']}")
