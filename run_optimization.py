@@ -8,7 +8,7 @@ import config
 import data_manager
 import indicator
 import strategy
-from market_analyzer import analyze_market_regime
+from market_analyzer import analyze_market_status
 from backtesting import engine, metrics
 
 # --- 전략 매핑 ---
@@ -106,7 +106,7 @@ def run_optimization(strategy_name, target_regime, target_symbol='SPY'):
         return
 
     # 시장 상태 분석
-    df_regime = analyze_market_regime(df_raw)
+    df_regime = analyze_market_status(df_raw)
 
     # 2. 데이터 분할
     in_sample_mask = (df_regime.index >= config.IN_SAMPLE_START) & (df_regime.index <= config.IN_SAMPLE_END)

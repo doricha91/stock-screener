@@ -7,6 +7,9 @@ __pycache__/
 # Environment variables
 .env
 
+# data base
+.db
+
 # Data & Log files
 /data/
 /reports/
