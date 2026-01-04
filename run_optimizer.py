@@ -27,14 +27,14 @@ params_grid = {
     # 'max_positions': [4, 5],
 
     # 핵심 변수
-    'exit_period': [15, 20, 25], #익절/손절 타이밍
-    'rs_lookback': [20, 30, 40], #RS 비교 기간
-    'entry_period': [20], #진입 타이밍
-    'max_positions': [5], #종목 수
+    'exit_period': [10, 20, 40], #익절/손절 타이밍
+    'rs_lookback': [30, 60, 120], #RS 비교 기간
+    'entry_period': [20, 50], #진입 타이밍
+    'max_positions': [4, 5], #종목 수
 
     # 필터링 및 가중치 변수
-    'score_threshold': [1.0], #진입 점수 문턱
-    'rs_weight': [1.0], #RS 점수 비중, 0.0: 절대모멘텀, 5.0: 시장보다 강한놈만 취급
+    'score_threshold': [0.5, 1.0, 2.0], #진입 점수 문턱
+    'rs_weight': [0.0, 1.0, 3.0], #RS 점수 비중, 0.0: 절대모멘텀, 5.0: 시장보다 강한놈만 취급
     'turtle_weight': [1.0], #신고가 점수 비중
 
     # 보조지표 세부 설정
