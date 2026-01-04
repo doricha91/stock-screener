@@ -1,3 +1,5 @@
+# strategy.py, 개별 전략 관련 코드
+
 import pandas as pd
 import numpy as np
 
@@ -32,7 +34,10 @@ def execute_strategy(strategy_name, df, context):
         'bbands': generate_bbands_signals,
         'macd': generate_macd_signals,
         'bbs': generate_bbs_signals,
-        'dema': generate_dema_signals
+        'dema': generate_dema_signals,
+        'obv': generate_obv_signals,
+        'mfi': generate_mfi_signals,
+        'vol_spike': generate_vol_spike_signals
     }
 
     func = strategy_map.get(strategy_name.lower())
@@ -56,8 +61,7 @@ def apply_ensemble_strategy(df, context):
     df_ensemble = df.copy()
 
     # 앙상블에 포함할 전략 리스트 정의
-    strategies = ['turtle', 'rsi', 'sma', 'bbands', 'macd', 'bbs', 'dema']
-
+    strategies = ['turtle', 'rsi', 'sma', 'bbands', 'macd', 'bbs', 'dema', 'obv', 'mfi', 'vol_spike']
     for name in strategies:
         # 1. 각 전략 실행 (임시 DF 사용)
         temp_df = execute_strategy(name, df_ensemble.copy(), context)
@@ -304,5 +308,50 @@ def generate_dema_signals(df, context):
             current_position = 0
 
         df.at[df.index[i], 'position'] = current_position
+
+    return _clean_signals(df)
+
+
+# 8. OBV 전략 (추세 확인)
+def generate_obv_signals(df, context):
+    if df is None: return None
+    df = df.copy()
+    if not all(col in df.columns for col in ['obv', 'obv_sma']): return df
+
+    df['signal'] = 0
+
+    # OBV가 OBV 이동평균보다 높으면 '매집 중'으로 판단 (가산점)
+    # 청산 신호는 따로 없음 (0)
+    df.loc[df['obv'] > df['obv_sma'], 'signal'] = 1
+
+    return _clean_signals(df)
+
+
+# 9. MFI 전략 (자금 유입)
+def generate_mfi_signals(df, context):
+    if df is None: return None
+    df = df.copy()
+    if 'mfi' not in df.columns: return df
+
+    df['signal'] = 0
+
+    # MFI > 80: 자금이 강력하게 유입되는 '슈퍼 모멘텀' 구간
+    # 과매수(매도)가 아니라 추세 강화(매수) 신호로 해석
+    df.loc[df['mfi'] > 80, 'signal'] = 1
+
+    return _clean_signals(df)
+
+
+# 10. 거래량 폭발 전략 (Volume Spike)
+def generate_vol_spike_signals(df, context):
+    if df is None: return None
+    df = df.copy()
+    if 'vol_spike_ratio' not in df.columns: return df
+
+    df['signal'] = 0
+
+    # 평소 대비 거래량이 2배(2.0) 이상 터지면 강력한 신호
+    # (단, 가격이 양봉일 때만 유효하다고 가정할 수도 있으나 여기선 거래량 자체만 봄)
+    df.loc[df['vol_spike_ratio'] >= 2.0, 'signal'] = 1
 
     return _clean_signals(df)
