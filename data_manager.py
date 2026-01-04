@@ -108,6 +108,39 @@ class DataManager:
         finally:
             conn.close()
 
+    def get_all_price_data_bulk(self, start_date=None):
+        """
+        [속도 최적화] 모든 종목의 데이터를 한 번의 쿼리로 가져옵니다.
+        """
+        conn = self.get_connection()
+        query = "SELECT date, symbol, open, high, low, close, volume FROM daily_price"
+        params = []
+
+        if start_date:
+            query += " WHERE date >= ?"
+            params.append(start_date)
+
+        try:
+            # 한 번에 모든 데이터 로드 (메모리 사용량은 늘지만 속도는 빠름)
+            df = pd.read_sql(query, conn, params=params)
+
+            if df.empty: return pd.DataFrame()
+
+            df['date'] = pd.to_datetime(df['date'])
+
+            # 숫자 변환
+            numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+            for col in numeric_cols:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            return df
+
+        except Exception as e:
+            print(f"❌ 전체 데이터 조회 실패: {e}")
+            return pd.DataFrame()
+        finally:
+            conn.close()
+
 
 # --- 전역 인스턴스 생성 ---
 # 기존 코드들이 'import data_manager' 후 'data_manager.get_price_data'로
@@ -122,3 +155,6 @@ def get_price_data(ticker, start_date=None, end_date=None):
 
 def get_ticker_list():
     return manager.get_ticker_list()
+
+def get_all_price_data_bulk(start_date=None):
+    return manager.get_all_price_data_bulk(start_date)

@@ -1,7 +1,8 @@
-# [ 📄 indicator.py (RSI, SMA, BB, MACD, BBS, DEMA 전략 추가 수정본) ]
+# indicator.py (터틀, RSI, SMA, 볼린저밴드 평균 회귀, MACD, 볼린저밴드 스퀴즈, DEMA, ATR, 거래량
 
 import pandas as pd
 import pandas_ta as ta
+import numpy as np
 
 
 # config.py는 더 이상 여기서 임포트하지 않습니다.
@@ -309,5 +310,57 @@ def _add_atr_pandas_only(df, atr_period):
     df_temp['tr'] = df_temp[['high-low', 'high-prev_close', 'low-prev_close']].max(axis=1)
 
     df['atr'] = df_temp['tr'].ewm(alpha=1 / atr_period, min_periods=atr_period, adjust=False).mean()
+
+    return df
+
+
+def add_atr_indicators(df, context):
+    """
+    run_portfolio_backtest.py 와의 호환성을 위한 연결 함수(Wrapper)입니다.
+    context 딕셔너리에서 설정을 꺼내 기존 add_atr 함수를 호출합니다.
+    """
+    # 1. context에서 기간 설정 꺼내기 (없으면 기본값 20)
+    period = context.get('atr_period', 20)
+
+    # 2. 이미 있는 add_atr 함수를 사용하여 계산
+    return add_atr(df, period)
+
+
+# --- 9. 거래량 지표 (OBV, MFI, Volume Spike) ---
+def add_volume_indicators(df, context):
+    """
+    거래량 관련 보조지표를 계산합니다.
+    """
+    if df is None or df.empty: return None
+
+    mfi_period = context.get('mfi_period', 14)
+
+    try:
+        # 데이터 타입 강제 변환
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
+
+        # 1. OBV
+        df['obv'] = ta.obv(df['close'], df['volume'])
+        df['obv_sma'] = ta.sma(df['obv'], length=20)
+
+        # 2. MFI (경고 해결: 미리 빈 컬럼을 float 타입으로 생성)
+        df['mfi'] = np.nan  # [중요] 미리 생성
+        df['mfi'] = df['mfi'].astype(float)  # 타입 확정
+
+        # 계산 후 할당
+        mfi_values = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=mfi_period)
+        df['mfi'] = mfi_values
+
+        # 3. Volume Spike
+        df['vol_sma'] = ta.sma(df['volume'], length=20)
+        vol_mean = df['vol_sma'].replace(0, 1)
+        df['vol_spike_ratio'] = df['volume'] / vol_mean
+
+    except Exception as e:
+        # 에러가 나면 해당 종목은 조용히 넘어갑니다.
+        return None
 
     return df
