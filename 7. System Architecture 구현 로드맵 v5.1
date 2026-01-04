@@ -1,0 +1,35 @@
+System Architecture 구현 로드맵
+
+v5.1 Robustness & Flexible Ensemble Edition
+핵심 목표: 과최적화 방지 (OOS) 로직 탑재 및 앙상블 로직의 유연화
+
+📌 STEP 1: 검증 시스템 고도화 (The Laboratory)
+가장 시급한 작업입니다. 현재의 단순 최적화는 과거 데이터에만 딱 맞는 '기억력 테스트'가 될 위험이 큽니다.
+
+    1-1. OOS (Out-Of-Sample) 워크플로우 구현
+    개념: 데이터를 쪼개서 학습(Training)과 시험(Test)을 분리합니다.
+    작업: run_optimizer.py 수정
+    변수 추가: TRAIN_START, TRAIN_END (예: 2018~2021), TEST_START, TEST_END (예: 2022~2023)
+    로직: Training 기간에서 Top 10 파라미터를 뽑은 뒤, Test 기간에 그대로 적용했을 때도 수익이 나는지 검증.
+
+    1-2. 시장 국면별 검증 (Market Regime Test)
+    작업: 백테스트 결과를 '상승장(Bull)'과 '하락장(Bear)' 구간으로 나누어 성과를 출력하는 기능 추가. (내 전략이 상승장에서만 돈을 버는지 확인)
+
+📌 STEP 2: 앙상블 로직 '민주화' (Refining Ensemble)
+터틀 전략의 독재를 막고, 진정한 앙상블 시스템으로 전환합니다.
+
+    2-1. 매수 조건식 분리 (De-coupling)
+    현재: IF (점수 > 1) AND (신고가 돌파) AND (RS > 0) THEN BUY
+    변경: IF (점수 > Threshold) THEN BUY
+    터틀 전략(entry_high)도 하나의 **'투표자(Voter)'**로 격하시키고 가중치를 부여합니다.
+    RS(rs_val)도 **'투표자'**로 변경하거나, 별도의 MARKET_FILTER 설정으로 뺍니다.
+
+    2-2. 가중치 설정의 외부화
+    run_portfolio_backtest.py 내부의 하드코딩된 weights 딕셔너리를 config.py나 PORTFOLIO_CONFIG로 완전히 이동시킵니다.
+    효과: RSI 비중을 0으로 만들거나 2배로 늘리는 실험을 optimizer에서 바로 할 수 있게 됩니다.
+
+📌 STEP 3: 시장 상황판단 모듈 연동 (Traffic Light)
+설계도 v3.2에 있던 '시장 적응형' 로직을 부활시킵니다.
+
+    3-1. 전역 매수 차단 기능
+    process_single_stock 함수 도입부에 SPY와 QQQ의 추세를 확인하여, 시장이 '폭락장'으로 정의되면 개별 종목 점수가 아무리 높아도 매수하지 않는(Cash 100%) 로직을 추가합니다.

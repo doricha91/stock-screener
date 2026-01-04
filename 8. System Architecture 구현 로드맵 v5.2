@@ -1,0 +1,57 @@
+🗺️ System Architecture 구현 로드맵 (Integrated v5.2)
+v5.2 "The Iron Shield" Edition (Robustness, Flexible Ensemble & Hedging)
+
+🎯 핵심 목표
+과최적화 방지 (OOS): 과거 데이터 암기가 아닌 실전 대응력 확보
+앙상블 유연화: 터틀 전략 독재 타파 및 다양한 전략의 민주적 결합
+방어 기제 구축 (New): 암호화폐 하락장을 방어할 '배당+저변동성' 주식 스크리닝 기능 탑재
+
+📌 STEP 1: 검증 시스템 고도화 (The Laboratory)
+가장 시급한 작업입니다. 현재의 단순 최적화는 과거 데이터에만 딱 맞는 '기억력 테스트'가 될 위험이 큽니다.
+    1-1. OOS (Out-Of-Sample) 워크플로우 구현
+    개념: 데이터를 쪼개서 학습(Training)과 시험(Test)을 분리합니다.
+    작업: run_optimizer.py 수정
+    변수 추가: TRAIN_START, TRAIN_END (예: 2018~2021), TEST_START, TEST_END (예: 2022~2023)
+    로직: Training 기간에서 Top 10 파라미터를 뽑은 뒤, Test 기간에 그대로 적용했을 때도 수익이 나는지 검증.
+
+    1-2. 시장 국면별 검증 (Market Regime Test)
+    작업: 백테스트 결과를 '상승장(Bull)'과 '하락장(Bear)' 구간으로 나누어 성과를 출력하는 기능 추가. (내 전략이 상승장에서만 돈을 버는지 확인)
+
+📌 STEP 2: 앙상블 로직 '민주화' (Refining Ensemble)
+터틀 전략의 독재를 막고, 진정한 앙상블 시스템으로 전환합니다.
+    2-1. 매수 조건식 분리 (De-coupling)
+    현재: IF (점수 > 1) AND (신고가 돌파) AND (RS > 0) THEN BUY
+    변경: IF (점수 > Threshold) THEN BUY
+    상세: 터틀 전략(entry_high)도 하나의 **'투표자(Voter)'**로 격하시키고 가중치를 부여합니다. RS(rs_val)도 **'투표자'**로 변경하거나, 별도의 MARKET_FILTER 설정으로 뺍니다.
+
+    2-2. 가중치 설정의 외부화
+    작업: run_portfolio_backtest.py 내부의 하드코딩된 weights 딕셔너리를 config.py나 PORTFOLIO_CONFIG로 완전히 이동시킵니다.
+    효과: RSI 비중을 0으로 만들거나 2배로 늘리는 실험을 optimizer에서 바로 할 수 있게 됩니다.
+
+📌 STEP 3: 시장 상황판단 모듈 연동 (Traffic Light)
+설계도 v3.2에 있던 '시장 적응형' 로직을 부활시킵니다.
+    3-1. 전역 매수 차단 기능
+    작업: process_single_stock 함수 도입부에 SPY와 QQQ의 추세를 확인하여, 시장이 '폭락장'으로 정의되면 개별 종목 점수가 아무리 높아도 매수하지 않는(Cash 100%) 로직을 추가합니다.
+
+📌 STEP 4: 펀더멘털 & 방어 기제 구축 (The Hedge) ✨ [New]
+암호화폐 시장의 변동성을 상쇄하고, 안정적인 현금흐름(배당)을 만들 '월급쟁이 안심 통장'용 로직입니다.
+
+    4-1. 재무 데이터 파이프라인 구축 (Fundamental Data)
+    목표: 차트(기술적 분석)만 보는 반쪽짜리 스크리너에서 탈피.
+    작업: data_manager.py 업데이트
+    상세: yfinance 등을 활용해 시가총액(Market Cap), 배당수익률(Dividend Yield), 베타(Beta), 배당성향(Payout Ratio) 정보를 가져오는 함수 구현.
+
+    4-2. 펀더멘털 필터링 로직 (The Sieve)
+    목표: 우량주와 방어주만 남기고 잡주를 사전에 제거.
+    작업: main.py 내 종목 스캔 루프 전처리 추가
+    로직: 시가총액 > $10B (대형주 한정)
+        배당수익률 > 2.0% (현금흐름 확보)
+    베타 < 0.8 (저변동성, 코인 하락장 방어용) 위 조건을 만족하지 못하면 기술적 분석을 돌리지 않고 continue 처리.
+
+    4-3. '방어형' 앙상블 모드 설정 (Defensive Config)
+    목표: 하락장/횡보장에 특화된 매매 전략 세팅값 마련.
+    작업: config.py 또는 main.py 설정 분리
+    상세: turtle_weight (추세추종) 축소: 2.0 → 0.5
+        rsi_weight (과매도 반등) 확대: 1.0 → 2.0
+        bbs_weight (볼린저밴드 하단) 확대: 1.0 → 2.0
+        stop_loss_atr: 2.0 → 1.5 (손절을 더 짧게)

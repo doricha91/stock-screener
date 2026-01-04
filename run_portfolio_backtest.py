@@ -29,6 +29,15 @@ PORTFOLIO_CONFIG = {
     'score_threshold': 1.0,
     'turtle_weight': 1.0,
     'rs_weight': 3.0,
+    'rsi_weight': 1.0,
+    'sma_weight': 1.0,
+    'bbands_weight': 1.0,
+    'macd_weight': 1.0,
+    'bbs_weight': 1.0,
+    'dema_weight': 1.0,
+    'obv_weight': 0.5,
+    'mfi_weight': 0.5,
+    'vol_spike_weight': 0.5,
     'atr_period': 20,
     'rsi_period': 14,
     'sma_short_period': 50,
@@ -115,9 +124,15 @@ def process_single_stock(args):
         # 점수 합산
         weights = {
             'turtle': context.get('turtle_weight', 1.0),
-            'rsi': 1.0, 'sma': 1.0, 'bbands': 1.0,
-            'macd': 1.0, 'bbs': 1.0, 'dema': 1.0,
-            'obv': 0.5, 'mfi': 0.5, 'vol_spike': 0.5,
+            'rsi': context.get('rsi_weight', 1.0),
+            'sma': context.get('sma_weight', 1.0),
+            'bbands': context.get('bbands_weight', 1.0),
+            'macd': context.get('macd_weight', 1.0),
+            'bbs': context.get('bbs_weight', 1.0),
+            'dema': context.get('dema_weight', 1.0),
+            'obv': context.get('obv_weight', 0.5),
+            'mfi': context.get('mfi_weight', 0.5),
+            'vol_spike': context.get('vol_spike_weight', 0.5),
             'rs': context.get('rs_weight', 0.0)
         }
 
@@ -135,7 +150,6 @@ def process_single_stock(args):
 
         # 신호 생성
         df['buy_signal'] = (df['score'] >= context['score_threshold']) & \
-                           (df['close'] > df['entry_high']) & \
                            (df['rs_val'] > 0)
 
         df['sell_signal'] = df['close'] < df['exit_low']
@@ -156,7 +170,8 @@ def process_single_stock(args):
 # ==========================================
 def prepare_market_data(config=PORTFOLIO_CONFIG):
     """
-    config를 인자로 받아서 워커들에게 전달
+    config를 인자로 받아서 워커들에게 전달하고,
+    config에 설정된 기간(start_date ~ end_date)의 데이터만 필터링하여 반환합니다.
     """
     print("⏳ [Step 1] 나스닥 100 종목 리스트 DB 조회...")
     conn = sqlite3.connect("market_data.db")
@@ -169,8 +184,10 @@ def prepare_market_data(config=PORTFOLIO_CONFIG):
     if not target_tickers:
         target_tickers = data_manager.get_ticker_list()
 
+    # [수정] 지표 계산을 위해 데이터는 넉넉하게 미리(2017년부터) 가져옵니다.
+    # (백테스트 시작이 2018년이라도, 이평선 계산 등을 위해 이전 데이터가 필요함)
     print("⏳ [Step 2] 데이터 로드 중 (Bulk Load)...")
-    df_all = data_manager.get_all_price_data_bulk(start_date='2017-06-01')
+    df_all = data_manager.get_all_price_data_bulk(start_date='2013-01-01')
     if df_all.empty: return {}, []
 
     try:
@@ -197,10 +214,23 @@ def prepare_market_data(config=PORTFOLIO_CONFIG):
 
     if not all_signals: return {}, []
 
-    print("🔄 데이터 병합 중...")
+    print("🔄 데이터 병합 및 기간 필터링 중...")
     full_df = pd.concat(all_signals)
     full_df['date'] = pd.to_datetime(full_df['date'])
-    full_df = full_df[full_df['date'] >= '2018-01-01'].sort_values(['date', 'symbol'])
+
+    # ==============================================================================
+    # [수정된 부분] Config에서 날짜를 받아와서 필터링 (OOS 검증용)
+    # ==============================================================================
+    # 1. config에서 날짜 가져오기 (없으면 기본값 사용)
+    start_date = config.get('start_date', '2018-01-01')
+    end_date = config.get('end_date', '2025-12-31')
+
+    # 2. 해당 기간의 데이터만 남기기 (Masking)
+    mask = (full_df['date'] >= start_date) & (full_df['date'] <= end_date)
+    full_df = full_df.loc[mask].sort_values(['date', 'symbol'])
+
+    print(f"   👉 설정 기간: {start_date} ~ {end_date} (데이터 수: {len(full_df)})")
+    # ==============================================================================
 
     return {date: data for date, data in full_df.groupby('date')}, full_df['date'].unique()
 
