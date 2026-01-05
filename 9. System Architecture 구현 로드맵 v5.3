@@ -1,0 +1,61 @@
+🗺️ System Architecture 구현 로드맵 (Integrated v5.3)
+v5.3 "The Unsinkable Ship" Edition (Dynamic Adaptation & Quality Control)
+
+🎯 핵심 목표
+IS/OOS 괴리 해소: 과거에만 잘하는 전략이 아닌, 현재 시장 성격에 맞춰 진화하는 시스템 구축.
+동적 리스크 관리: 시장이 위험할 때는 알아서 몸을 사리고(비중 축소), 기회일 때 베팅하는 로직 탑재.
+잡주 필터링 (Quality): 차트만 예쁜 부실 기업을 펀더멘털 데이터로 사전 차단.
+
+📌 STEP 1: 시장 국면별 대응 시스템 (The Brain)
+"비올 땐 우산을 쓴다" - 가장 시급한 과제이자 OOS 괴리를 줄이는 1순위 방법론입니다.
+    1-1. 시장 상태 판단 모듈 (market_analyzer.py 고도화)
+    목표: 현재 시장이 상승장(Bull), 하락장(Bear), 횡보장(Sideways)인지 정의.
+    작업: market_analyzer.py 업데이트
+    로직:
+        추세: SPY 주가 vs 200일 이동평균선 위치 비교.
+        공포: VIX 지수 레벨 확인 (예: 30 이상이면 극단적 공포).
+        모멘텀: 나스닥 100 종목 중 20일 이평선 위에 있는 종목 비율(Market Breadth).
+
+    1-2. 국면별 전략 스위칭 (Dynamic Logic)
+    목표: 시장 상태에 따라 config를 동적으로 변경하여 대응.
+    작업: run_portfolio_backtest.py 및 run_live_trading.py 수정
+    상세 구현:
+        Bull Market: 기존 앙상블 가중치 유지, 현금 비중 0%.
+        Bear Market: 추세추종(turtle) 가중치 0, 역추세(rsi, bbands) 가중치 상향, 또는 전체 매수 차단(Cash 100%).
+        Crash (폭락): 신규 매수 금지 및 기존 보유 종목 손절 라인 타이트하게 변경 (Trailing Stop 3.0 -> 1.5).
+
+📌 STEP 2: 동적 자금 관리 (The Shock Absorber)
+"위험하면 적게 건다" - 파산 위험을 수학적으로 제거하는 2순위 방법론입니다.
+    2-1. 변동성 역가중 (Volatility Targeting)
+    목표: 1/N 균등 배분의 한계 극복 (변동성 큰 종목을 많이 사서 계좌가 녹는 현상 방지).
+    작업: run_portfolio_backtest.py 내 calculate_shares 함수 전면 수정.
+    로직:
+        기존: 매수 금액 = 총자본 / 종목수
+        변경: 매수 금액 = (총자본 * 목표 리스크 1%) / (ATR * 2)
+        효과: 변동성(ATR)이 큰 종목은 적게 사고, 안정적인 종목은 많이 사서 계좌 전체의 일일 변동폭을 일정하게 유지.
+
+📌 STEP 3: 펀더멘털 필터링 (The Gatekeeper)
+"썩은 사과는 골라낸다" - 전략의 승률과 안정성을 높이는 3순위 방법론입니다.
+    3-1. 재무 데이터 파이프라인 (Data Pipeline)
+    목표: 기술적 분석(차트)을 수행하기 전, 재무 건전성 데이터를 확보.
+    작업: data_manager.py 및 database.py 업데이트.
+    상세: Yahoo Finance API 등을 통해 영업이익(Operating Income), 부채비율(Debt to Equity), 시가총액(Market Cap) 데이터 수집 및 DB 저장.
+    3-2. 퀄리티 필터 (Quality Control Logic)
+    목표: 흑자 기업과 수급이 들어온 종목만 매매 대상(universe)에 포함.
+    작업: run_portfolio_backtest.py의 process_single_stock 도입부 수정.
+    조건 예시:
+        영업이익 > 0 (적자 기업 제외)
+        거래대금 > $10M (유동성 부족 제외)
+        이 조건을 통과하지 못하면 기술적 지표 계산 없이 즉시 return None.
+
+📌 STEP 4: 워크 포워드 최적화 (The Evolution)
+"매년 진화한다" - 파라미터의 유통기한을 관리하는 4순위 방법론입니다.
+    4-1. 롤링 윈도우 최적화 엔진 (WFO Engine)
+    목표: 2015년의 최적값이 2025년에도 통할 것이라는 믿음을 버림.
+    작업: run_optimizer.py 구조 개편 (고난이도).
+    로직:
+        Loop (Year 2020 -> 2025):
+            Train: 직전 2년 데이터로 최적 파라미터 도출.
+            Trade: 도출된 파라미터로 해당 연도 매매 시뮬레이션.
+            Update: 다음 해로 이동.
+    효과: 시장 트렌드 변화(주기 단축 등)에 따라 파라미터가 자동으로 갱신됨.

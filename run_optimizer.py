@@ -18,10 +18,13 @@ params_grid = {
     # exit:15, rs_lookback:30, entry_period:20, max_positions:5, rs_weight:1.0, score_threshold:1.5, turtle weight: 1.0
 
     # [1] 핵심 변수
-    'exit_period': [15, 20],  # 익절/손절 기준일 (기본값: 10)
-    'rs_lookback': [30, 45],  # RS(상대강도) 비교 기간 (기본값: 120)
-    'entry_period': [10, 20],  # 진입(신고가) 기준일 (기본값: 20)
+    'exit_period': [15],  # 익절/손절 기준일 (기본값: 10)
+    'rs_lookback': [45],  # RS(상대강도) 비교 기간 (기본값: 120)
+    'entry_period': [20],  # 진입(신고가) 기준일 (기본값: 20)
     'max_positions': [5],  # 최대 보유 종목 수 (기본값: 4)
+
+    # [NEW] 트레일링 스탑 설정 (PortfolioDB 기능 활용)
+    'trailing_stop_multiplier': [2.5, 3.0], # ATR의 N배만큼 하락하면 이익 실현/손절
 
     # [2] 필터링 및 핵심 가중치
     'score_threshold': [1.5],  # 진입 점수 문턱 (기본값: 1.0)
@@ -48,12 +51,16 @@ params_grid = {
     'sma_short_period': [50],  # 단기 이평선 기간 (기본값: 50)
     'sma_long_period': [200],  # 장기 이평선 기간 (기본값: 200)
 
+
     # [5] 최적화 실험용 그리드 (필요시 주석 해제)
     # 'atr_period': [14, 20, 30],
     # 'rsi_period': [9, 14, 21],
     # 'sma_short_period': [20, 50, 60],
     # 'sma_long_period': [150, 200, 250],
 }
+
+# [NEW] 커스텀 종목 바스켓 설정 (원하는 종목만 테스트하려면 주석 해제)
+# PORTFOLIO_CONFIG['target_tickers'] = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'GOOGL', 'META']
 
 DB_PATH = "backtest_log.db"
 TABLE_NAME = "optimization_log"          # Phase 1: 학습 결과 저장 (기존 기능)
