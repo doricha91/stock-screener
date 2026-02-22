@@ -1,10 +1,7 @@
 import itertools
 import pandas as pd
 import sqlite3
-from datetime import datetime
-import data_manager
-import strategy
-import indicator
+from screener import data_manager, strategy, indicator
 from backtesting import engine, metrics
 from tqdm import tqdm
 
@@ -18,7 +15,7 @@ def generate_param_combinations(grid):
 
 # [재사용 2] DB 저장 함수 (테이블명만 변경)
 def save_result_to_db(result_data):
-    conn = sqlite3.connect("backtest_log.db")
+    conn = sqlite3.connect("../../outputs/backtest_log.db")
     df_result = pd.DataFrame([result_data])
     try:
         df_result.to_sql('ensemble_optimization_log', conn, if_exists='append', index=False)

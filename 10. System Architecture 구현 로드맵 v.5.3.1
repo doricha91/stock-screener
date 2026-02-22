@@ -1,0 +1,65 @@
+🗺️ System Architecture 구현 로드맵 v5.3.1
+"Project Iron Dome" (다층 방어 시스템 구축 및 검증)
+
+🎯 핵심 목표
+5대 안전장치 구현: 서킷브레이커, 이평선 크로스, 마켓 브레드스, 고점 대비 하락, VIX 상대 돌파 로직을 모듈화하여 구현.
+파라미터의 자유화: 모든 임계값(Threshold)을 하드코딩 없이 config.py에서 제어 가능하도록 설정.
+조합 최적화 (Combinatorial Testing): 사용자가 원하는 안전장치만 골라서(예: 서킷브레이커 + 고점하락) 백테스트할 수 있는 '조립식 구조' 완성.
+
+📌 STEP 1: 설정 고도화 (Configuration)
+목표: 5가지 안전장치의 '민감도'를 config.py에서 한눈에 보고 수정할 수 있게 만듭니다.
+
+작업 파일: config.py
+추가 내용 (Config Structure):
+------------------------------------------------------------------------
+# [Safety Mechanisms Settings]
+# 1. 서킷브레이커 (Circuit Breaker)
+USE_CIRCUIT_BREAKER = True
+CB_DROP_THRESHOLD = -3.0  # 전일 대비 -3% 이상 하락 시 발동
+CB_COOLDOWN_DAYS = 3      # 발동 후 3일간 매매 중단
+
+# 2. 이평선 크로스 (MA Crossover)
+USE_MA_CROSS = True
+MA_CROSS_FAST = 50
+MA_CROSS_SLOW = 200
+
+# 3. 마켓 브레드스 (Market Breadth)
+USE_MARKET_BREADTH = True
+BREADTH_THRESHOLD = 20.0  # 200일선 상회 종목 비율이 20% 미만이면 위험
+
+# 4. 고점 대비 하락 (Drawdown Trigger)
+USE_DRAWDOWN_TRIGGER = True
+DD_LOOKBACK = 252         # 1년(252일) 고점 기준
+DD_THRESHOLD = -15.0      # 고점 대비 -15% 하락 시 방어 모드
+
+# 5. VIX 상대 돌파 (VIX Relative Breakout)
+USE_VIX_BREAKOUT = True
+VIX_MA_PERIOD = 20        # VIX의 20일 평균 대비
+VIX_MULTIPLIER = 1.5      # 1.5배 돌파 시 공포로 간주
+------------------------------------------------------------------------
+
+📌 STEP 2: 로직 구현 (The Brain Upgrade)
+    목표: market_analyzer.py가 위 설정값들을 읽어서 시장 상태(PANIC, BEAR, BULL)를 입체적으로 판단하게 합니다.
+    작업 파일: market_analyzer.py
+    주요 변경 사항:
+        기존의 단순 if/else 구조를 check_safety_triggers() 함수로 개편.
+        각 안전장치가 독립적으로 True/False 신호를 뱉고, 이를 종합하여 최종 국면 결정.
+        우선순위 로직 적용: 서킷브레이커(즉시 중단) > VIX/Drawdown(공포) > 추세(하락장).
+
+📌 STEP 3: 조합 테스트 환경 구축 (The Lab)
+    목표: 어떤 방패 조합이 가장 효율적인지(수익은 지키면서 MDD는 낮추는지) A/B 테스트를 할 수 있게 만듭니다.
+    작업 파일: run_optimizer.py (또는 신규 run_safety_lab.py)
+    구현 계획:
+        params_grid에 안전장치 ON/OFF 플래그를 추가하여 최적화 대상에 포함시킴.
+    시나리오 예시:
+        Case A: 기존 (SMA 200 only)
+        Case B: 기존 + 서킷브레이커
+        Case C: 서킷브레이커 + 고점 대비 하락 + VIX 상대 돌파 (속도전 조합)
+        결과 리포트에 "방어 성공 횟수" 지표 추가 (예: 서킷브레이커가 총 몇 번 작동했는지).
+
+📅 예상 작업 순서
+Config 정의: 변수명 및 기본값 확정.
+Analyzer 모듈화: 5개 로직 함수 분리 구현.
+통합: get_market_regime()에서 5개 함수 호출 및 종합 판단 로직 작성.
+검증 스크립트 작성: 특정 날짜(예: 2020-03-16)에 각 안전장치가 제대로 True를 반환하는지 단위 테스트.
+백테스트: 조합별 성능 비교.

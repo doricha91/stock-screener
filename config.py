@@ -148,3 +148,54 @@ STRATEGY_GRID_MAP = {
     'turtle': TURTLE_GRID,
     # 'bbands', 'rsi' 등도 필요하면 추가 가능
 }
+
+# 16. Market Regime Strategy Rules (The Brain)
+# 시장 국면별 대응 수칙 정의
+
+REGIME_RULES = {
+    'BULL': {
+        'description': "📈 강세장: 추세 추종 강화, 현금 0%",
+        'target_cash_ratio': 0.0,
+        'trailing_stop_multiplier': 3.0, # 여유로운 손절
+        'weights': {
+            'turtle': 1.5,   # 추세 전략 강화
+            'sma': 1.0,
+            'rsi': 0.5,      # 역추세 약화
+            'bbands': 1.0,
+            'dema': 1.2
+        }
+    },
+    'BEAR': {
+        'description': "📉 약세장: 방어 모드, 현금 50%, 역추세 단타 위주",
+        'target_cash_ratio': 0.5,        # 자산의 50%는 현금 보유
+        'trailing_stop_multiplier': 2.0, # 조금 더 타이트한 관리
+        'weights': {
+            'turtle': 0.0,   # 추세 전략 중지 (가짜 상승 주의)
+            'sma': 0.0,
+            'rsi': 2.0,      # 과낙폭 반등(RSI) 노림
+            'bbands': 1.5,   # 밴드 하단 반등 노림
+            'dema': 0.0
+        }
+    },
+    'UNSTABLE': {
+        'description': "⚠️ 혼조세: 보수적 운용, 현금 30%",
+        'target_cash_ratio': 0.3,
+        'trailing_stop_multiplier': 2.5,
+        'weights': {
+            'turtle': 0.5,
+            'sma': 0.5,
+            'rsi': 1.0,
+            'bbands': 1.5,   # 횡보장엔 볼린저밴드가 유리
+            'dema': 0.5
+        }
+    },
+    'PANIC': {
+        'description': "🚨 공포장: 생존 우선, 신규 매수 금지, 초강력 손절",
+        'target_cash_ratio': 1.0,        # 현금 100% 목표 (신규 매수 불가)
+        'trailing_stop_multiplier': 1.5, # 아주 짧은 손절 (스치면 매도)
+        'weights': {
+            # 모든 매수 신호 차단
+            'turtle': 0.0, 'sma': 0.0, 'rsi': 0.0, 'bbands': 0.0, 'dema': 0.0
+        }
+    }
+}

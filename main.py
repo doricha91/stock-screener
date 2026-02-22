@@ -1,13 +1,9 @@
-import sys
 import os
-import time
 from datetime import datetime
 
 # 모듈 임포트
-import database
-import data_collector
+from screener import data_collector, database, screener
 import market_analyzer
-import screener
 
 
 def print_header():

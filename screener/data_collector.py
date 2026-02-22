@@ -8,7 +8,7 @@ from io import StringIO
 import time
 from datetime import datetime
 
-DB_PATH = "market_data.db"
+DB_PATH = "../outputs/market_data.db"
 
 
 # --- 1. S&P 500 종목 리스트 (기존 함수 복구) ---

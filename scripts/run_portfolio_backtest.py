@@ -1,16 +1,13 @@
 import pandas as pd
 import numpy as np
-import data_manager
-import strategy
-import indicator
-from tqdm import tqdm
+from screener import data_manager, strategy, indicator
 import sqlite3
 import json
-from datetime import datetime
 import warnings
+import market_analyzer
 from multiprocessing import Pool, cpu_count
-from portfolio import PortfolioDB
-from run_portfolio_backtest2 import PORTFOLIO_CONFIG
+from screener.portfolio import PortfolioDB
+from scripts.legacy.run_portfolio_backtest2 import PORTFOLIO_CONFIG
 
 # 경고 메시지 차단
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -189,7 +186,7 @@ def prepare_market_data(config=PORTFOLIO_CONFIG):
     else:
         # 2. 기존 로직 (NASDAQ100 조회)
         print("⏳ [Step 1] 나스닥 100 종목 리스트 DB 조회...")
-        conn = sqlite3.connect("market_data.db")
+        conn = sqlite3.connect("../outputs/market_data.db")
         cursor = conn.cursor()
         cursor.execute("SELECT symbol FROM tickers WHERE listing_board = 'NASDAQ100'")
         rows = cursor.fetchall()
@@ -266,21 +263,56 @@ def run_backtest_with_config(config, verbose=False):
     if not market_data: return None
 
     # 2. PortfolioDB 초기화 (속도를 위해 메모리 DB 사용)
-    # PortfolioDB는 portfolio.py에서 import 해야 합니다.
     pf = PortfolioDB(db_path=":memory:", initial_cash=config['initial_capital'])
 
-    # 자산 흐름 기록용 리스트 (CAGR, MDD 계산용)
+    # 자산 흐름 기록용 리스트
     equity_history = []
+
+    # [신규] 이전 국면 기억용 변수 (로그 출력용)
+    prev_regime_name = None
+
+    # [신규] 목표 현금 비중 초기화 (기본 0%)
+    target_cash_ratio = 0.0
 
     # ----------------------------------------------------------------------
     # 📅 일별 시뮬레이션 루프 시작
     # ----------------------------------------------------------------------
     for date in date_list:
+        date_str = date.strftime('%Y-%m-%d')  # [필수] 날짜 문자열 변환
+        if config.get('use_market_regime', True):
+            # ==================================================================
+            # 🧠 [The Brain] 국면 판단 및 동적 설정 적용
+            # ==================================================================
+            regime_name, regime_rule = market_analyzer.get_market_regime(target_date=date_str)
+
+            # 상태가 변했을 때만 로그 출력
+            if regime_name != prev_regime_name:
+                if verbose:
+                    print(f"📢 [{date_str}] 시장 국면 변경: {prev_regime_name} ➔ {regime_name}")
+                    print(f"   👉 {regime_rule['description']}")
+                prev_regime_name = regime_name
+
+            # [핵심] 현재 Config(PORTFOLIO_CONFIG)를 동적으로 업데이트
+
+            # 1) 전략 가중치 덮어쓰기
+            for strategy_name, weight in regime_rule['weights'].items():
+                key = f"{strategy_name}_weight"
+                config[key] = weight
+
+            # 2) 트레일링 스탑 민감도 변경
+            config['trailing_stop_multiplier'] = regime_rule['trailing_stop_multiplier']
+
+            # 3) 목표 현금 비중 설정 (매수 로직에서 사용)
+            target_cash_ratio = regime_rule['target_cash_ratio']
+        else:
+            # [OFF 모드] 국면 판단을 하지 않음 (기본값 유지)
+            target_cash_ratio = 0.0
+        # ==================================================================
+
         day_data = market_data[date].set_index('symbol')
         current_prices = day_data['close'].to_dict()
 
-        # [Step 1] 보유 종목 상태 업데이트 (현재가, 평가금액, 최고가 갱신)
-        # 딕셔너리 키(symbol)만 가져와서 순회
+        # [Step 1] 보유 종목 상태 업데이트
         current_positions = pf.get_positions()
         for sym in current_positions.keys():
             if sym in current_prices:
@@ -291,34 +323,40 @@ def run_backtest_with_config(config, verbose=False):
         equity_history.append({'date': date, 'equity': status['total_equity']})
 
         # [Step 3] 매도 로직 (Strategy Exit OR Trailing Stop)
-        # 매도 시 딕셔너리가 변경되므로 list로 키를 복사해서 순회
         for symbol in list(current_positions.keys()):
             if symbol not in day_data.index: continue
 
             row = day_data.loc[symbol]
             current_price = row['close']
             current_atr = row['atr']
-            pos_info = current_positions[symbol]  # 보유 정보
+            pos_info = current_positions[symbol]
 
-            # A. 트레일링 스탑 체크
+            # A. 트레일링 스탑 체크 (매일 변경된 multiplier 적용)
             ts_mult = config.get('trailing_stop_multiplier', 2.5)
             ts_triggered, _ = pf.check_trailing_stop(symbol, current_price, current_atr, ts_mult)
 
             # B. 전략 매도 신호
             signal_sell = row['sell_signal']
 
-            # 매도 실행
             if signal_sell or ts_triggered:
                 reason = "Trailing Stop" if ts_triggered else "Signal Exit"
                 pf.sell(symbol, current_price, pos_info['shares'], date, reason=reason)
 
         # [Step 4] 매수 로직 (Ensemble Entry)
-        # 다시 현재 상태 조회 (매도로 인해 현금/슬롯이 변했을 수 있음)
         status = pf.get_account_status()
         current_holdings_count = len(pf.get_positions())
 
-        # 슬롯이 남고 현금이 있을 때만 진입 시도
-        if current_holdings_count < config['max_positions'] and status['cash'] > 0:
+        # [신규] 동적 자산 배분: 현금 쿠션(Buffer) 로직
+        current_total_equity = status['total_equity']
+
+        # "지금 상황에서는 전체 자산의 N%는 무조건 현금으로 들고 있어라!"
+        required_cash = current_total_equity * target_cash_ratio
+
+        # 실제 투자에 쓸 수 있는 '가용 현금' 계산
+        available_cash_for_trading = status['cash'] - required_cash
+
+        # 슬롯이 남고, '가용 현금'이 있을 때만 진입 시도
+        if current_holdings_count < config['max_positions'] and available_cash_for_trading > 0:
             candidates = day_data[day_data['buy_signal'] == True]
 
             # 이미 보유한 종목 제외
@@ -326,28 +364,32 @@ def run_backtest_with_config(config, verbose=False):
             candidates = candidates[~candidates.index.isin(already_owned)]
 
             if not candidates.empty:
-                # RS 높은 순으로 정렬 (우선순위)
+                # RS 높은 순으로 정렬
                 candidates = candidates.sort_values(by='rs_val', ascending=False)
 
                 for symbol, row in candidates.iterrows():
                     # 반복문 안에서도 실시간 상태 확인
                     status = pf.get_account_status()
+
+                    # 갱신된 가용 현금 재계산 (중요: 앞선 매수로 현금이 줄었으므로)
+                    current_available_cash = status['cash'] - required_cash
+
                     if len(pf.get_positions()) >= config['max_positions']: break
-                    if status['cash'] < row['close']: break
+                    if current_available_cash < row['close']: break  # 가용 현금 부족하면 중단
 
                     # 자금 관리: 1/N 균등 배분
                     target_equity_per_stock = status['total_equity'] / config['max_positions']
                     shares_to_buy = int(target_equity_per_stock / row['close'])
 
-                    # 현금 부족 시 가능한 만큼만
-                    max_affordable = int(status['cash'] / row['close'])
+                    # [수정] 현금 부족 시 '가용 현금' 범위 내에서만 매수
+                    max_affordable = int(current_available_cash / row['close'])
                     shares_to_buy = min(shares_to_buy, max_affordable)
 
                     if shares_to_buy > 0:
                         pf.buy(symbol, row['close'], shares_to_buy, date, strategy_name="Ensemble")
 
     # ----------------------------------------------------------------------
-    # 📊 결과 집계 및 메트릭 계산
+    # 📊 결과 집계 및 메트릭 계산 (이하 동일)
     # ----------------------------------------------------------------------
     if not equity_history: return None
 
@@ -373,13 +415,12 @@ def run_backtest_with_config(config, verbose=False):
     # 3. 연도별 수익률 (JSON 저장용)
     yearly = history_df['equity'].resample('YE').last().pct_change() * 100
     if not yearly.empty:
-        # 첫 해 수익률 보정
         first_ret = (history_df['equity'].resample('YE').last().iloc[0] - config['initial_capital']) / config[
             'initial_capital'] * 100
         yearly.iloc[0] = first_ret
     yearly_json = json.dumps({str(k.year): round(v, 2) for k, v in yearly.items()})
 
-    # 4. 거래 기록 분석 (DB에서 조회)
+    # 4. 거래 기록 분석
     conn = pf._get_conn()
     trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn)
     conn.close()
@@ -400,16 +441,10 @@ def run_backtest_with_config(config, verbose=False):
         gross_loss = abs(loss_trades['profit'].sum())
         profit_factor = gross_profit / gross_loss if gross_loss != 0 else 99.9
 
-        # 참고: 정확한 수익률(%) 평균은 entry amount가 있어야 정확하지만, 여기선 생략
-
-    # -------------------------------------------------------
-    # [상세 리포트 출력] verbose=True 일 때만 실행
-    # -------------------------------------------------------
+    # [상세 리포트 출력]
     if verbose:
-        # analyze_results 함수는 앞서 정의해둔 것을 사용
         analyze_results(equity_history, trades_df, config['initial_capital'])
 
-    # 최종 결과 반환
     return {
         'return': total_ret,
         'cagr': cagr,

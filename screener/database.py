@@ -2,7 +2,7 @@ import sqlite3
 import os
 
 # DB 파일 경로 설정
-DB_PATH = "market_data.db"
+DB_PATH = "../outputs/market_data.db"
 
 
 def get_connection():
@@ -85,6 +85,7 @@ def create_tables():
     )
     """)
 
+    # 5. Market Status Log
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS market_status_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,7 +98,41 @@ def create_tables():
         )
         """)
 
-    print("Checking tables... (market_status_log added)")
+    # [신규 추가] 6. Daily Indicators Table (보조지표 미리 계산용)
+    # Market Breadth 계산을 위해 sma_20 등이 필수적입니다.
+    cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_indicators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT,
+                date DATE,
+                sma_20 REAL,
+                sma_50 REAL,
+                sma_200 REAL,
+                rsi_14 REAL,
+                atr_20 REAL,
+                FOREIGN KEY (symbol) REFERENCES tickers (symbol),
+                UNIQUE(symbol, date)
+            )
+        """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicator_symbol_date ON daily_indicators (symbol, date)")
+
+    # [신규] 7. Screener History Table (스크리닝 결과 저장용)
+    cursor.execute("""
+            CREATE TABLE IF NOT EXISTS screener_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATE,
+                symbol TEXT,
+                price REAL,
+                score REAL,
+                strategies TEXT,
+                market_regime TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(date, symbol)
+            )
+        """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_screener_date ON screener_history (date)")
+
+    print("Checking tables... (screener_history added)")
 
 
     conn.commit()

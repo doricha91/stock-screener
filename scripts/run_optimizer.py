@@ -18,8 +18,8 @@ params_grid = {
     # exit:15, rs_lookback:30, entry_period:20, max_positions:5, rs_weight:1.0, score_threshold:1.5, turtle weight: 1.0
 
     # [1] 핵심 변수
-    'exit_period': [15],  # 익절/손절 기준일 (기본값: 10)
-    'rs_lookback': [45],  # RS(상대강도) 비교 기간 (기본값: 120)
+    'exit_period': [10, 15, 20],  # 익절/손절 기준일 (기본값: 10)
+    'rs_lookback': [30, 45],  # RS(상대강도) 비교 기간 (기본값: 120)
     'entry_period': [20],  # 진입(신고가) 기준일 (기본값: 20)
     'max_positions': [5],  # 최대 보유 종목 수 (기본값: 4)
 
@@ -27,8 +27,8 @@ params_grid = {
     'trailing_stop_multiplier': [2.5, 3.0], # ATR의 N배만큼 하락하면 이익 실현/손절
 
     # [2] 필터링 및 핵심 가중치
-    'score_threshold': [1.5],  # 진입 점수 문턱 (기본값: 1.0)
-    'rs_weight': [1.0],  # RS 점수 가중치 (기본값: 3.0)
+    'score_threshold': [1.5, 2.0],  # 진입 점수 문턱 (기본값: 1.0)
+    'rs_weight': [1.0, 2.0],  # RS 점수 가중치 (기본값: 3.0)
     'turtle_weight': [1.0],  # 터틀(신고가) 전략 가중치 (기본값: 1.0)
 
     # [3] 추가 전략 가중치 (실험 시 주석 해제하여 사용)
@@ -62,7 +62,7 @@ params_grid = {
 # [NEW] 커스텀 종목 바스켓 설정 (원하는 종목만 테스트하려면 주석 해제)
 # PORTFOLIO_CONFIG['target_tickers'] = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'GOOGL', 'META']
 
-DB_PATH = "backtest_log.db"
+DB_PATH = "../outputs/backtest_log.db"
 TABLE_NAME = "optimization_log"          # Phase 1: 학습 결과 저장 (기존 기능)
 OOS_TABLE_NAME = "oos_validation_log"    # Phase 2: 검증 결과 저장 (신규 기능)
 

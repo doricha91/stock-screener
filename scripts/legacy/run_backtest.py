@@ -1,8 +1,6 @@
 # [ 📄 run_backtest.py (4대 전략 추가 수정본) ]
 
-import data_manager
-import indicator
-import strategy
+from screener import data_manager, strategy, indicator
 import config
 import pandas as pd
 

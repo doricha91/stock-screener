@@ -25,7 +25,7 @@ def get_nasdaq100_tickers():
 
 def fix_db_tags():
     nasdaq100 = get_nasdaq100_tickers()
-    conn = sqlite3.connect("market_data.db")
+    conn = sqlite3.connect("outputs/market_data.db")
     cursor = conn.cursor()
 
     print(f"🔧 나스닥 100 종목({len(nasdaq100)}개) 태그 업데이트 중...")

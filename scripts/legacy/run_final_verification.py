@@ -1,11 +1,6 @@
 import pandas as pd
-import numpy as np
-import data_manager
-import strategy
-import indicator
+from screener import data_manager, strategy, indicator
 from backtesting import engine, metrics
-from tqdm import tqdm
-import config
 
 # ==========================================
 # 설정 (검증할 최종 스펙)

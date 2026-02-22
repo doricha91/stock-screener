@@ -3,7 +3,7 @@ import sqlite3
 import os
 
 # 데이터베이스 파일 경로 (database.py에서 설정한 경로와 동일해야 함)
-DB_PATH = "market_data.db"
+DB_PATH = "../outputs/market_data.db"
 
 
 class DataManager:

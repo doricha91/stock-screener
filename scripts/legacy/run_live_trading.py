@@ -1,12 +1,9 @@
 # run_live_trading.py (실전 알림 봇)
 
-import pandas as pd
 import json
 import os
 import requests
-import data_manager
-import indicator
-import strategy
+from screener import data_manager, strategy, indicator
 from datetime import datetime, timedelta
 
 # ==========================================
@@ -39,7 +36,7 @@ LIVE_CONFIG = {
 }
 
 # 보유 종목 파일 경로 (현재 내가 가진 주식 목록)
-PORTFOLIO_FILE = 'my_portfolio.json'
+PORTFOLIO_FILE = '../../my_portfolio.json'
 
 
 # ==========================================

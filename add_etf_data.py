@@ -5,7 +5,7 @@ import pandas as pd
 from datetime import datetime
 
 # DB 경로
-DB_PATH = "market_data.db"
+DB_PATH = "outputs/market_data.db"
 
 
 def add_etf_to_daily_price():
