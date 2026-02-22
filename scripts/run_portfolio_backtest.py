@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+
+from market_analyzer import get_db_connection
 from screener import data_manager, strategy, indicator
 import sqlite3
 import json
@@ -186,7 +188,7 @@ def prepare_market_data(config=PORTFOLIO_CONFIG):
     else:
         # 2. 기존 로직 (NASDAQ100 조회)
         print("⏳ [Step 1] 나스닥 100 종목 리스트 DB 조회...")
-        conn = sqlite3.connect("../outputs/market_data.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT symbol FROM tickers WHERE listing_board = 'NASDAQ100'")
         rows = cursor.fetchall()

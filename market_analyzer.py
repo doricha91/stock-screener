@@ -1,10 +1,46 @@
+import os
 import sqlite3
 import pandas as pd
 import config  # 설정 파일 로드
+from pathlib import Path
 
-# [수정 1] DB 경로를 'market_data.db'로 명확히 고정
-# 백테스트 결과 DB(backtest_log.db)가 아니라, 원본 데이터 DB를 봐야 합니다.
-DB_PATH = "outputs/market_data.db"
+PROJECT_ROOT = Path(__file__).resolve().parent
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _project_root() -> Path:
+    here = Path(__file__).resolve()
+    # config.py나 .git이 있는 폴더를 프로젝트 루트로 간주
+    for p in [here.parent, *here.parents]:
+        if (p / "config.py").exists() or (p / ".git").exists():
+            return p
+    return here.parent
+
+ROOT = _project_root()
+
+def _resolve_market_db() -> Path:
+    # 1) 환경변수로 강제 지정 가능 (선택)
+    env = os.getenv("STOCK_SCREENER_MARKET_DB")
+    if env:
+        return Path(env).expanduser()
+
+    # 2) 자주 쓰는 위치 후보들
+    candidates = [
+        ROOT / "outputs" / "market_data.db",
+        ROOT / "data" / "market_data.db",
+        ROOT / "market_data.db",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+
+    # 3) 못 찾으면 명확한 에러로 안내 (빈 DB 새로 만들지 않게)
+    raise FileNotFoundError(
+        "market_data.db not found. Put it in one of: "
+        f"{(ROOT/'outputs')}, {(ROOT/'data')}, or set env STOCK_SCREENER_MARKET_DB"
+    )
+
+DB_PATH = str(_resolve_market_db())
 
 
 def get_db_connection():
