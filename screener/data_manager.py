@@ -1,24 +1,24 @@
 import pandas as pd
 import sqlite3
 import os
+from core.paths import market_db_path
 
 # 데이터베이스 파일 경로 (database.py에서 설정한 경로와 동일해야 함)
-DB_PATH = "../outputs/market_data.db"
-
 
 class DataManager:
     """
     SQLite 데이터베이스에서 주식 데이터를 조회하여 DataFrame으로 반환하는 클래스
     """
 
-    def __init__(self, db_path=DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        self.db_path = db_path or market_db_path()
         if not os.path.exists(self.db_path):
             print(f"⚠️ 경고: 데이터베이스 파일({self.db_path})을 찾을 수 없습니다.")
             print("database.py와 data_collector.py를 먼저 실행하여 DB를 구축해주세요.")
 
     def get_connection(self):
-        """DB 연결 객체 반환"""
+        if not os.path.exists(self.db_path):
+            raise FileNotFoundError(f"DB not found: {self.db_path}")
         return sqlite3.connect(self.db_path)
 
     def get_price_data(self, ticker, start_date=None, end_date=None):

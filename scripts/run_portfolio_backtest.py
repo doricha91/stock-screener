@@ -1,60 +1,22 @@
 import pandas as pd
 import numpy as np
-
-from market_analyzer import get_db_connection
 from screener import data_manager, strategy, indicator
 import sqlite3
 import json
 import warnings
 import market_analyzer
+import os
 from multiprocessing import Pool, cpu_count
 from screener.portfolio import PortfolioDB
-from scripts.legacy.run_portfolio_backtest2 import PORTFOLIO_CONFIG
+from core.portfolio_config import PORTFOLIO_CONFIG
+
 
 # 경고 메시지 차단
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# ⚙️ 포트폴리오 설정 (기본값)
-# ==========================================
-# 이 값은 참고용일 뿐, 실제 실행 시에는 외부에서 주입된 config가 사용됩니다.
-PORTFOLIO_CONFIG = {
-    'initial_capital': 100000.0,
-    'risk_per_trade': 0.05,
-    'max_positions': 4,
-    'entry_period': 20,
-    'exit_period': 10,
-    'score_threshold': 1.0,
+FAST_MODE = os.getenv("FAST_MODE", "0") == "1"
 
-    # 가중치 변수들
-    'turtle_weight': 1.0,
-    'rs_weight': 3.0,
-    'rsi_weight': 1.0,
-    'sma_weight': 1.0,
-    'bbands_weight': 1.0,
-    'macd_weight': 1.0,
-    'bbs_weight': 1.0,
-    'dema_weight': 1.0,
-    'obv_weight': 0.5,
-    'mfi_weight': 0.5,
-    'vol_spike_weight': 0.5,
-
-    # 지표 기간
-    'atr_period': 20,
-    'rsi_period': 14,
-    'sma_short_period': 50,
-    'sma_long_period': 200,
-    'bbands_period': 20,
-    'macd_fast_period': 12,
-    'macd_slow_period': 26,
-    'dema_short_period': 20,
-    'mfi_period': 14,
-    'rs_lookback': 120,
-
-    # 트레일링 스탑 설정
-    'trailing_stop_multiplier': 2.5
-}
 
 # ==========================================
 # 전역 변수 및 워커 함수 (멀티프로세싱용)
@@ -188,7 +150,7 @@ def prepare_market_data(config=PORTFOLIO_CONFIG):
     else:
         # 2. 기존 로직 (NASDAQ100 조회)
         print("⏳ [Step 1] 나스닥 100 종목 리스트 DB 조회...")
-        conn = get_db_connection()
+        conn = market_analyzer.get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT symbol FROM tickers WHERE listing_board = 'NASDAQ100'")
         rows = cursor.fetchall()
@@ -201,7 +163,10 @@ def prepare_market_data(config=PORTFOLIO_CONFIG):
     # [수정] 지표 계산을 위해 데이터는 넉넉하게 미리(2017년부터) 가져옵니다.
     # (백테스트 시작이 2018년이라도, 이평선 계산 등을 위해 이전 데이터가 필요함)
     print("⏳ [Step 2] 데이터 로드 중 (Bulk Load)...")
-    df_all = data_manager.get_all_price_data_bulk(start_date='2013-01-01')
+    bulk_start = '2013-01-01'
+    if FAST_MODE:
+        bulk_start = '2024-01-01'  # 지표 계산 여유 감안해 1~2년만
+    df_all = data_manager.get_all_price_data_bulk(start_date=bulk_start)
     if df_all.empty: return {}, []
 
     try:
@@ -557,6 +522,11 @@ def analyze_results(equity_history, trades_df, initial_capital):
 
 
 if __name__ == "__main__":
+    if FAST_MODE:
+        PORTFOLIO_CONFIG = PORTFOLIO_CONFIG.copy()
+        PORTFOLIO_CONFIG['start_date'] = '2024-01-01'
+        PORTFOLIO_CONFIG['end_date'] = '2024-06-30'
+        PORTFOLIO_CONFIG['use_market_regime'] = False  # 빠른 확인용(선택)
     run_portfolio_simulation()
 
 
