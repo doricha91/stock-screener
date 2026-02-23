@@ -4,8 +4,9 @@ import time
 import sqlite3
 import json
 from datetime import datetime
-from run_portfolio_backtest import run_backtest_with_config, PORTFOLIO_CONFIG
+from scripts.run_portfolio_backtest import run_backtest_with_config, PORTFOLIO_CONFIG
 import config
+from pathlib import Path
 
 # ==============================================================================
 # 🧪 [자유롭게 수정 가능] 테스트할 변수들의 조합 (Grid Search)
@@ -18,17 +19,17 @@ params_grid = {
     # exit:15, rs_lookback:30, entry_period:20, max_positions:5, rs_weight:1.0, score_threshold:1.5, turtle weight: 1.0
 
     # [1] 핵심 변수
-    'exit_period': [10, 15, 20],  # 익절/손절 기준일 (기본값: 10)
-    'rs_lookback': [30, 45],  # RS(상대강도) 비교 기간 (기본값: 120)
+    'exit_period': [10],  # 익절/손절 기준일 (기본값: 10)
+    'rs_lookback': [30],  # RS(상대강도) 비교 기간 (기본값: 120)
     'entry_period': [20],  # 진입(신고가) 기준일 (기본값: 20)
     'max_positions': [5],  # 최대 보유 종목 수 (기본값: 4)
 
     # [NEW] 트레일링 스탑 설정 (PortfolioDB 기능 활용)
-    'trailing_stop_multiplier': [2.5, 3.0], # ATR의 N배만큼 하락하면 이익 실현/손절
+    'trailing_stop_multiplier': [2.5], # ATR의 N배만큼 하락하면 이익 실현/손절
 
     # [2] 필터링 및 핵심 가중치
-    'score_threshold': [1.5, 2.0],  # 진입 점수 문턱 (기본값: 1.0)
-    'rs_weight': [1.0, 2.0],  # RS 점수 가중치 (기본값: 3.0)
+    'score_threshold': [1.5],  # 진입 점수 문턱 (기본값: 1.0)
+    'rs_weight': [1.0],  # RS 점수 가중치 (기본값: 3.0)
     'turtle_weight': [1.0],  # 터틀(신고가) 전략 가중치 (기본값: 1.0)
 
     # [3] 추가 전략 가중치 (실험 시 주석 해제하여 사용)
@@ -60,9 +61,21 @@ params_grid = {
 }
 
 # [NEW] 커스텀 종목 바스켓 설정 (원하는 종목만 테스트하려면 주석 해제)
-# PORTFOLIO_CONFIG['target_tickers'] = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'GOOGL', 'META']
+PORTFOLIO_CONFIG['target_tickers'] = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'GOOGL', 'META']
 
-DB_PATH = "../outputs/backtest_log.db"
+def _project_root() -> Path:
+    here = Path(__file__).resolve()
+    for p in [here.parent, *here.parents]:
+        if (p / "config.py").exists() or (p / ".git").exists():
+            return p
+    return here.parent
+
+ROOT = _project_root()
+OUTPUTS_DIR = ROOT / "outputs"
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH = str(OUTPUTS_DIR / "backtest_log.db")
+
 TABLE_NAME = "optimization_log"          # Phase 1: 학습 결과 저장 (기존 기능)
 OOS_TABLE_NAME = "oos_validation_log"    # Phase 2: 검증 결과 저장 (신규 기능)
 
