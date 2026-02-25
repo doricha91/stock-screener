@@ -19,3 +19,6 @@ def market_db_path() -> str:
     if env:
         return str(Path(env).expanduser())
     return str(OUTPUTS / "market_data.db")
+
+def backtest_log_db_path() -> str:
+    return str(OUTPUTS / "backtest_log.db")
