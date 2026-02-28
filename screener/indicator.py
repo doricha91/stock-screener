@@ -331,36 +331,53 @@ def add_volume_indicators(df, context):
     """
     거래량 관련 보조지표를 계산합니다.
     """
-    if df is None or df.empty: return None
+    if df is None or df.empty:
+        return None
+
+    # (중요) slice로 들어오는 경우 SettingWithCopy/예상치 못한 동작 방지
+    df = df.copy()
 
     mfi_period = context.get('mfi_period', 14)
 
     try:
-        # 데이터 타입 강제 변환
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
+        # 숫자 변환을 더 안전하게 (astype(float)보다 견고)
+        for c in ['high', 'low', 'close', 'volume']:
+            df[c] = pd.to_numeric(df[c], errors='coerce').astype('float64')
 
-        # 1. OBV
+        # 필수값이 너무 많이 NaN이면 계산 의미 없으니 컷(선택)
+        if df[['high','low','close','volume']].isna().all(axis=1).any():
+            # 한 행이라도 전부 NaN이면 그대로 진행해도 되지만,
+            # 원하시면 여기서 return None or dropna 하셔도 됩니다.
+            pass
+
+        # 1) OBV
         df['obv'] = ta.obv(df['close'], df['volume'])
         df['obv_sma'] = ta.sma(df['obv'], length=20)
 
-        # 2. MFI (경고 해결: 미리 빈 컬럼을 float 타입으로 생성)
-        df['mfi'] = np.nan  # [중요] 미리 생성
-        df['mfi'] = df['mfi'].astype(float)  # 타입 확정
+        # 2) MFI (manual implementation: avoids pandas-ta internal dtype warning)
+        tp = (df['high'] + df['low'] + df['close']) / 3.0
+        mf = tp * df['volume']
 
-        # 계산 후 할당
-        mfi_values = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=mfi_period)
-        df['mfi'] = mfi_values
+        tp_diff = tp.diff()
+        pos_mf = mf.where(tp_diff > 0, 0.0)
+        neg_mf = mf.where(tp_diff < 0, 0.0).abs()
 
-        # 3. Volume Spike
+        pos_sum = pos_mf.rolling(mfi_period, min_periods=mfi_period).sum()
+        neg_sum = neg_mf.rolling(mfi_period, min_periods=mfi_period).sum()
+
+        mfr = pos_sum / neg_sum.replace(0.0, np.nan)
+        df['mfi'] = (100.0 - (100.0 / (1.0 + mfr))).astype('float64')
+
+        # 3) Volume Spike
         df['vol_sma'] = ta.sma(df['volume'], length=20)
-        vol_mean = df['vol_sma'].replace(0, 1)
+
+        # 0으로 나누기 방지: 0은 NaN으로 바꾸고, ratio도 NaN 처리
+        vol_mean = df['vol_sma'].replace(0, np.nan)
         df['vol_spike_ratio'] = df['volume'] / vol_mean
 
-    except Exception as e:
-        # 에러가 나면 해당 종목은 조용히 넘어갑니다.
+    except Exception:
+        # 원인 추적이 필요하면 아래처럼 최소한의 정보라도 남기는 걸 권장드립니다.
+        # print(f"[add_volume_indicators] error: {e}")
         return None
 
     return df

@@ -1,12 +1,8 @@
 import pandas as pd
-import numpy as np
 import sqlite3  # DB 저장을 위해 추가
-import data_manager
-import strategy
-import indicator
+from screener import data_manager, strategy, indicator
 from backtesting import engine, metrics
 from tqdm import tqdm
-import config
 from datetime import datetime
 
 # ==========================================

@@ -1,0 +1,45 @@
+🌩️ 투신(God of Investment) v0.0 : The Hyper-Growth Engine
+💀 핵심 철학 (Core Philosophy)
+    자산 변경: 주식은 너무 느리다. 암호화폐(Crypto) 선물 또는 **3배 레버리지 ETF(TQQQ/SOXL)**로 전장을 옮긴다.
+    시간 단축: 일봉(Day)은 너무 느리다. 분봉(Minute) ~ 시간봉(Hour) 단위로 매매 빈도를 높인다.
+    방향성: 상승장만 먹어서는 100%가 안 된다. 하락장에서도 돈을 버는 숏(Short/Inverse) 전략을 탑재한다.
+    기술 스택: for문으로 돌리는 백테스트는 끝났다. **asyncio (비동기 처리)**와 WebSocket을 도입한다.
+
+🏗️ 시스템 아키텍처 (System Architecture)
+📌 STEP 1: 엔진 교체 (Assets & Data)
+    "24시간 잠들지 않는 시장으로 이동"
+    타겟 자산:
+        Binance/Bybit Futures (선물): BTCUSDT, ETHUSDT (레버리지 3x ~ 5x 사용)
+        대안: TQQQ, SQQQ (미국 주식 3배 레버리지 / 인버스)
+    데이터 수집 방식 변경:
+        Old: yfinance로 하루 한 번 다운로드.
+        New: WebSocket Real-time Data. 거래소 서버와 소켓을 연결해 가격이 변할 때마다 즉시 데이터를 수신(Tick Data)합니다.
+    기술 스택:
+        라이브러리: ccxt.pro (Python 비동기 암호화폐 라이브러리)
+        DB: TimescaleDB 또는 Redis (초고속 시계열 데이터 저장용)
+
+📌 STEP 2: 전략의 진화 (The Strategy)
+    "확률에 기반한 베팅 (Odds & Kelly)"
+    기존의 단순 지표(RSI, MA) 대신 통계와 변동성을 활용합니다.
+    2-1. 변동성 돌파 (Volatility Breakout) + 레버리지
+        논리: "오늘 움직임이 심상치 않다" 싶으면 추세 방향으로 레버리지를 태워 진입.
+        공식: 매수 = 현재가 + (전일 고가 - 전일 저가) * K (K는 0.5 등 조정)
+        이 전략은 래리 윌리엄스가 입증한 단기 고수익 전략의 정석입니다.
+
+    2-2. 머신러닝 기반 추세 예측 (ML Filter)
+        논리: 보조지표 20개를 XGBoost나 LightGBM 모델에 넣어 "다음 15분 뒤 오를 확률"을 예측.
+        실행: 확률이 60% 이상일 때만 진입. (무의미한 매매 줄이기)
+
+📌 STEP 3: 리스크 관리 (The Safety Pin)
+    "죽지만 않으면 복리로 이긴다"
+    켈리 공식 (Kelly Criterion):
+        내 승률과 손익비를 계산하여 **"이번 판에 내 자산의 몇 %를 걸어야 수학적으로 최대 이익인가?"**를 계산해서 베팅합니다. (고정 비중 20%가 아님)
+    동적 손절 (Dynamic Cut):
+        단순 -2% 손절이 아니라, ATR(변동성) 기반으로 시장이 조용하면 짧게, 요동치면 길게 손절 라인을 잡습니다.
+
+📌 STEP 4: 실행 속도 (Execution)
+    "남들보다 빠르게"
+    비동기 처리 (Asyncio):
+        데이터 수신, 전략 계산, 주문 전송을 동시에 처리합니다. (기존 코드는 순차적이라 느림)
+    서버 구축:
+        집에 있는 PC는 안 됩니다. AWS EC2 (도쿄 리전) 등 거래소 서버와 물리적으로 가까운 곳에 봇을 띄웁니다.

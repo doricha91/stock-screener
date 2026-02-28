@@ -1,7 +1,7 @@
 # [ 📄 optimizer.py (신규 파일) ]
 
 import config
-from run_backtest import run_single_backtest  # 리팩토링된 단일 실행 함수 임포트
+from scripts.legacy.run_backtest import run_single_backtest  # 리팩토링된 단일 실행 함수 임포트
 from tqdm import tqdm  # (선택) 진행률 표시를 위해
 
 

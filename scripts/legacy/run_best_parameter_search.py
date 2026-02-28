@@ -1,12 +1,9 @@
 import itertools
 import pandas as pd
 import sqlite3
-import data_manager
-import strategy
-import indicator
+from screener import data_manager, strategy, indicator
 from backtesting import engine, metrics
 from tqdm import tqdm
-import config
 
 # ==========================================
 # 1. 실험할 파라미터 그리드 (핵심 변수)
@@ -144,7 +141,7 @@ def main():
     df_res = pd.DataFrame(results)
 
     # DB 저장
-    conn = sqlite3.connect("backtest_log.db")
+    conn = sqlite3.connect("../../outputs/backtest_log.db")
     df_res.to_sql('final_optimization_results', conn, if_exists='replace', index=False)
     conn.close()
 

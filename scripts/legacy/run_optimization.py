@@ -1,13 +1,9 @@
 import itertools
 import pandas as pd
-import csv
-import os
 import sqlite3
 from datetime import datetime
 import config
-import data_manager
-import indicator
-import strategy
+from screener import data_manager, strategy, indicator
 from market_analyzer import analyze_market_status
 from backtesting import engine, metrics
 

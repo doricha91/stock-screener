@@ -1,7 +1,5 @@
 # check_env.py (진단용)
-import data_manager
-import indicator
-import pandas as pd
+from screener import data_manager, indicator
 
 
 def check():

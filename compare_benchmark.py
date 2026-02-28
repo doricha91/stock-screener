@@ -1,6 +1,4 @@
-import pandas as pd
-import data_manager
-import numpy as np
+from screener import data_manager
 
 # ==========================================
 # 사용자 전략 성적 (방금 나온 결과 입력)

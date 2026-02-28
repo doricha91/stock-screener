@@ -1,6 +1,7 @@
 import pandas as pd
 from tqdm import tqdm
 import time
+import sqlite3
 
 # 만든 모듈들 임포트
 import data_manager
@@ -24,8 +25,8 @@ STRATEGY_WEIGHTS = {
 }
 
 # 매수 추천을 위한 최소 합산 점수
-# 의미: "터틀 전략(2점) 하나만 성공해도 매수 후보에 올린다."
-SCORE_THRESHOLD = 2.0
+# config.py에 있는 값을 우선 사용하고, 없으면 기본값 2.0 사용
+SCORE_THRESHOLD = getattr(config, 'SCORE_THRESHOLD', 2.0)
 
 # 지표 계산에 사용할 기본 파라미터 (백테스트 최적값 적용 가능)
 DEFAULT_PARAMS = {
@@ -50,14 +51,17 @@ def _prepare_data_for_ensemble(df):
     if df is None or df.empty: return None
 
     # 각 전략에 필요한 지표 함수들을 순차적으로 호출
-    # (indicator.py에 정의된 함수들)
-    df = indicator.add_turtle_indicators(df, DEFAULT_PARAMS)
-    df = indicator.add_rsi_indicators(df, DEFAULT_PARAMS)
-    df = indicator.add_sma_indicators(df, DEFAULT_PARAMS)
-    df = indicator.add_bollinger_band_indicators(df, DEFAULT_PARAMS)
-    df = indicator.add_macd_indicators(df, DEFAULT_PARAMS)
-    df = indicator.add_bbs_indicators(df, DEFAULT_PARAMS)
-    df = indicator.add_dema_indicators(df, DEFAULT_PARAMS)
+    try:
+        df = indicator.add_turtle_indicators(df, DEFAULT_PARAMS)
+        df = indicator.add_rsi_indicators(df, DEFAULT_PARAMS)
+        df = indicator.add_sma_indicators(df, DEFAULT_PARAMS)
+        df = indicator.add_bollinger_band_indicators(df, DEFAULT_PARAMS)
+        df = indicator.add_macd_indicators(df, DEFAULT_PARAMS)
+        df = indicator.add_bbs_indicators(df, DEFAULT_PARAMS)
+        df = indicator.add_dema_indicators(df, DEFAULT_PARAMS)
+    except Exception as e:
+        # 지표 계산 중 에러 발생 시 해당 종목 스킵
+        return None
 
     return df
 
@@ -81,6 +85,75 @@ def _calculate_ensemble_score(latest_row):
 
 
 # ==========================================
+# 💾 DB 저장 함수 (신규 추가)
+# ==========================================
+def save_results_to_db(df_result):
+    """
+    스크리닝 결과를 DB의 'screener_history' 테이블에 저장합니다.
+    """
+    if df_result is None or df_result.empty:
+        return
+
+    # DB 경로 (config 혹은 하드코딩)
+    db_path = getattr(config, 'BACKTEST_DB_NAME', '../outputs/market_data.db')
+    # 주의: market_data.db에 저장할지, backtest_log.db에 저장할지 선택 필요.
+    # 여기서는 데이터 관리를 위해 'market_data.db'를 기본으로 추천합니다.
+    if hasattr(config, 'MARKET_DB_NAME'):
+        db_path = config.MARKET_DB_NAME
+    else:
+        db_path = '../outputs/market_data.db'
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    print(f"\n💾 DB 저장 중... ({db_path})")
+
+    saved_count = 0
+    try:
+        # 테이블이 없으면 생성 (혹시 모르니 안전장치)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS screener_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATE,
+                symbol TEXT,
+                price REAL,
+                score REAL,
+                strategies TEXT,
+                market_regime TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(date, symbol)
+            )
+        """)
+
+        # 데이터 삽입
+        for _, row in df_result.iterrows():
+            try:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO screener_history 
+                    (date, symbol, price, score, strategies, market_regime)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    row['Date'],
+                    row['Symbol'],
+                    float(row['Price']),
+                    float(row['Score']),
+                    row['Strategies'],
+                    row['Market']
+                ))
+                saved_count += 1
+            except Exception as e:
+                print(f"   ⚠️ {row['Symbol']} 저장 실패: {e}")
+
+        conn.commit()
+        print(f"✅ 총 {saved_count}건의 추천 종목이 DB에 저장되었습니다.")
+
+    except Exception as e:
+        print(f"❌ DB 연결/저장 오류: {e}")
+    finally:
+        conn.close()
+
+
+# ==========================================
 # 🚀 메인 스크리너 함수
 # ==========================================
 
@@ -92,27 +165,38 @@ def run_screener():
     4. 결과 리포트 반환 (Reporting)
     """
     print("\n" + "=" * 50)
-    print("🕵️  STOCK SCREENER v4.0 (Ensemble Edition)")
+    print("🕵️  STOCK SCREENER v5.3 (The Brain Edition)")
     print("=" * 50)
 
-    # 1. 시장 상태 확인
+    # 1. 시장 상태 확인 [수정됨]
     print("\n[Step 1] 시장 날씨 확인 중...")
-    market_status = market_analyzer.analyze_market_status()
 
-    status_code = market_status.get('status', 'ERROR')
-    description = market_status.get('description', '')
+    # 수정: analyze_market_status() -> get_market_regime()
+    try:
+        regime, rule = market_analyzer.get_market_regime()
+        status_code = regime
+        description = rule.get('description', '')
+    except AttributeError:
+        # 혹시라도 구버전 파일이 있을 경우를 대비한 예외처리
+        print("⚠️ market_analyzer 업데이트가 필요해 보입니다. (구버전 함수 호출 시도)")
+        return []
 
     print(f" 👉 현재 시장: {status_code} | {description}")
 
     # [필터] 공포장(PANIC)이나 하락장(BEAR)이면 매수 추천을 하지 않음 (안전 제일)
-    if status_code in ['PANIC', 'BEAR']:
-        print("\n⛔ 경고: 시장 상황이 좋지 않아 스크리닝을 중단합니다.")
-        print("   (현금 비중을 늘리고 관망하는 것을 추천합니다.)")
+    if status_code in ['PANIC']:
+        print("\n⛔ 경고: 공포장(PANIC) 상태입니다. 모든 매수를 중단합니다.")
         return []
+
+    if status_code == 'BEAR':
+        print("\n⚠️ 주의: 하락장(BEAR)입니다. 보수적으로 접근하세요 (현금 비중 확대).")
+        # 하락장에서도 스크리닝은 하되, 기준 점수를 높일 수도 있음 (선택 사항)
 
     # 2. 종목 리스트 가져오기
     print("\n[Step 2] 분석 대상 종목 로딩 중...")
     tickers = data_manager.get_ticker_list()
+    # 테스트용으로 10개만 돌려보고 싶다면 아래 주석 해제
+    # tickers = tickers[:10]
     print(f" 👉 총 {len(tickers)}개 종목 분석 시작")
 
     recommendations = []
@@ -172,6 +256,13 @@ def run_screener():
 
     print(f"\n🎉 총 {len(df_result)}개 유망 종목 발견!\n")
     print(df_result[['Symbol', 'Price', 'Score', 'Strategies']].to_string())
+
+    # [수정] DB 저장 함수 호출
+    save_results_to_db(df_result)
+
+    # 결과를 CSV로 저장 (선택)
+    df_result.to_csv("screener_results.csv", index=False)
+    print("\n💾 (백업) 결과가 'screener_results.csv' 파일로도 저장되었습니다.")
 
     return df_result
 

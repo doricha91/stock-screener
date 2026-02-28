@@ -13,3 +13,6 @@ __pycache__/
 # Data & Log files
 /data/
 /reports/
+
+.idea/
+outputs/

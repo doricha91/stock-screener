@@ -17,7 +17,7 @@ if not os.path.exists(save_dir):
 
 # 1. DB 연결 및 데이터 불러오기
 # 'your_database.db'를 실제 파일명으로, 'table_name'을 실제 테이블명으로 변경하세요.
-con = sqlite3.connect('backtest_log.db')
+con = sqlite3.connect('outputs/backtest_log.db')
 # query = "SELECT * FROM optimization_log"  # 테이블 이름을 확인해주세요
 # 예: 가장 최근 100개 결과만 가져오기
 query = "SELECT * FROM optimization_log ORDER BY id DESC LIMIT 9"
