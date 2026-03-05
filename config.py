@@ -71,12 +71,12 @@ DEMA_LONG_PERIOD = 50
 
 # 13. Data Partitioning (OOS 검증용)
 # 훈련 데이터 (In-Sample): 여기서 규칙을 찾습니다.
-IN_SAMPLE_START = '2015-01-01'
-IN_SAMPLE_END = '2020-12-31'
+IN_SAMPLE_START = '2024-01-01'
+IN_SAMPLE_END = '2024-12-31'
 
 # 검증 데이터 (Out-of-Sample): 여기서 규칙을 검증합니다. (절대 훈련에 쓰면 안 됨)
-OUT_OF_SAMPLE_START = '2021-01-01'
-OUT_OF_SAMPLE_END = '2025-12-16' # 혹은 현재 날짜까지
+OUT_OF_SAMPLE_START = '2025-01-01'
+OUT_OF_SAMPLE_END = '2026-03-01' # 혹은 현재 날짜까지
 
 # 14. Market Regime Definitions (시장 상태 정의)
 # 시장의 기준이 되는 벤치마크 심볼
@@ -199,3 +199,32 @@ REGIME_RULES = {
         }
     }
 }
+
+# ------------------------------------------------------------------------
+# [Safety Mechanisms Settings]  (v5.3.1 Project Iron Dome - STEP 1)
+# 목표: 5가지 안전장치의 민감도를 config.py에서 한눈에 수정 가능하게
+# ------------------------------------------------------------------------
+
+# 1) 서킷브레이커 (Circuit Breaker)
+USE_CIRCUIT_BREAKER = True
+CB_DROP_THRESHOLD = -3.0   # 전일 대비 -3% 이상 하락 시 발동
+CB_COOLDOWN_DAYS = 3       # 발동 후 3일간 매매 중단
+
+# 2) 이평선 크로스 (MA Crossover)
+USE_MA_CROSS = True
+MA_CROSS_FAST = 50
+MA_CROSS_SLOW = 200
+
+# 3) 마켓 브레드스 (Market Breadth)
+USE_MARKET_BREADTH = True
+BREADTH_THRESHOLD = 20.0   # 200일선 상회 종목 비율이 20% 미만이면 위험
+
+# 4) 고점 대비 하락 (Drawdown Trigger)
+USE_DRAWDOWN_TRIGGER = True
+DD_LOOKBACK = 252          # 1년(252일) 고점 기준
+DD_THRESHOLD = -15.0       # 고점 대비 -15% 하락 시 방어 모드
+
+# 5) VIX 상대 돌파 (VIX Relative Breakout)
+USE_VIX_BREAKOUT = True
+VIX_MA_PERIOD = 20         # VIX의 20일 평균 대비
+VIX_MULTIPLIER = 1.5       # 1.5배 돌파 시 공포로 간주

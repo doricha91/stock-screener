@@ -1,7 +1,7 @@
 import os
 import warnings
 
-from core.portfolio_config import PORTFOLIO_CONFIG
+from core.portfolio_config import PORTFOLIO_CONFIG # 전략 변수
 from core.backtest_engine import run_backtest_with_config
 
 warnings.simplefilter(action='ignore', category=FutureWarning)

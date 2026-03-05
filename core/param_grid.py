@@ -1,7 +1,6 @@
 params_grid = {
     # Best Known Parameter:
     # exit:15, rs_lookback:30, entry_period:20, max_positions:5, rs_weight:1.0, score_threshold:1.5, turtle weight: 1.0
-
     # [1] 핵심 변수
     'exit_period': [10],  # 익절/손절 기준일 (기본값: 10)
     'rs_lookback': [30],  # RS(상대강도) 비교 기간 (기본값: 120)
