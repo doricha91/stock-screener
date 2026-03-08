@@ -71,12 +71,12 @@ DEMA_LONG_PERIOD = 50
 
 # 13. Data Partitioning (OOS 검증용)
 # 훈련 데이터 (In-Sample): 여기서 규칙을 찾습니다.
-IN_SAMPLE_START = '2024-01-01'
-IN_SAMPLE_END = '2024-12-31'
+IN_SAMPLE_START = '2022-01-01'
+IN_SAMPLE_END = '2023-12-31'
 
 # 검증 데이터 (Out-of-Sample): 여기서 규칙을 검증합니다. (절대 훈련에 쓰면 안 됨)
-OUT_OF_SAMPLE_START = '2025-01-01'
-OUT_OF_SAMPLE_END = '2026-03-01' # 혹은 현재 날짜까지
+OUT_OF_SAMPLE_START = '2024-01-01'
+OUT_OF_SAMPLE_END = '2026-03-01'
 
 # 14. Market Regime Definitions (시장 상태 정의)
 # 시장의 기준이 되는 벤치마크 심볼
@@ -228,3 +228,19 @@ DD_THRESHOLD = -15.0       # 고점 대비 -15% 하락 시 방어 모드
 USE_VIX_BREAKOUT = True
 VIX_MA_PERIOD = 20         # VIX의 20일 평균 대비
 VIX_MULTIPLIER = 1.5       # 1.5배 돌파 시 공포로 간주
+
+# 17. Hedge Mode Settings
+USE_HEDGE_MODE = True
+HEDGE_TICKERS = ['SH', 'SDS', 'SPXU', 'PSQ', 'QID', 'SQQQ', 'SOXS', 'BIL']
+HEDGE_ASSET = 'PSQ'        # 헤지 시 매수할 메인 인버스 ETF (나스닥 1배 인버스)
+
+# 국면별 헤지 투입 비중 (전체 자산 대비)
+HEDGE_RATIO_BEAR = 0.2     # BEAR 국면 시 자산의 20% 투입
+HEDGE_RATIO_PANIC = 0.5    # PANIC 국면 시 자산의 50% 투입
+
+# 자금 확보를 위한 기존 종목 매각 우선순위
+# 옵션: 'rs_low' (상대강도 저하), 'return_low' (손실 순), 'weight_low' (비중 작은 순), 'age_high' (보유기간 긴 순)
+HEDGE_LIQUIDATION_PRIORITY = 'rs_low' 
+
+# 모드 전환 관성 (Whipsaw 방지)
+MIN_MODE_MAINTAIN_DAYS = 5 # 모드 전환 후 최소 유지 일수

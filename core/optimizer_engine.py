@@ -72,6 +72,8 @@ def run_optimization(fast_mode: bool = False):
                     'train_cagr': res['cagr'],
                     'train_mdd': res['mdd'],
                     'train_sharpe': res.get('sharpe', 0),
+                    'cb_halt': res.get('safety_stats', {}).get('cb_halt_days', 0),
+                    'panic_days': res.get('safety_stats', {}).get('panic_days', 0),
                     'raw_res': res  # OOS 저장용 원본
                 })
                 train_results_list.append(record)
@@ -87,7 +89,7 @@ def run_optimization(fast_mode: bool = False):
         print("\n" + "=" * 80)
         print("🏆 [Phase 1 결과] 학습 기간(Train) Sharpe 기준 Top 5")
         print("-" * 80)
-        cols_to_show = list(params_grid.keys()) + ['train_cagr', 'train_mdd', 'train_sharpe']
+        cols_to_show = list(params_grid.keys()) + ['train_cagr', 'train_mdd', 'train_sharpe', 'cb_halt', 'panic_days']
         print(df_train.sort_values(by='train_sharpe', ascending=False).head(5)[cols_to_show].to_string(index=False))
 
     # ------------------------------------------------------------------

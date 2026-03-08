@@ -14,17 +14,37 @@ def ensure_table_exists(conn, param_keys):
             total_return REAL, cagr REAL, mdd REAL, final_equity REAL,
             sharpe_ratio REAL, sortino_ratio REAL, calmar_ratio REAL,
             win_rate REAL, profit_factor REAL, total_trades INTEGER,
-            avg_win REAL, avg_loss REAL, yearly_returns TEXT
+            avg_win REAL, avg_loss REAL, yearly_returns TEXT,
+            cb_halt_days INTEGER, vix_trigger_count INTEGER, 
+            drawdown_trigger_count INTEGER, breadth_low_count INTEGER,
+            ma_cross_bearish_count INTEGER,
+            panic_days INTEGER, bear_days INTEGER, 
+            unstable_days INTEGER, bull_days INTEGER
         )
     ''')
     cursor.execute(f"PRAGMA table_info({TABLE_NAME})")
     existing_columns = {row[1] for row in cursor.fetchall()}
+    
+    # 파라미터 컬럼 추가
     for param in param_keys:
         if param not in existing_columns:
             try:
                 cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {param} REAL")
             except:
-                pass  # 이미 존재하거나 에러 발생 시 무시
+                pass
+
+    # 안전장치 컬럼 추가 (기존 테이블 대응)
+    safety_cols = [
+        'cb_halt_days', 'vix_trigger_count', 'drawdown_trigger_count', 
+        'breadth_low_count', 'ma_cross_bearish_count',
+        'panic_days', 'bear_days', 'unstable_days', 'bull_days'
+    ]
+    for col in safety_cols:
+        if col not in existing_columns:
+            try:
+                cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {col} INTEGER DEFAULT 0")
+            except:
+                pass
     conn.commit()
 
 def save_dynamic_result(conn, params, res):
@@ -45,6 +65,11 @@ def save_dynamic_result(conn, params, res):
         'avg_loss': round(res['avg_loss'], 2),
         'yearly_returns': res.get('yearly_json', '{}')
     }
+    
+    # 안전장치 통계 추가
+    if 'safety_stats' in res:
+        record.update(res['safety_stats'])
+        
     record.update(params)
     columns = ', '.join(record.keys())
     placeholders = ', '.join(['?'] * len(record))

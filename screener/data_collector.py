@@ -7,8 +7,10 @@ import requests
 from io import StringIO
 import time
 from datetime import datetime
+import config
+from core.paths import market_db_path
 
-DB_PATH = "../outputs/market_data.db"
+DB_PATH = market_db_path()
 
 
 # --- 1. S&P 500 종목 리스트 (기존 함수 복구) ---
@@ -103,6 +105,13 @@ def update_market_indices():
         '^VIX': 'Volatility Index', '^TNX': '10-Year Treasury Yield',
         'DX-Y.NYB': 'US Dollar Index'
     }
+    
+    # [신규] 인버스 ETF 리스트 추가
+    hedge_tickers = getattr(config, 'HEDGE_TICKERS', [])
+    for t in hedge_tickers:
+        if t not in indices:
+            indices[t] = f'Hedge Asset {t}'
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     print("\n[Market Index] 시장 지표 업데이트 시작...")

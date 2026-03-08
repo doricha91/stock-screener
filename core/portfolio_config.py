@@ -36,5 +36,14 @@ PORTFOLIO_CONFIG = {
     'rs_lookback': 120,
 
     # 트레일링 스탑 설정
-    'trailing_stop_multiplier': 2.5
+    'trailing_stop_multiplier': 2.5,
+
+    # [신규] Hedge Mode 설정 (config.py와 연동)
+    'USE_HEDGE_MODE': False,
+    'HEDGE_ASSET': 'PSQ',
+    'HEDGE_TICKERS': ['SH', 'SDS', 'SPXU', 'PSQ', 'QID', 'SQQQ', 'SOXS', 'BIL'],
+    'HEDGE_RATIO_BEAR': 0.2,
+    'HEDGE_RATIO_PANIC': 0.5,
+    'HEDGE_LIQUIDATION_PRIORITY': 'rs_low',
+    'MIN_MODE_MAINTAIN_DAYS': 5
 }

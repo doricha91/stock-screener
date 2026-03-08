@@ -32,6 +32,20 @@ def calculate_relative_strength(stock_df, spy_df, lookback=120):
         return pd.Series(0, index=stock_df.index)
 
 
+def get_market_index_data(symbol):
+    """market_index 테이블에서 특정 심볼(인버스 ETF 등)의 모든 데이터를 가져옴"""
+    import sqlite3
+    from core.paths import market_db_path
+    conn = sqlite3.connect(market_db_path())
+    query = f"SELECT date, close FROM market_index WHERE symbol = '{symbol}' ORDER BY date"
+    df = pd.read_sql(query, conn)
+    conn.close()
+    if df.empty:
+        return {}
+    df['date'] = pd.to_datetime(df['date'])
+    return df.set_index('date')['close'].to_dict()
+
+
 # [수정] 워커 함수 (Config를 인자로 받음)
 def process_single_stock(args):
     """
@@ -113,7 +127,10 @@ def process_single_stock(args):
                 'buy_signal', 'sell_signal', 'score', 'vol_ratio', 'rs_val']
         return df[[c for c in cols if c in df.columns]]
 
-    except Exception:
+    except Exception as e:
+        print(f"   ❌ [process_single_stock] {symbol} 처리 중 에러: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -210,6 +227,37 @@ def run_backtest_with_config(config, verbose=False, prev_trade_halted=None):
     # 자산 흐름 기록용 리스트
     equity_history = []
 
+    # [신규] Hedge 모드 상태 변수
+    current_mode = "LONG"
+    mode_start_date = None
+    hedge_asset_prices = {}
+    if config.get('USE_HEDGE_MODE', False):
+        hedge_tickers = config.get('HEDGE_TICKERS', [])
+        for t in hedge_tickers:
+            hedge_asset_prices[t] = get_market_index_data(t)
+
+    # [신규] 안전장치 및 국면 통계 초기화
+    safety_stats = {
+        'cb_halt_days': 0,
+        'vix_trigger_count': 0,
+        'drawdown_trigger_count': 0,
+        'breadth_low_count': 0,
+        'ma_cross_bearish_count': 0,
+        'panic_days': 0,
+        'bear_days': 0,
+        'unstable_days': 0,
+        'bull_days': 0
+    }
+
+    # [신규] Hedge 모드 상태 변수
+    current_mode = "LONG"
+    mode_start_date = None
+    hedge_asset_prices = {}
+    if config.get('USE_HEDGE_MODE', False):
+        hedge_tickers = config.get('HEDGE_TICKERS', [])
+        for t in hedge_tickers:
+            hedge_asset_prices[t] = get_market_index_data(t)
+
     # 이전 국면 기억용 변수 (로그 출력용)
     prev_regime_name = None
 
@@ -274,6 +322,100 @@ def run_backtest_with_config(config, verbose=False, prev_trade_halted=None):
 
             config['trailing_stop_multiplier'] = regime_rule['trailing_stop_multiplier']
             target_cash_ratio = regime_rule['target_cash_ratio']
+
+            # [신규] Hedge 모드 판정 및 전환 로직
+            if config.get('USE_HEDGE_MODE', False):
+                min_days = config.get('MIN_MODE_MAINTAIN_DAYS', 5)
+                # 첫 전환이거나 기간이 경과했을 때만 전환 허용
+                can_switch = (mode_start_date is None) or ((date - mode_start_date).days >= min_days)
+
+                # --- [A] Hedge 모드 진입 (LONG -> HEDGE) ---
+                if regime_name in ['BEAR', 'PANIC'] and current_mode == "LONG" and can_switch:
+                    current_mode = "HEDGE"
+                    mode_start_date = date
+                    if verbose: print(f"🛡️ [{date_str}] Hedge 모드 진입 (국면: {regime_name})")
+
+                    # 1. 목표 헤지 금액 계산
+                    ratio = config.get('HEDGE_RATIO_PANIC' if regime_name == 'PANIC' else 'HEDGE_RATIO_BEAR', 0.2)
+                    status = pf.get_account_status()
+                    target_hedge_value = status['total_equity'] * ratio
+                    
+                    # 2. 부족한 현금 확보를 위해 종목 매각 순서 결정
+                    current_positions = pf.get_positions()
+                    if current_positions:
+                        # 매각 우선순위 파라미터 확인 (기본값: rs_low)
+                        priority = config.get('HEDGE_LIQUIDATION_PRIORITY', 'rs_low')
+                        
+                        # 정렬 기준 데이터 생성
+                        pos_list = []
+                        for sym, info in current_positions.items():
+                            # 인버스는 매각 대상에서 제외
+                            if info.get('strategy_name') == "Hedge": continue
+                            
+                            # 정렬용 메트릭 계산
+                            ret = (current_prices.get(sym, info['avg_price']) - info['avg_price']) / info['avg_price']
+                            weight = (info['shares'] * current_prices.get(sym, info['avg_price'])) / status['total_equity']
+                            rs_val = day_data.loc[sym, 'rs_val'] if sym in day_data.index else -1.0
+                            age = (date - pd.to_datetime(info['entry_date'])).days
+                            
+                            pos_list.append({
+                                'symbol': sym, 'shares': info['shares'], 'rs_low': rs_val,
+                                'return_low': ret, 'weight_low': weight, 'age_high': -age # 큰 값이 먼저 오게 하기 위해 음수화
+                            })
+                        
+                        # 설정된 우선순위에 따라 오름차순 정렬 (값이 낮을수록 먼저 매도)
+                        pos_list.sort(key=lambda x: x.get(priority, 0))
+
+                        # 3. 목표 현금이 확보될 때까지 매도 집행
+                        for p in pos_list:
+                            status = pf.get_account_status()
+                            if status['cash'] >= target_hedge_value: break
+                            
+                            sym = p['symbol']
+                            price = current_prices.get(sym, 0)
+                            if price > 0:
+                                pf.sell(sym, price, p['shares'], date, reason=f"Hedge Liquidation ({priority})")
+
+                    # 4. 확보된 현금으로 인버스 ETF 매수
+                    status = pf.get_account_status()
+                    hedge_asset = config.get('HEDGE_ASSET', 'PSQ')
+                    asset_price = hedge_asset_prices.get(hedge_asset, {}).get(date)
+                    
+                    if asset_price and asset_price > 0:
+                        buy_amount = min(status['cash'], target_hedge_value)
+                        shares = int(buy_amount / asset_price)
+                        if shares > 0:
+                            pf.buy(hedge_asset, asset_price, shares, date, strategy_name="Hedge")
+                            if verbose: print(f"  💰 {hedge_asset} {shares}주 매수 (가격: ${asset_price:.2f})")
+
+                # --- [B] LONG 모드 복귀 (HEDGE -> LONG) ---
+                elif regime_name in ['BULL', 'UNSTABLE'] and current_mode == "HEDGE" and can_switch:
+                    current_mode = "LONG"
+                    mode_start_date = date
+                    if verbose: print(f"🚀 [{date_str}] LONG 모드 복귀 (국면: {regime_name})")
+                    
+                    # 보유 중인 모든 Hedge 자산 매도
+                    current_positions = pf.get_positions()
+                    for sym, info in current_positions.items():
+                        if info.get('strategy_name') == "Hedge":
+                            # market_index에서 현재가 조회 (없으면 마지막 가격)
+                            price = hedge_asset_prices.get(sym, {}).get(date, info['current_price'])
+                            pf.sell(sym, price, info['shares'], date, reason="Hedge Exit")
+                            if verbose: print(f"  💸 {sym} 전량 매도 (가격: ${price:.2f})")
+
+            # [신규] 통계 집계
+            regime_map = {'PANIC': 'panic_days', 'BEAR': 'bear_days', 'UNSTABLE': 'unstable_days', 'BULL': 'bull_days'}
+            if regime_name in regime_map:
+                safety_stats[regime_map[regime_name]] += 1
+            
+            if trade_halted:
+                safety_stats['cb_halt_days'] += 1
+            
+            triggers = state.get("triggers", {})
+            if triggers.get("vix_breakout"): safety_stats['vix_trigger_count'] += 1
+            if triggers.get("drawdown"): safety_stats['drawdown_trigger_count'] += 1
+            if triggers.get("breadth_low"): safety_stats['breadth_low_count'] += 1
+            if triggers.get("ma_cross_bearish"): safety_stats['ma_cross_bearish_count'] += 1
         else:
             target_cash_ratio = 0.0
             trade_halted = False
@@ -442,7 +584,8 @@ def run_backtest_with_config(config, verbose=False, prev_trade_halted=None):
         'win_rate': win_rate,
         'profit_factor': profit_factor,
         'avg_win': avg_win,
-        'avg_loss': avg_loss
+        'avg_loss': avg_loss,
+        'safety_stats': safety_stats
     }
 
 def run_backtest_with_prepared_data(config, market_data, date_list, verbose=False, prev_trade_halted=None, write_market_log=False):
@@ -456,6 +599,29 @@ def run_backtest_with_prepared_data(config, market_data, date_list, verbose=Fals
     pf = PortfolioDB(db_path=":memory:", initial_cash=config['initial_capital'])
 
     equity_history = []
+
+    # [신규] Hedge 모드 상태 변수
+    current_mode = "LONG"
+    mode_start_date = None
+    hedge_asset_prices = {}
+    if config.get('USE_HEDGE_MODE', False):
+        hedge_tickers = config.get('HEDGE_TICKERS', [])
+        for t in hedge_tickers:
+            hedge_asset_prices[t] = get_market_index_data(t)
+
+    # [신규] 안전장치 및 국면 통계 초기화
+    safety_stats = {
+        'cb_halt_days': 0,
+        'vix_trigger_count': 0,
+        'drawdown_trigger_count': 0,
+        'breadth_low_count': 0,
+        'ma_cross_bearish_count': 0,
+        'panic_days': 0,
+        'bear_days': 0,
+        'unstable_days': 0,
+        'bull_days': 0
+    }
+
     prev_regime_name = None
     target_cash_ratio = 0.0
 
@@ -491,6 +657,100 @@ def run_backtest_with_prepared_data(config, market_data, date_list, verbose=Fals
 
             config['trailing_stop_multiplier'] = regime_rule['trailing_stop_multiplier']
             target_cash_ratio = regime_rule['target_cash_ratio']
+
+            # [신규] Hedge 모드 판정 및 전환 로직
+            if config.get('USE_HEDGE_MODE', False):
+                min_days = config.get('MIN_MODE_MAINTAIN_DAYS', 5)
+                # 첫 전환이거나 기간이 경과했을 때만 전환 허용
+                can_switch = (mode_start_date is None) or ((date - mode_start_date).days >= min_days)
+
+                # --- [A] Hedge 모드 진입 (LONG -> HEDGE) ---
+                if regime_name in ['BEAR', 'PANIC'] and current_mode == "LONG" and can_switch:
+                    current_mode = "HEDGE"
+                    mode_start_date = date
+                    if verbose: print(f"🛡️ [{date_str}] Hedge 모드 진입 (국면: {regime_name})")
+
+                    # 1. 목표 헤지 금액 계산
+                    ratio = config.get('HEDGE_RATIO_PANIC' if regime_name == 'PANIC' else 'HEDGE_RATIO_BEAR', 0.2)
+                    status = pf.get_account_status()
+                    target_hedge_value = status['total_equity'] * ratio
+                    
+                    # 2. 부족한 현금 확보를 위해 종목 매각 순서 결정
+                    current_positions = pf.get_positions()
+                    if current_positions:
+                        # 매각 우선순위 파라미터 확인 (기본값: rs_low)
+                        priority = config.get('HEDGE_LIQUIDATION_PRIORITY', 'rs_low')
+                        
+                        # 정렬 기준 데이터 생성
+                        pos_list = []
+                        for sym, info in current_positions.items():
+                            # 인버스는 매각 대상에서 제외
+                            if info.get('strategy_name') == "Hedge": continue
+                            
+                            # 정렬용 메트릭 계산
+                            ret = (current_prices.get(sym, info['avg_price']) - info['avg_price']) / info['avg_price']
+                            weight = (info['shares'] * current_prices.get(sym, info['avg_price'])) / status['total_equity']
+                            rs_val = day_data.loc[sym, 'rs_val'] if sym in day_data.index else -1.0
+                            age = (date - pd.to_datetime(info['entry_date'])).days
+                            
+                            pos_list.append({
+                                'symbol': sym, 'shares': info['shares'], 'rs_low': rs_val,
+                                'return_low': ret, 'weight_low': weight, 'age_high': -age # 큰 값이 먼저 오게 하기 위해 음수화
+                            })
+                        
+                        # 설정된 우선순위에 따라 오름차순 정렬 (값이 낮을수록 먼저 매도)
+                        pos_list.sort(key=lambda x: x.get(priority, 0))
+
+                        # 3. 목표 현금이 확보될 때까지 매도 집행
+                        for p in pos_list:
+                            status = pf.get_account_status()
+                            if status['cash'] >= target_hedge_value: break
+                            
+                            sym = p['symbol']
+                            price = current_prices.get(sym, 0)
+                            if price > 0:
+                                pf.sell(sym, price, p['shares'], date, reason=f"Hedge Liquidation ({priority})")
+
+                    # 4. 확보된 현금으로 인버스 ETF 매수
+                    status = pf.get_account_status()
+                    hedge_asset = config.get('HEDGE_ASSET', 'PSQ')
+                    asset_price = hedge_asset_prices.get(hedge_asset, {}).get(date)
+                    
+                    if asset_price and asset_price > 0:
+                        buy_amount = min(status['cash'], target_hedge_value)
+                        shares = int(buy_amount / asset_price)
+                        if shares > 0:
+                            pf.buy(hedge_asset, asset_price, shares, date, strategy_name="Hedge")
+                            if verbose: print(f"  💰 {hedge_asset} {shares}주 매수 (가격: ${asset_price:.2f})")
+
+                # --- [B] LONG 모드 복귀 (HEDGE -> LONG) ---
+                elif regime_name in ['BULL', 'UNSTABLE'] and current_mode == "HEDGE" and can_switch:
+                    current_mode = "LONG"
+                    mode_start_date = date
+                    if verbose: print(f"🚀 [{date_str}] LONG 모드 복귀 (국면: {regime_name})")
+                    
+                    # 보유 중인 모든 Hedge 자산 매도
+                    current_positions = pf.get_positions()
+                    for sym, info in current_positions.items():
+                        if info.get('strategy_name') == "Hedge":
+                            # market_index에서 현재가 조회 (없으면 마지막 가격)
+                            price = hedge_asset_prices.get(sym, {}).get(date, info['current_price'])
+                            pf.sell(sym, price, info['shares'], date, reason="Hedge Exit")
+                            if verbose: print(f"  💸 {sym} 전량 매도 (가격: ${price:.2f})")
+
+            # [신규] 통계 집계
+            regime_map = {'PANIC': 'panic_days', 'BEAR': 'bear_days', 'UNSTABLE': 'unstable_days', 'BULL': 'bull_days'}
+            if regime_name in regime_map:
+                safety_stats[regime_map[regime_name]] += 1
+            
+            if trade_halted:
+                safety_stats['cb_halt_days'] += 1
+            
+            triggers = state.get("triggers", {})
+            if triggers.get("vix_breakout"): safety_stats['vix_trigger_count'] += 1
+            if triggers.get("drawdown"): safety_stats['drawdown_trigger_count'] += 1
+            if triggers.get("breadth_low"): safety_stats['breadth_low_count'] += 1
+            if triggers.get("ma_cross_bearish"): safety_stats['ma_cross_bearish_count'] += 1
         else:
             target_cash_ratio = 0.0
             trade_halted = False
@@ -622,7 +882,8 @@ def run_backtest_with_prepared_data(config, market_data, date_list, verbose=Fals
         'win_rate': win_rate,
         'profit_factor': profit_factor,
         'avg_win': avg_win,
-        'avg_loss': avg_loss
+        'avg_loss': avg_loss,
+        'safety_stats': safety_stats
     }
 
 

@@ -1,0 +1,39 @@
+ 이 프로젝트(StockScreener)는 주식 스크리닝, 전략 백테스팅 및 최적화를 수행하기 위한 종합적인 퀀트 투자
+  시스템으로 보입니다. 프로젝트의 주요 구조를 기능별로 요약해 드립니다.
+
+
+  1. 핵심 엔진 (Core & Backtesting)
+   * core/: 시스템의 근간이 되는 설정 관리(config_factory.py), 경로 제어(paths.py), 최적화
+     엔진(optimizer_engine.py) 및 파라미터 그리드 정의를 담당합니다.
+   * backtesting/: 실제 백테스팅을 실행하는 엔진(engine.py)과 수익률/리스크 지표 계산(metrics.py), 결과
+     리포팅(report.py)을 처리합니다.
+
+
+  2. 스크리닝 및 전략 (Screener)
+   * screener/: 주식 데이터를 수집하고(data_collector.py), 기술적 지표를 계산하며(indicator.py), 특정
+     전략(strategy.py)에 따라 종목을 필터링하는 로직이 모여 있습니다. 데이터베이스와의 상호작용(database.py)
+     및 포트폴리오 관리(portfolio.py) 기능도 포함되어 있습니다.
+
+
+  3. 운영 및 품질 관리 (Ops)
+   * ops/: 데이터베이스 백필(db/), 안전성 테스트(lab/), 그리고 데이터 정합성이나 거래 정지 종목 등을
+     확인하는 QA(qa/) 스크립트들이 포함되어 운영의 안정성을 보조합니다.
+
+
+  4. 실행 및 분석 스크립트 (Scripts & Root)
+   * scripts/: 사용자가 직접 실행하는 진입점으로, 최적화(run_optimizer.py)나 포트폴리오
+     백테스트(run_portfolio_backtest.py)를 수행합니다. 대량의 레거시 스크립트가 있어 시스템의 발전 과정을
+     보여줍니다.
+   * Root 디렉토리: main.py를 비롯해 시장 분석(market_analyzer.py), 환경 체크(check_env.py), 벤치마크
+     비교(compare_benchmark.py) 등 시스템 전반을 아우르는 유틸리티와 설정 파일들이 위치합니다.
+
+
+  5. 결과 및 문서화
+   * analysis_results/, outputs/, reports/: 백테스팅 및 최적화 결과로 생성된 차트(히트맵, 박스플롯 등)와
+     데이터 파일들이 저장됩니다.
+   * 설계도 및 로드맵: 루트의 1. 설계도_..., 10. System Architecture... 등의 파일을 통해 아키텍처의 버전
+     관리와 구현 계획을 체계적으로 관리하고 있음을 알 수 있습니다.
+
+
+  기술 스택 요약: Python 기반이며, pandas, matplotlib 등을 활용한 데이터 분석과 SQL 기반의 데이터 관리를
+  수행하는 구조로 추정됩니다. 어떤 부분을 먼저 살펴보고 싶으신가요?
