@@ -249,15 +249,6 @@ def run_backtest_with_config(config, verbose=False, prev_trade_halted=None):
         'bull_days': 0
     }
 
-    # [신규] Hedge 모드 상태 변수
-    current_mode = "LONG"
-    mode_start_date = None
-    hedge_asset_prices = {}
-    if config.get('USE_HEDGE_MODE', False):
-        hedge_tickers = config.get('HEDGE_TICKERS', [])
-        for t in hedge_tickers:
-            hedge_asset_prices[t] = get_market_index_data(t)
-
     # 이전 국면 기억용 변수 (로그 출력용)
     prev_regime_name = None
 

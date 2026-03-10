@@ -40,23 +40,20 @@ def run_optimization(fast_mode: bool = False):
     train_results_list = []  # OOS 선발용 리스트
 
     # ------------------------------------------------------------------
-    # [Phase 1] 학습 기간 최적화 (In-Sample)
+    # [Phase 1] 학습 기간 시뮬레이션 시작...
     # ------------------------------------------------------------------
     print("\n" + "=" * 60)
     print("🚀 [Phase 1] 학습 기간 시뮬레이션 시작...")
     print("=" * 60)
 
     for i, params in enumerate(combinations):
-        current_config = PORTFOLIO_CONFIG.copy()
-        current_config.update(params)
-
-        # [중요] 학습 기간 주입
-        current_config['start_date'] = TRAIN_START
-        current_config['end_date'] = TRAIN_END
+        # make_config를 사용하여 global config(Hedge, Safety 등)를 동기화
+        current_config = make_config(params, TRAIN_START, TRAIN_END, fast_mode=fast_mode)
 
         # 진행 상황 출력
         param_str = ", ".join([f"{k}={v}" for k, v in params.items()])
         print(f"[{i + 1}/{len(combinations)}] {param_str} ...", end=" ", flush=True)
+
 
         try:
             res = run_backtest_with_config(current_config)
@@ -111,11 +108,8 @@ def run_optimization(fast_mode: bool = False):
     for idx, row in top_n.iterrows():
         best_params = {k: row[k] for k in params_grid.keys()}
 
-        # 검증 기간 설정 주입
-        test_config = PORTFOLIO_CONFIG.copy()
-        test_config.update(best_params)
-        test_config['start_date'] = TEST_START
-        test_config['end_date'] = TEST_END
+        # make_config를 사용하여 global config(Hedge, Safety 등)를 동기화
+        test_config = make_config(best_params, TEST_START, TEST_END, fast_mode=fast_mode)
 
         print(f"🔎 검증 중 (Train Sharpe: {row['train_sharpe']:.2f})...", end=" ")
 
