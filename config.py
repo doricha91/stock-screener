@@ -90,9 +90,13 @@ REGIME_SMA_PERIOD = 200
 REGIME_ADX_PERIOD = 14
 REGIME_ADX_THRESHOLD = 25
 
-# 15. Optimization Parameter Grids (Legacy - moved to core/param_grid.py)
-# Note: Use core/param_grid.py for active optimization experiments.
-# This section is kept minimal to avoid confusion.
+# 15. Optimization Parameter Grids (LEGACY - DO NOT USE)
+# ------------------------------------------------------------------------
+# [주의] 이 섹션은 과거 호환성을 위해 남겨둔 레거시 코드입니다.
+# 실제 최적화 실험 파라미터는 'core/param_grid.py'에서만 관리하십시오.
+# ------------------------------------------------------------------------
+# STRATEGY_GRID_MAP = {} # Unused
+# ------------------------------------------------------------------------
 
 # 16. Market Regime Strategy Rules (The Brain)
 # 시장 국면별 대응 수칙 정의

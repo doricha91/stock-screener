@@ -78,8 +78,13 @@ if __name__ == "__main__":
         print(f"  - {k}: {v}")
     print("=" * 60 + "\n")
 
-    # 설정 패치(patch_global_config)는 전역 config.py를 사용하는 다른 모듈과의 호환성을 위해 유지하되,
-    # 실제 optimizer_engine은 runtime_overrides를 통해 제어하게 됩니다.
+    # [설정 전달 설계 설명]
+    # 1. runtime_overrides: make_config()를 통해 백테스트 엔진(backtest_engine)에 
+    #    직접 주입되는 최우선 설정값입니다. (명시적 주입 방식)
+    # 2. patch_global_config: 아직 엔진 내부나 다른 모듈에서 'import config'를 통해 
+    #    전역 변수를 직접 참조하는 코드들과의 호환성을 위한 '안전장치'입니다.
+    # 3. 결과적으로 두 방식이 병행되어, 엔진 내부의 어떤 경로에서도 동일한 런타임 설정이 
+    #    유지되도록 보장합니다.
     with patch_global_config(runtime_overrides):
         run_optimization(fast_mode=fast_mode, runtime_overrides=runtime_overrides)
 

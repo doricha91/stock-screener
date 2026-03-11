@@ -114,8 +114,8 @@ def run_optimization(fast_mode: bool = False, runtime_overrides: dict = None):
     for idx, row in top_n.iterrows():
         best_params = {k: row[k] for k in params_grid.keys()}
 
-        # make_config를 사용하여 global config(Hedge, Safety 등)를 동기화
-        test_config = make_config(best_params, TEST_START, TEST_END, fast_mode=fast_mode)
+        # make_config를 사용하여 모든 설정 범주 병합 (runtime_overrides 포함)
+        test_config = make_config(best_params, TEST_START, TEST_END, fast_mode=fast_mode, runtime_overrides=runtime_overrides)
 
         print(f"🔎 검증 중 (Train Sharpe: {row['train_sharpe']:.2f})...", end=" ")
 

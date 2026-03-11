@@ -120,6 +120,8 @@
 4. `runtime_overrides` (실행 시점 최종 강제값)
 
 **규칙:**
+- **일원화된 전달 경로**: 학습(Phase 1)과 검증(Phase 2) 모두 동일하게 `make_config(..., runtime_overrides=runtime_overrides)`를 호출하여 설정의 일관성을 보장한다.
+- **이중 안전장치**: 명시적 주입(`runtime_overrides`)과 전역 패치(`patch_global_config`)를 병행한다. 이는 전역 `config` 모듈을 직접 참조하는 레거시 코드와의 호환성을 유지하면서도, 엔진에는 정확한 런타임 값이 전달되게 하기 위함이다.
 - `param_grid.py`에는 최적화 대상이 아닌 "운영 정책" 값을 넣지 않는다.
 - `run_*.py` 스크립트는 직접 딕셔너리를 조립하지 않고 `make_config()`에 필요한 override값만 전달한다.
 - 새로운 전략 변수를 추가할 경우, 기본값은 `portfolio_config.py`에, 최적화 그리드는 `param_grid.py`에, 실험 스위치는 `config.py`에 배치한다.
