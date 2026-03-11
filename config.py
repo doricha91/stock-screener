@@ -90,64 +90,9 @@ REGIME_SMA_PERIOD = 200
 REGIME_ADX_PERIOD = 14
 REGIME_ADX_THRESHOLD = 25
 
-# 15. Optimization Parameter Grids (v4.0 연구소용)
-# 각 전략별로 테스트해볼 파라미터 후보군을 정의합니다.
-# (너무 많은 숫자를 넣으면 계산 시간이 기하급수적으로 늘어나니 주의하세요!)
-
-# 1) MACD 전략 그리드
-# - fast/slow 조합을 통해 "더 민감한 신호"와 "더 둔감한 신호"를 비교합니다.
-MACD_GRID = {
-    'macd_fast_period': [3, 6, 8, 12],     # (기본 12) 빠름/표준/느림
-    'macd_slow_period': [15, 20, 30, 40],    # (기본 26)
-    'macd_signal_period': [6, 9, 12]            # (기본 9) 고정 (복잡도 감소)
-}
-# -> 총 조합 수: 3 x 3 x 1 = 9가지
-
-# 2) DEMA 전략 그리드
-# - 강세장에서 추세를 얼마나 빨리/깊게 탈 것인지 테스트합니다.
-DEMA_GRID = {
-    'dema_short_period': [3, 5, 10, 20, 30],
-    'dema_long_period': [30, 50, 70]
-}
-# -> 총 조합 수: 3 x 3 = 9가지
-
-# 3) Bollinger Bands Squeeze (BBS) 그리드
-# - 핵심은 'squeeze_period'입니다. "얼마나 오랫동안 힘을 응축한 종목이 크게 터지는가?"를 찾습니다.
-BBS_GRID = {
-    'bbs_period': [10, 20, 30],                  # 표준값 고정
-    'bbs_std_dev': [1.0, 2.0, 3.0],                # 표준값 고정
-    'bbs_squeeze_period': [10, 20, 30] # 일
-}
-# -> 총 조합 수: 3가지
-
-# 4) SMA 골든크로스 그리드
-# - 초강세장에서 쓸 "가장 묵직한 추세선"을 찾습니다.
-SMA_GRID = {
-    'sma_short_period': [10, 20, 50],
-    'sma_long_period': [100, 150, 200]
-}
-# -> 총 조합 수: 2 x 2 = 4가지
-
-# 5) 터틀 트레이딩 그리드
-# - 진입 시점을 짧게 잡을지(20일), 길게 잡을지(50일) 테스트합니다.
-TURTLE_GRID = {
-    'entry_period': [10, 20, 50],
-    'exit_period': [5, 10, 20],
-    'atr_period': [5, 10, 20]
-}
-# -> 총 조합 수: 2 x 2 x 1 = 4가지
-
-
-# ★ 전략 그리드 매핑 (오토메이션을 위해 필수)
-# run_optimization.py 에서 전략 이름만으로 그리드를 찾기 위해 사용합니다.
-STRATEGY_GRID_MAP = {
-    'macd': MACD_GRID,
-    'dema': DEMA_GRID,
-    'bbs': BBS_GRID,
-    'sma': SMA_GRID,
-    'turtle': TURTLE_GRID,
-    # 'bbands', 'rsi' 등도 필요하면 추가 가능
-}
+# 15. Optimization Parameter Grids (Legacy - moved to core/param_grid.py)
+# Note: Use core/param_grid.py for active optimization experiments.
+# This section is kept minimal to avoid confusion.
 
 # 16. Market Regime Strategy Rules (The Brain)
 # 시장 국면별 대응 수칙 정의

@@ -63,7 +63,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print(f"🚀 [HEDGE={hedge_status_str}] Optimizer 실험을 시작합니다.")
     print("=" * 60)
-    
+
     print(f"🔹 핵심 설정 요약 (런타임 적용):")
     print(f"  - USE_HEDGE_MODE:      {use_hedge}")
     print(f"  - USE_MARKET_REGIME:   {use_market_regime}")
@@ -72,14 +72,15 @@ if __name__ == "__main__":
     print(f"  - FAST_MODE:           {fast_mode}")
     print(f"  - 학습 기간 (Train):   {global_config.IN_SAMPLE_START} ~ {global_config.IN_SAMPLE_END}")
     print(f"  - 검증 기간 (Test):    {global_config.OUT_OF_SAMPLE_START} ~ {global_config.OUT_OF_SAMPLE_END}")
-    
+
     print(f"\n🔹 고정 안전장치 (Fixed Safety):")
     for k, v in SAFETY_FIXED.items():
         print(f"  - {k}: {v}")
     print("=" * 60 + "\n")
 
-    # 설정 패치 후 실행
+    # 설정 패치(patch_global_config)는 전역 config.py를 사용하는 다른 모듈과의 호환성을 위해 유지하되,
+    # 실제 optimizer_engine은 runtime_overrides를 통해 제어하게 됩니다.
     with patch_global_config(runtime_overrides):
-        run_optimization(fast_mode=fast_mode)
+        run_optimization(fast_mode=fast_mode, runtime_overrides=runtime_overrides)
 
     print(f"\n✅ [HEDGE={hedge_status_str}] Optimizer 실험이 완료되었습니다.")

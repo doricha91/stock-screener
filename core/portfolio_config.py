@@ -38,12 +38,6 @@ PORTFOLIO_CONFIG = {
     # 트레일링 스탑 설정
     'trailing_stop_multiplier': 2.5,
 
-    # [신규] Hedge Mode 설정 (config.py와 연동)
-    'USE_HEDGE_MODE': False,
-    'HEDGE_ASSET': 'PSQ',
-    'HEDGE_TICKERS': ['SH', 'SDS', 'SPXU', 'PSQ', 'QID', 'SQQQ', 'SOXS', 'BIL'],
-    'HEDGE_RATIO_BEAR': 0.2,
-    'HEDGE_RATIO_PANIC': 0.5,
-    'HEDGE_LIQUIDATION_PRIORITY': 'rs_low',
-    'MIN_MODE_MAINTAIN_DAYS': 5
+    # [Legacy/Moved] 전역 정책 관련 설정은 config.py에서 관리합니다.
+    # PORTFOLIO_CONFIG는 포트폴리오 기본 구조 및 백테스트 실행을 위한 기본값만 정의합니다.
 }

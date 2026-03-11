@@ -16,7 +16,7 @@ DB_PATH = backtest_log_db_path()
 TABLE_NAME = "optimization_log"          # Phase 1: 학습 결과 저장 (기존 기능)
 OOS_TABLE_NAME = "oos_validation_log"    # Phase 2: 검증 결과 저장 (신규 기능)
 
-def run_optimization(fast_mode: bool = False):
+def run_optimization(fast_mode: bool = False, runtime_overrides: dict = None):
     # 1. 파라미터 조합 생성
     keys, values = zip(*params_grid.items())
     combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
@@ -48,13 +48,13 @@ def run_optimization(fast_mode: bool = False):
     
     # 첫 실행 시 런타임 설정 검증 로그 (한 번만 출력)
     first_params = combinations[0]
-    verify_config = make_config(first_params, TRAIN_START, TRAIN_END, fast_mode=fast_mode)
+    verify_config = make_config(first_params, TRAIN_START, TRAIN_END, fast_mode=fast_mode, runtime_overrides=runtime_overrides)
     print(f"✅ 런타임 설정 검증: USE_HEDGE_MODE = {verify_config.get('USE_HEDGE_MODE')}")
     print("=" * 60)
 
     for i, params in enumerate(combinations):
-        # make_config를 사용하여 global config(Hedge, Safety 등)를 동기화
-        current_config = make_config(params, TRAIN_START, TRAIN_END, fast_mode=fast_mode)
+        # make_config를 사용하여 모든 설정 범주 병합
+        current_config = make_config(params, TRAIN_START, TRAIN_END, fast_mode=fast_mode, runtime_overrides=runtime_overrides)
 
         # 진행 상황 출력
         param_str = ", ".join([f"{k}={v}" for k, v in params.items()])
