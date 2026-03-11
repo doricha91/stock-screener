@@ -42,8 +42,14 @@ def run_optimization(fast_mode: bool = False):
     # ------------------------------------------------------------------
     # [Phase 1] 학습 기간 시뮬레이션 시작...
     # ------------------------------------------------------------------
+    hedge_status = "ON" if config.USE_HEDGE_MODE else "OFF"
     print("\n" + "=" * 60)
-    print("🚀 [Phase 1] 학습 기간 시뮬레이션 시작...")
+    print(f"🚀 [Phase 1] 학습 기간 시뮬레이션 시작... [HEDGE={hedge_status}]")
+    
+    # 첫 실행 시 런타임 설정 검증 로그 (한 번만 출력)
+    first_params = combinations[0]
+    verify_config = make_config(first_params, TRAIN_START, TRAIN_END, fast_mode=fast_mode)
+    print(f"✅ 런타임 설정 검증: USE_HEDGE_MODE = {verify_config.get('USE_HEDGE_MODE')}")
     print("=" * 60)
 
     for i, params in enumerate(combinations):
