@@ -22,7 +22,9 @@ def make_config(params: dict, start_date: str, end_date: str, fast_mode: bool = 
         'USE_CIRCUIT_BREAKER', 'USE_MA_CROSS', 'USE_MARKET_BREADTH', 
         'USE_DRAWDOWN_TRIGGER', 'USE_VIX_BREAKOUT',
         # Market Regime 및 기타 정책
-        'MARKET_BENCHMARK_SYMBOL', 'REGIME_SMA_PERIOD', 'REGIME_ADX_PERIOD', 'REGIME_RULES'
+        'MARKET_BENCHMARK_SYMBOL', 'REGIME_SMA_PERIOD', 'REGIME_ADX_PERIOD', 'REGIME_RULES',
+        # Logging 관련
+        'enable_decision_logging'
     ]
     
     for key in sync_keys:

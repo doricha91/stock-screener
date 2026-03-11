@@ -1,13 +1,50 @@
-# [ 📄 backtesting/logger.py (신규 파일) ]
+# [ 📄 backtesting/logger.py ]
 
-import sqlite3
+import csv
 import datetime
+import sqlite3
 import pandas as pd
+from pathlib import Path
 import config  # config.py 임포트
 
 # DB 파일 이름 (프로젝트 루트에 생성됨)
-BACKTEST_DB_NAME = config.BACKTEST_DB_NAME # <-- 이렇게 변경
+BACKTEST_DB_NAME = config.BACKTEST_DB_NAME
 TABLE_NAME = 'results'
+
+class DecisionLogger:
+    """
+    백테스트 중 발생하는 주요 의사결정 이벤트를 CSV로 기록합니다.
+    """
+    def __init__(self, run_name: str = "default"):
+        self.output_dir = Path("outputs/logs")
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.file_path = self.output_dir / f"decision_{run_name}_{timestamp}.csv"
+        
+        self.headers = [
+            "date", "regime", "mode", "event", "details", 
+            "total_equity", "cash", "target_cash_ratio", "actual_cash_ratio"
+        ]
+        self._write_header()
+
+    def _write_header(self):
+        with open(self.file_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(self.headers)
+
+    def log_event(self, date: str, regime: str, mode: str, event: str, details: str, status: dict, target_cash_ratio: float):
+        actual_cash_ratio = status['cash'] / status['total_equity'] if status['total_equity'] > 0 else 0
+        
+        with open(self.file_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                date, regime, mode, event, details,
+                f"{status['total_equity']:.2f}", 
+                f"{status['cash']:.2f}",
+                f"{target_cash_ratio:.2f}",
+                f"{actual_cash_ratio:.2f}"
+            ])
 
 
 def log_backtest_result(strategy_context, metrics_stats):

@@ -43,6 +43,11 @@ def parse_args():
         action="store_true",
         help="Run in fast mode (limited tickers and periods)"
     )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Enable detailed decision event logging (CSV)"
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -51,12 +56,19 @@ if __name__ == "__main__":
     # CLI 인자에 따른 설정 구성
     use_hedge = (args.hedge == "on")
     fast_mode = args.fast or FAST_MODE
+    enable_log = args.log
     
+    # run_name 생성 (로그 파일명 식별용)
+    run_name = f"opt_hedge_{'on' if use_hedge else 'off'}"
+    if fast_mode: run_name += "_fast"
+
     # make_config 로직과 동일하게 use_market_regime 결정
     use_market_regime = not fast_mode 
     
     runtime_overrides = SAFETY_FIXED.copy()
     runtime_overrides["USE_HEDGE_MODE"] = use_hedge
+    runtime_overrides["enable_decision_logging"] = enable_log
+    runtime_overrides["run_name"] = run_name
 
     # 런타임 정보 출력
     hedge_status_str = "ON" if use_hedge else "OFF"
