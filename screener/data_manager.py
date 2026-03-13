@@ -108,20 +108,28 @@ class DataManager:
         finally:
             conn.close()
 
-    def get_all_price_data_bulk(self, start_date=None):
+    def get_all_price_data_bulk(self, start_date=None, tickers=None):
         """
-        [속도 최적화] 모든 종목의 데이터를 한 번의 쿼리로 가져옵니다.
+        [속도 최적화] 지정된 종목 및 기간의 데이터를 한 번의 쿼리로 가져옵니다.
         """
         conn = self.get_connection()
         query = "SELECT date, symbol, open, high, low, close, volume FROM daily_price"
         params = []
+        conditions = []
 
         if start_date:
-            query += " WHERE date >= ?"
+            conditions.append("date >= ?")
             params.append(start_date)
+            
+        if tickers:
+            placeholders = ', '.join(['?'] * len(tickers))
+            conditions.append(f"symbol IN ({placeholders})")
+            params.extend(tickers)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
 
         try:
-            # 한 번에 모든 데이터 로드 (메모리 사용량은 늘지만 속도는 빠름)
             df = pd.read_sql(query, conn, params=params)
 
             if df.empty: return pd.DataFrame()
@@ -156,5 +164,5 @@ def get_price_data(ticker, start_date=None, end_date=None):
 def get_ticker_list():
     return manager.get_ticker_list()
 
-def get_all_price_data_bulk(start_date=None):
-    return manager.get_all_price_data_bulk(start_date)
+def get_all_price_data_bulk(start_date=None, tickers=None):
+    return manager.get_all_price_data_bulk(start_date, tickers)

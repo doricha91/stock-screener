@@ -159,10 +159,17 @@ def prepare_market_data(config):
         if not target_tickers:
             target_tickers = data_manager.get_ticker_list()
 
-    # 지표 계산을 위해 데이터는 넉넉하게 미리(2013년부터) 가져옵니다.
+    # 지표 계산을 위해 데이터는 넉넉하게 미리(2021년부터) 가져옵니다.
     print("⏳ [Step 2] 데이터 로드 중 (Bulk Load)...")
-    bulk_start = '2013-01-01'
-    df_all = data_manager.get_all_price_data_bulk(start_date=bulk_start)
+    bulk_start = '2021-01-01'
+    
+    # [최적화] 필요한 종목 리스트 구성 (대상 종목 + 시장 지수)
+    load_tickers = target_tickers.copy()
+    for m_ticker in ['SPY', 'QQQ', '^VIX']:
+        if m_ticker not in load_tickers:
+            load_tickers.append(m_ticker)
+            
+    df_all = data_manager.get_all_price_data_bulk(start_date=bulk_start, tickers=load_tickers)
     if df_all.empty:
         return {}, []
 
@@ -173,7 +180,7 @@ def prepare_market_data(config):
     except Exception:
         return {}, []
 
-    print(f"🚀 [Step 3] 병렬 데이터 생성...")
+    print(f"🚀 [Step 3] 데이터 생성...")
     tasks = []
     grouped = df_all.groupby('symbol')
 
@@ -181,9 +188,13 @@ def prepare_market_data(config):
         if symbol in target_tickers and symbol != 'SPY':
             tasks.append((symbol, group.set_index('date').sort_index(), config))
 
-    with Pool(processes=cpu_count(), initializer=init_worker, initargs=(spy_df,)) as pool:
-        results = list(pool.imap(process_single_stock, tasks))
-        all_signals = [res for res in results if res is not None]
+    # [최적화] 멀티프로세싱 대신 순차 처리 (안정성 및 오버헤드 방지)
+    all_signals = []
+    init_worker(spy_df) # 전역 SPY 설정
+    for task in tasks:
+        res = process_single_stock(task)
+        if res is not None:
+            all_signals.append(res)
 
     if not all_signals:
         return {}, []
@@ -264,14 +275,18 @@ def run_backtest_with_config(config, verbose=False, prev_trade_halted=None):
     # ----------------------------------------------------------------------
     # 📅 일별 시뮬레이션 루프 시작
     # ----------------------------------------------------------------------
-    for date in date_list:
+    for i, date in enumerate(date_list):
+        if i % 10 == 0:
+            print(f"🕒 [백테스트 진행 중] {date.strftime('%Y-%m-%d')} ({i}/{len(date_list)})")
+        
         date_str = date.strftime('%Y-%m-%d')
         trade_halted = False
 
         if config.get('use_market_regime', True):
             # [The Brain] 국면 판단
             if hasattr(market_analyzer, "get_market_state"):
-                state = market_analyzer.get_market_state(target_date=date_str)
+                # 백테스트 중에는 DB 로그 쓰기(write_log=False)를 비활성화하여 속도 최적화
+                state = market_analyzer.get_market_state(target_date=date_str, write_log=False)
                 regime_name = state["regime"]
                 regime_rule = state["plan"]
                 trade_halted = bool(state.get("trade_halted", False))

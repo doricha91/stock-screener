@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from contextlib import contextmanager
+
+# 프로젝트 루트 경로를 sys.path에 추가
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import config as global_config
 from core.optimizer_engine import run_optimization
 
