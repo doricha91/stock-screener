@@ -45,6 +45,31 @@ def parse_args():
         help="Hedge Mode ON/OFF (default: off)"
     )
     parser.add_argument(
+        "--hedge-bear-ratio",
+        type=float,
+        default=0.2,
+        help="Hedge ratio for BEAR market (default: 0.2)"
+    )
+    parser.add_argument(
+        "--hedge-panic-ratio",
+        type=float,
+        default=0.5,
+        help="Hedge ratio for PANIC market (default: 0.5)"
+    )
+    parser.add_argument(
+        "--min-mode-maintain-days",
+        type=int,
+        default=5,
+        help="Minimum days to maintain HEDGE/LONG mode (default: 5)"
+    )
+    parser.add_argument(
+        "--hedge-liquidation-priority",
+        type=str,
+        choices=["rs_low", "return_low", "weight_low", "age_high"],
+        default="rs_low",
+        help="Priority for selling stocks when entering hedge mode (default: rs_low)"
+    )
+    parser.add_argument(
         "--fast",
         action="store_true",
         help="Run in fast mode (limited tickers and periods)"
@@ -57,6 +82,7 @@ def parse_args():
     return parser.parse_args()
 
 if __name__ == "__main__":
+    import datetime
     args = parse_args()
     
     # CLI 인자에 따른 설정 구성
@@ -64,32 +90,39 @@ if __name__ == "__main__":
     fast_mode = args.fast or FAST_MODE
     enable_log = args.log
     
-    # run_name 생성 (로그 파일명 식별용)
-    run_name = f"opt_hedge_{'on' if use_hedge else 'off'}"
-    if fast_mode: run_name += "_fast"
+    # run_id 생성 (타임스탬프 기반 고유 식별자)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    hedge_suffix = "on" if use_hedge else "off"
+    run_id = f"run_{timestamp}_h{hedge_suffix}"
+    if fast_mode: run_id += "_fast"
 
     # make_config 로직과 동일하게 use_market_regime 결정
     use_market_regime = not fast_mode 
     
     runtime_overrides = SAFETY_FIXED.copy()
+    runtime_overrides["run_id"] = run_id
+    runtime_overrides["run_name"] = run_id # 기존 run_name 호환성 유지
     runtime_overrides["USE_HEDGE_MODE"] = use_hedge
+    runtime_overrides["HEDGE_RATIO_BEAR"] = args.hedge_bear_ratio
+    runtime_overrides["HEDGE_RATIO_PANIC"] = args.hedge_panic_ratio
+    runtime_overrides["MIN_MODE_MAINTAIN_DAYS"] = args.min_mode_maintain_days
+    runtime_overrides["HEDGE_LIQUIDATION_PRIORITY"] = args.hedge_liquidation_priority
     runtime_overrides["enable_decision_logging"] = enable_log
-    runtime_overrides["run_name"] = run_name
 
     # 런타임 정보 출력
     hedge_status_str = "ON" if use_hedge else "OFF"
     print("\n" + "=" * 60)
-    print(f"🚀 [HEDGE={hedge_status_str}] Optimizer 실험을 시작합니다.")
+    print(f"🚀 [ID: {run_id}] Optimizer 실험을 시작합니다.")
     print("=" * 60)
 
-    print(f"🔹 핵심 설정 요약 (런타임 적용):")
+    print(f"🔹 핵심 설정 요약 (런타임 주입):")
     print(f"  - USE_HEDGE_MODE:      {use_hedge}")
-    print(f"  - USE_MARKET_REGIME:   {use_market_regime}")
-    print(f"  - HEDGE_RATIO_BEAR:    {getattr(global_config, 'HEDGE_RATIO_BEAR', 'N/A')}")
-    print(f"  - HEDGE_RATIO_PANIC:   {getattr(global_config, 'HEDGE_RATIO_PANIC', 'N/A')}")
+    print(f"  - HEDGE_RATIO_BEAR:    {args.hedge_bear_ratio}")
+    print(f"  - HEDGE_RATIO_PANIC:   {args.hedge_panic_ratio}")
+    print(f"  - MIN_MODE_MAINTAIN_DAYS: {args.min_mode_maintain_days}")
+    print(f"  - HEDGE_LIQUIDATION_PRIORITY: {args.hedge_liquidation_priority}")
     print(f"  - FAST_MODE:           {fast_mode}")
-    print(f"  - 학습 기간 (Train):   {global_config.IN_SAMPLE_START} ~ {global_config.IN_SAMPLE_END}")
-    print(f"  - 검증 기간 (Test):    {global_config.OUT_OF_SAMPLE_START} ~ {global_config.OUT_OF_SAMPLE_END}")
+    print(f"  - 기간: {global_config.IN_SAMPLE_START} ~ {global_config.OUT_OF_SAMPLE_END}")
 
     print(f"\n🔹 고정 안전장치 (Fixed Safety):")
     for k, v in SAFETY_FIXED.items():
