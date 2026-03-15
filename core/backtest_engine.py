@@ -275,6 +275,8 @@ def run_backtest_with_config(config, verbose=False):
         # [MFU1-C] 1. 목표 포트폴리오 상태 계산 (Target State)
         candidate_rows = []
         for s, row in day_data.iterrows():
+            # [정책 해석] TargetPortfolioState의 entry_signal은 현재 엔진의 'buy_signal'과 매핑함.
+            # 이는 기존 엔진이 '매수 가능 후보'라고 판단한 종목 리스트의 의미를 최대한 보존하기 위한 보수적 연결임.
             candidate_rows.append({
                 'symbol': s,
                 'score': row.get('score', 0.0),
