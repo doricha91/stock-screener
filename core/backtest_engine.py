@@ -303,11 +303,38 @@ def calculate_metrics(equity_history, pf, config, safety_stats):
     sharpe = (cagr / 100) / max(std, 0.0001)
 
     conn = pf._get_conn(); trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn); conn.close()
-    total_trades = len(trades_df); win_rate = (len(trades_df[trades_df['profit'] > 0]) / total_trades * 100) if total_trades > 0 else 0
+    total_trades = len(trades_df)
+    win_rate = 0.0
+    profit_factor = 0.0
+    
+    avg_win = 0.0
+    avg_loss = 0.0
+    
+    if total_trades > 0:
+        win_trades = trades_df[trades_df['profit'] > 0]
+        loss_trades = trades_df[trades_df['profit'] <= 0]
+        win_rate = len(win_trades) / total_trades * 100
+        
+        gross_profit = win_trades['profit'].sum()
+        gross_loss = abs(loss_trades['profit'].sum())
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 99.9
+        
+        avg_win = win_trades['profit'].mean() if not win_trades.empty else 0.0
+        avg_loss = abs(loss_trades['profit'].mean()) if not loss_trades.empty else 0.0
+
+    # 연도별 수익률 계산
+    history_df['equity'] = pd.to_numeric(history_df['equity'])
+    yearly = history_df['equity'].resample('YE').last().pct_change() * 100
+    if not yearly.empty:
+        first_ret = (history_df['equity'].resample('YE').last().iloc[0] - config['initial_capital']) / config['initial_capital'] * 100
+        yearly.iloc[0] = first_ret
+    yearly_json = json.dumps({str(k.year): round(v, 2) for k, v in yearly.items()})
 
     return {
         'return': total_ret, 'cagr': cagr, 'mdd': mdd, 'final_equity': final_equity, 'sharpe': sharpe,
-        'total_trades': total_trades, 'win_rate': win_rate, 'safety_stats': safety_stats,
+        'total_trades': total_trades, 'win_rate': win_rate, 'profit_factor': profit_factor,
+        'avg_win': avg_win, 'avg_loss': avg_loss, 'yearly_json': yearly_json,
+        'safety_stats': safety_stats,
         'period': f"{history_df.index[0].date()} ~ {history_df.index[-1].date()}"
     }
 
@@ -319,6 +346,14 @@ def analyze_results(equity_history, pf, config):
     mdd = ((history_df['equity'] - history_df['equity'].cummax()) / history_df['equity'].cummax()).min() * 100
     print("\n" + "=" * 50); print(f"📊 [최종 백테스트 상세 리포트]"); print("=" * 50)
     print(f"💰 자산: ${config['initial_capital']:,.0f} ➔ ${final:,.0f}"); print(f"🚀 수익률: {total_ret:.2f}% | MDD: {mdd:.2f}%")
+    
+    conn = pf._get_conn(); trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn); conn.close()
+    if not trades_df.empty:
+        total = len(trades_df); wins = len(trades_df[trades_df['profit'] > 0])
+        gross_profit = trades_df[trades_df['profit'] > 0]['profit'].sum()
+        gross_loss = abs(trades_df[trades_df['profit'] <= 0]['profit'].sum())
+        pf_val = gross_profit / gross_loss if gross_loss > 0 else 99.9
+        print(f"🔄 거래: {total}회 | 승률: {wins/total*100:.2f}% | PF: {pf_val:.2f}")
     print("=" * 50)
 
 
@@ -336,12 +371,21 @@ def save_run_results(config, results):
     with open(meta_dir / f"meta_{run_id}.json", "w", encoding="utf-8") as f: json.dump(meta_data, f, indent=4, ensure_ascii=False)
     
     summary_file = summary_dir / f"summary_{run_id}.csv"
-    headers = ['run_id', 'use_hedge_mode', 'hedge_ratio_bear', 'hedge_ratio_panic', 'min_maintain_days', 'total_return', 'cagr', 'mdd', 'sharpe', 'total_trades', 'mode_change_count', 'regime_change_count']
+    headers = ['run_id', 'use_hedge_mode', 'hedge_ratio_bear', 'hedge_ratio_panic', 'min_maintain_days', 'total_return', 'cagr', 'mdd', 'sharpe', 'profit_factor', 'total_trades', 'mode_change_count', 'regime_change_count']
     row = {
-        'run_id': run_id, 'use_hedge_mode': config.get('USE_HEDGE_MODE'), 'hedge_ratio_bear': config.get('HEDGE_RATIO_BEAR'), 'hedge_ratio_panic': config.get('HEDGE_RATIO_PANIC'),
-        'min_maintain_days': config.get('MIN_MODE_MAINTAIN_DAYS'), 'total_return': round(results.get('return', 0), 2), 'cagr': round(results.get('cagr', 0), 2),
-        'mdd': round(results.get('mdd', 0), 2), 'sharpe': round(results.get('sharpe', 0), 2), 'total_trades': results.get('total_trades', 0),
-        'mode_change_count': results.get('safety_stats', {}).get('mode_change_count', 0), 'regime_change_count': results.get('safety_stats', {}).get('regime_change_count', 0)
+        'run_id': run_id, 
+        'use_hedge_mode': config.get('USE_HEDGE_MODE'), 
+        'hedge_ratio_bear': config.get('HEDGE_RATIO_BEAR'), 
+        'hedge_ratio_panic': config.get('HEDGE_RATIO_PANIC'),
+        'min_maintain_days': config.get('MIN_MODE_MAINTAIN_DAYS'), 
+        'total_return': round(results.get('return', 0), 2), 
+        'cagr': round(results.get('cagr', 0), 2),
+        'mdd': round(results.get('mdd', 0), 2), 
+        'sharpe': round(results.get('sharpe', 0), 2), 
+        'profit_factor': round(results.get('profit_factor', 0), 2),
+        'total_trades': results.get('total_trades', 0),
+        'mode_change_count': results.get('safety_stats', {}).get('mode_change_count', 0), 
+        'regime_change_count': results.get('safety_stats', {}).get('regime_change_count', 0)
     }
     with open(summary_file, "w", encoding="utf-8-sig", newline='') as f:
         writer = csv.DictWriter(f, fieldnames=headers); writer.writeheader(); writer.writerow(row)

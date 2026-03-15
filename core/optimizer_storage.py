@@ -19,13 +19,15 @@ def ensure_table_exists(conn, param_keys):
             drawdown_trigger_count INTEGER, breadth_low_count INTEGER,
             ma_cross_bearish_count INTEGER,
             panic_days INTEGER, bear_days INTEGER, 
-            unstable_days INTEGER, bull_days INTEGER
+            unstable_days INTEGER, bull_days INTEGER,
+            mode_change_count INTEGER, regime_change_count INTEGER,
+            order_blocked_count INTEGER
         )
     ''')
     cursor.execute(f"PRAGMA table_info({TABLE_NAME})")
     existing_columns = {row[1] for row in cursor.fetchall()}
     
-    # 파라미터 컬럼 추가
+    # 1. 파라미터 컬럼 추가
     for param in param_keys:
         if param not in existing_columns:
             try:
@@ -33,13 +35,14 @@ def ensure_table_exists(conn, param_keys):
             except:
                 pass
 
-    # 안전장치 컬럼 추가 (기존 테이블 대응)
-    safety_cols = [
+    # 2. 통계 및 안전장치 컬럼 추가 (기존 테이블 대응)
+    stats_cols = [
         'cb_halt_days', 'vix_trigger_count', 'drawdown_trigger_count', 
         'breadth_low_count', 'ma_cross_bearish_count',
-        'panic_days', 'bear_days', 'unstable_days', 'bull_days'
+        'panic_days', 'bear_days', 'unstable_days', 'bull_days',
+        'mode_change_count', 'regime_change_count', 'order_blocked_count'
     ]
-    for col in safety_cols:
+    for col in stats_cols:
         if col not in existing_columns:
             try:
                 cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -49,31 +52,41 @@ def ensure_table_exists(conn, param_keys):
 
 def save_dynamic_result(conn, params, res):
     cursor = conn.cursor()
+    
+    # 기본 성과 지표
     record = {
         'run_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'total_return': round(res['return'], 2),
-        'cagr': round(res['cagr'], 2),
-        'mdd': round(res['mdd'], 2),
-        'final_equity': round(res['final_equity'], 0),
+        'total_return': round(res.get('return', 0), 2),
+        'cagr': round(res.get('cagr', 0), 2),
+        'mdd': round(res.get('mdd', 0), 2),
+        'final_equity': round(res.get('final_equity', 0), 0),
         'sharpe_ratio': round(res.get('sharpe', 0), 4),
         'sortino_ratio': round(res.get('sortino', 0), 4),
         'calmar_ratio': round(res.get('calmar', 0), 4),
-        'win_rate': round(res['win_rate'], 2),
-        'profit_factor': round(res['profit_factor'], 2),
-        'total_trades': res['total_trades'],
-        'avg_win': round(res['avg_win'], 2),
-        'avg_loss': round(res['avg_loss'], 2),
+        'win_rate': round(res.get('win_rate', 0), 2),
+        'profit_factor': round(res.get('profit_factor', 0), 2),
+        'total_trades': res.get('total_trades', 0),
+        'avg_win': round(res.get('avg_win', 0), 2),
+        'avg_loss': round(res.get('avg_loss', 0), 2),
         'yearly_returns': res.get('yearly_json', '{}')
     }
     
-    # 안전장치 통계 추가
+    # [보강] 안전장치 및 통계 데이터 병합
     if 'safety_stats' in res:
         record.update(res['safety_stats'])
         
+    # 파라미터 병합
     record.update(params)
-    columns = ', '.join(record.keys())
-    placeholders = ', '.join(['?'] * len(record))
-    values = list(record.values())
+    
+    # DB에 실제 존재하는 컬럼만 필터링 (안정성 확보)
+    cursor.execute(f"PRAGMA table_info({TABLE_NAME})")
+    db_cols = {row[1] for row in cursor.fetchall()}
+    valid_record = {k: v for k, v in record.items() if k in db_cols}
+    
+    columns = ', '.join(valid_record.keys())
+    placeholders = ', '.join(['?'] * len(valid_record))
+    values = list(valid_record.values())
+    
     try:
         cursor.execute(f"INSERT INTO {TABLE_NAME} ({columns}) VALUES ({placeholders})", values)
         conn.commit()
