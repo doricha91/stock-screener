@@ -7,6 +7,11 @@ from multiprocessing import Pool, cpu_count
 from screener import data_manager, strategy, indicator
 from screener.portfolio import PortfolioDB
 from pathlib import Path
+from core.target_portfolio_state import (
+    build_target_portfolio_state, 
+    CurrentPortfolioState, 
+    evaluate_rebalance_need
+)
 
 
 def init_worker(spy_data):
@@ -201,6 +206,7 @@ def run_backtest_with_config(config, verbose=False):
     for i, date in enumerate(date_list):
         date_str = date.strftime('%Y-%m-%d')
         trade_halted = False
+        regime_name = "UNKNOWN"
 
         if config.get('use_market_regime', True):
             state = market_analyzer.get_market_state(target_date=date_str, write_log=False)
@@ -266,6 +272,64 @@ def run_backtest_with_config(config, verbose=False):
         
         equity_history.append({'date': date, 'equity': pf.get_account_status()['total_equity']})
 
+        # [MFU1-C] 1. 목표 포트폴리오 상태 계산 (Target State)
+        candidate_rows = []
+        for s, row in day_data.iterrows():
+            candidate_rows.append({
+                'symbol': s,
+                'score': row.get('score', 0.0),
+                'rs_val': row.get('rs_val', 0.0),
+                'entry_signal': bool(row.get('buy_signal', False))
+            })
+        
+        target_state = build_target_portfolio_state(
+            market_state=regime_name,
+            candidate_rows=candidate_rows,
+            config=config
+        )
+
+        # [MFU1-C] 2. 현재 포트폴리오 상태 구성 (Current State)
+        status = pf.get_account_status()
+        positions = pf.get_positions()
+        
+        current_symbols = [s for s, info in positions.items() if info.get('strategy_name') != "Hedge"]
+        hedge_symbols = [s for s, info in positions.items() if info.get('strategy_name') == "Hedge"]
+        
+        total_equity = status['total_equity']
+        current_cash_ratio = status['cash'] / total_equity if total_equity > 0 else 1.0
+        
+        hedge_value = 0.0
+        for s in hedge_symbols:
+            pos_info = positions[s]
+            hedge_value += pos_info['shares'] * pos_info['current_price']
+        current_hedge_ratio = hedge_value / total_equity if total_equity > 0 else 0.0
+
+        current_state = CurrentPortfolioState(
+            current_symbols=current_symbols,
+            current_cash_ratio=current_cash_ratio,
+            current_hedge_ratio=current_hedge_ratio,
+            hedge_symbols=hedge_symbols
+        )
+
+        # [MFU1-C] 3. 리밸런싱 판정 (Rebalance Decision)
+        decision = evaluate_rebalance_need(current_state, target_state, config)
+
+        # [MFU1-C] 4. 의사결정 로깅
+        if d_logger:
+            d_logger.log_event(
+                date=date_str,
+                regime=regime_name,
+                mode=current_mode,
+                event="DAILY_CHECK",
+                details=f"TargetSlots: {target_state.target_long_slots}",
+                status=status,
+                target_cash_ratio=target_state.target_cash_ratio,
+                rebalance_needed=decision.rebalance_needed,
+                rebalance_reason="|".join(decision.rebalance_reason),
+                target_symbols="|".join(target_state.target_symbols),
+                current_symbols="|".join(current_symbols)
+            )
+
         for s, info in list(pf.get_positions().items()):
             if s not in day_data.index: continue
             row = day_data.loc[s]; ts_mult = config.get('trailing_stop_multiplier', 2.5)
@@ -302,7 +366,7 @@ def calculate_metrics(equity_history, pf, config, safety_stats):
     std = history_df['daily_ret'].std() * np.sqrt(252)
     sharpe = (cagr / 100) / max(std, 0.0001)
 
-    conn = pf._get_conn(); trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn); conn.close()
+    conn = pf.conn; trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn)
     total_trades = len(trades_df)
     win_rate = 0.0
     profit_factor = 0.0
@@ -347,7 +411,7 @@ def analyze_results(equity_history, pf, config):
     print("\n" + "=" * 50); print(f"📊 [최종 백테스트 상세 리포트]"); print("=" * 50)
     print(f"💰 자산: ${config['initial_capital']:,.0f} ➔ ${final:,.0f}"); print(f"🚀 수익률: {total_ret:.2f}% | MDD: {mdd:.2f}%")
     
-    conn = pf._get_conn(); trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn); conn.close()
+    conn = pf.conn; trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn)
     if not trades_df.empty:
         total = len(trades_df); wins = len(trades_df[trades_df['profit'] > 0])
         gross_profit = trades_df[trades_df['profit'] > 0]['profit'].sum()
