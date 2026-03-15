@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 import math
 
 @dataclass(frozen=True)
@@ -15,7 +15,31 @@ class TargetPortfolioState:
     target_hedge_ratio: float # 목표 헤지(인버스) 비중 (0.0 ~ 1.0)
     target_long_slots: int   # 진입 가능한 롱(매수) 포지션 최대 개수
     target_symbols: List[str] # 최종 선택된 목표 매수 종목 리스트
+
+@dataclass(frozen=True)
+class CurrentPortfolioState:
+    """
+    현재 계좌의 포트폴리오 상태 정보를 담는 데이터 구조.
     
+    TargetPortfolioState와 비교하여 리밸런싱 필요 여부를 판단하는 데 사용됩니다.
+    """
+    current_symbols: List[str]  # 현재 보유 중인 롱(매수) 종목 리스트
+    current_cash_ratio: float   # 현재 계좌 내 현금 비중 (0.0 ~ 1.0)
+    current_hedge_ratio: float  # 현재 계좌 내 헤지(인버스) 종목 비중 (0.0 ~ 1.0)
+    hedge_symbols: List[str] = field(default_factory=list) # 현재 보유 중인 헤지 종목 리스트
+
+@dataclass(frozen=True)
+class RebalanceDecision:
+    """
+    현재 상태와 목표 상태를 비교한 리밸런싱 판단 결과.
+    """
+    rebalance_needed: bool          # 리밸런싱(주문)이 필요한지 여부
+    rebalance_reason: List[str]     # 리밸런싱이 필요한 이유 코드 목록
+    symbol_diff_added: List[str]    # 신규 진입이 필요한 종목
+    symbol_diff_removed: List[str]  # 제외(매도)가 필요한 종목
+    cash_ratio_diff: float          # 현금 비중 차이 (target - current)
+    hedge_ratio_diff: float         # 헤지 비중 차이 (target - current)
+
 def determine_target_long_slots(
     market_state: str, 
     max_positions: int, 
@@ -189,4 +213,93 @@ def build_target_portfolio_state(
         target_hedge_ratio=allocation['target_hedge_ratio'],
         target_long_slots=allocation['target_long_slots'],
         target_symbols=target_symbols
+    )
+
+# --- B단계: 현재 상태 비교 및 리밸런싱 판정 ---
+
+def compare_symbol_sets(current: List[str], target: List[str]) -> Dict[str, Any]:
+    """
+    [정책 명세] 현재 보유 종목과 목표 종목 구성을 비교합니다.
+    
+    정책:
+    - 종목의 순서 차이는 리밸런싱 사유로 보지 않습니다. (순수한 집합 구성 비교)
+    - 추가될 종목(added)과 제거될 종목(removed)을 반환합니다.
+    """
+    curr_set = set(current)
+    targ_set = set(target)
+    
+    added = sorted(list(targ_set - curr_set))
+    removed = sorted(list(curr_set - targ_set))
+    
+    return {
+        'added': added,
+        'removed': removed,
+        'changed': len(added) > 0 or len(removed) > 0
+    }
+
+def compare_ratio(current: float, target: float, tolerance: float) -> Dict[str, Any]:
+    """
+    [정책 명세] 현재 비중과 목표 비중의 차이를 허용 오차 범위 내에서 비교합니다.
+    
+    정책:
+    - abs(target - current) > tolerance 일 때만 유의미한 차이(deviation)로 간주합니다.
+    - 정밀한 부동소수점 비교를 위해 '>' 대신 미세 오차를 고려할 수 있으나, 
+      현재는 단순 '>' 기준을 적용합니다.
+    """
+    diff = target - current
+    is_deviated = abs(diff) > tolerance
+    return {
+        'diff': diff,
+        'is_deviated': is_deviated
+    }
+
+def evaluate_rebalance_need(
+    current_state: CurrentPortfolioState,
+    target_state: TargetPortfolioState,
+    config: Optional[Dict[str, Any]] = None
+) -> RebalanceDecision:
+    """
+    [정책 명세] 현재 포트폴리오 상태와 목표 상태를 비교하여 리밸런싱 필요 여부와 사유를 판정합니다.
+    
+    판정 기준:
+    1. 종목 구성 차이 (SYMBOL_SET_CHANGED): 보유 종목 집합이 목표 종목 집합과 다를 때
+    2. 현금 비중 이탈 (CASH_RATIO_DEVIATION): 현재 현금 비중이 목표와 허용 오차 이상 차이날 때
+    3. 헤지 비중 이탈 (HEDGE_RATIO_DEVIATION): 현재 헤지 비중이 목표와 허용 오차 이상 차이날 때
+    
+    허용 오차 정책:
+    - config 내 'cash_ratio_tolerance', 'hedge_ratio_tolerance'를 우선 참조
+    - 없을 경우 fallback: 0.05 (5%) 적용
+    """
+    config = config or {}
+    cash_tol = config.get('cash_ratio_tolerance', 0.05)
+    hedge_tol = config.get('hedge_ratio_tolerance', 0.05)
+    
+    rebalance_needed = False
+    rebalance_reasons = []
+    
+    # 1. 종목 비교
+    sym_diff = compare_symbol_sets(current_state.current_symbols, target_state.target_symbols)
+    if sym_diff['changed']:
+        rebalance_needed = True
+        rebalance_reasons.append("SYMBOL_SET_CHANGED")
+        
+    # 2. 현금 비중 비교
+    cash_comp = compare_ratio(current_state.current_cash_ratio, target_state.target_cash_ratio, cash_tol)
+    if cash_comp['is_deviated']:
+        rebalance_needed = True
+        rebalance_reasons.append("CASH_RATIO_DEVIATION")
+        
+    # 3. 헤지 비중 비교
+    hedge_comp = compare_ratio(current_state.current_hedge_ratio, target_state.target_hedge_ratio, hedge_tol)
+    if hedge_comp['is_deviated']:
+        rebalance_needed = True
+        rebalance_reasons.append("HEDGE_RATIO_DEVIATION")
+        
+    return RebalanceDecision(
+        rebalance_needed=rebalance_needed,
+        rebalance_reason=rebalance_reasons,
+        symbol_diff_added=sym_diff['added'],
+        symbol_diff_removed=sym_diff['removed'],
+        cash_ratio_diff=cash_comp['diff'],
+        hedge_ratio_diff=hedge_comp['diff']
     )
