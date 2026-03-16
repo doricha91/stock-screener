@@ -10,7 +10,8 @@ from pathlib import Path
 from core.target_portfolio_state import (
     build_target_portfolio_state, 
     CurrentPortfolioState, 
-    evaluate_rebalance_need
+    evaluate_rebalance_need,
+    get_cash_policy_status
 )
 
 
@@ -216,8 +217,15 @@ def run_backtest_with_config(config, verbose=False):
             if regime_name != prev_regime_name:
                 safety_stats['regime_change_count'] += 1
                 if d_logger:
-                    d_logger.log_event(date_str, regime_name, current_mode, "REGIME_CHANGE", 
-                                     f"{prev_regime_name} -> {regime_name}", pf.get_account_status(), target_cash_ratio)
+                    status = pf.get_account_status()
+                    cp_status = get_cash_policy_status(status['cash'], status['total_equity'], target_cash_ratio)
+                    d_logger.log_event(
+                        date_str, regime_name, current_mode, "REGIME_CHANGE", 
+                        f"{prev_regime_name} -> {regime_name}", status, target_cash_ratio,
+                        required_cash_buffer=cp_status['required_cash_buffer'],
+                        available_buying_power=cp_status['available_buying_power'],
+                        is_violating_buffer=cp_status['is_violating_buffer']
+                    )
                 prev_regime_name = regime_name
 
             for strat, weight in regime_rule['weights'].items(): config[f"{strat}_weight"] = weight
@@ -316,6 +324,9 @@ def run_backtest_with_config(config, verbose=False):
         # [MFU1-C] 3. 리밸런싱 판정 (Rebalance Decision)
         decision = evaluate_rebalance_need(current_state, target_state, config)
 
+        # [MFU2-2] 현금 정책 상태 계산 (Shallow Integration)
+        cp_status = get_cash_policy_status(status['cash'], total_equity, target_state.target_cash_ratio)
+
         # [MFU1-C] 4. 의사결정 로깅
         if d_logger:
             d_logger.log_event(
@@ -329,7 +340,10 @@ def run_backtest_with_config(config, verbose=False):
                 rebalance_needed=decision.rebalance_needed,
                 rebalance_reason="|".join(decision.rebalance_reason),
                 target_symbols="|".join(target_state.target_symbols),
-                current_symbols="|".join(current_symbols)
+                current_symbols="|".join(current_symbols),
+                required_cash_buffer=cp_status['required_cash_buffer'],
+                available_buying_power=cp_status['available_buying_power'],
+                is_violating_buffer=cp_status['is_violating_buffer']
             )
 
         for s, info in list(pf.get_positions().items()):

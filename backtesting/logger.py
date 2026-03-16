@@ -25,6 +25,7 @@ class DecisionLogger:
         self.headers = [
             "date", "regime", "mode", "event", "details", 
             "total_equity", "cash", "target_cash_ratio", "actual_cash_ratio",
+            "required_cash_buffer", "available_buying_power", "is_violating_buffer",
             "rebalance_needed", "rebalance_reason", "target_symbols", "current_symbols"
         ]
         self._write_header()
@@ -36,7 +37,9 @@ class DecisionLogger:
 
     def log_event(self, date: str, regime: str, mode: str, event: str, details: str, status: dict, 
                   target_cash_ratio: float, rebalance_needed: bool = False, 
-                  rebalance_reason: str = "", target_symbols: str = "", current_symbols: str = ""):
+                  rebalance_reason: str = "", target_symbols: str = "", current_symbols: str = "",
+                  required_cash_buffer: float = 0.0, available_buying_power: float = 0.0,
+                  is_violating_buffer: bool = False):
         actual_cash_ratio = status['cash'] / status['total_equity'] if status['total_equity'] > 0 else 0
         
         with open(self.file_path, "a", newline="", encoding="utf-8") as f:
@@ -47,6 +50,9 @@ class DecisionLogger:
                 f"{status['cash']:.2f}",
                 f"{target_cash_ratio:.2f}",
                 f"{actual_cash_ratio:.2f}",
+                f"{required_cash_buffer:.2f}",
+                f"{available_buying_power:.2f}",
+                str(is_violating_buffer),
                 str(rebalance_needed),
                 rebalance_reason,
                 target_symbols,
