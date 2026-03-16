@@ -346,23 +346,67 @@ def run_backtest_with_config(config, verbose=False):
                 is_violating_buffer=cp_status['is_violating_buffer']
             )
 
+        # [MFU2-3] 신규 매수 집행 제약 반영
+        # available_buying_power는 '현금 - 필수 버퍼'의 가용 자금임.
+        remaining_bp = cp_status['available_buying_power']
+
         for s, info in list(pf.get_positions().items()):
             if s not in day_data.index: continue
             row = day_data.loc[s]; ts_mult = config.get('trailing_stop_multiplier', 2.5)
             ts_trig, _ = pf.check_trailing_stop(s, row['close'], row['atr'], ts_mult)
             if row['sell_signal'] or ts_trig: pf.sell(s, row['close'], info['shares'], date, reason="Exit")
 
-        status = pf.get_account_status(); req_cash = status['total_equity'] * target_cash_ratio
-        if (not trade_halted) and len(pf.get_positions()) < config['max_positions'] and (status['cash'] - req_cash) > 0:
-            candidates = day_data[day_data['buy_signal'] == True]
-            candidates = candidates[~candidates.index.isin(pf.get_positions().keys())].sort_values(by='rs_val', ascending=False)
-            for s, row in candidates.iterrows():
-                cash = pf.get_account_status()['cash'] - req_cash
-                if len(pf.get_positions()) >= config['max_positions'] or cash < row['close']: break
-                shares = min(int((status['total_equity']/config['max_positions'])/row['close']), int(cash/row['close']))
-                if shares > 0: pf.buy(s, row['close'], shares, date, strategy_name="Ensemble")
-        elif (status['cash'] - req_cash) <= 0 and target_cash_ratio > 0:
-            safety_stats['order_blocked_count'] += 1
+        # 신규 매수 루프
+        if (not trade_halted) and len(pf.get_positions()) < config['max_positions']:
+            if remaining_bp <= 0:
+                if target_cash_ratio > 0 and d_logger:
+                    # 현금 정책에 의해 매수가 원천 차단된 경우 로깅
+                    d_logger.log_event(
+                        date=date_str, regime=regime_name, mode=current_mode,
+                        event="ORDER_BLOCKED", details=f"Cash policy violation or zero BP. BP: {remaining_bp:.2f}",
+                        status=status, target_cash_ratio=target_state.target_cash_ratio,
+                        rebalance_reason="BUY_BLOCKED_BY_CASH_BUFFER",
+                        required_cash_buffer=cp_status['required_cash_buffer'],
+                        available_buying_power=cp_status['available_buying_power'],
+                        is_violating_buffer=cp_status['is_violating_buffer']
+                    )
+                if remaining_bp <= 0 and target_cash_ratio > 0:
+                    safety_stats['order_blocked_count'] += 1
+            else:
+                candidates = day_data[day_data['buy_signal'] == True]
+                candidates = candidates[~candidates.index.isin(pf.get_positions().keys())].sort_values(by='rs_val', ascending=False)
+                
+                for s, row in candidates.iterrows():
+                    if len(pf.get_positions()) >= config['max_positions']:
+                        break
+                        
+                    if remaining_bp < row['close']:
+                        if d_logger:
+                            d_logger.log_event(
+                                date=date_str, regime=regime_name, mode=current_mode,
+                                event="ORDER_SKIPPED", details=f"Insufficient BP for {s}. Required: {row['close']:.2f}, BP: {remaining_bp:.2f}",
+                                status=status, target_cash_ratio=target_state.target_cash_ratio,
+                                rebalance_reason="INSUFFICIENT_BUYING_POWER",
+                                required_cash_buffer=cp_status['required_cash_buffer'],
+                                available_buying_power=remaining_bp,
+                                is_violating_buffer=cp_status['is_violating_buffer']
+                            )
+                        continue
+                    
+                    # 종목당 배분 금액 계산 (동일 비중 원칙)
+                    target_pos_value = total_equity / config['max_positions']
+                    # 가용 자금과 목표 금액 중 작은 것을 기준으로 수량 결정
+                    affordable_value = min(target_pos_value, remaining_bp)
+                    shares = int(affordable_value / row['close'])
+                    
+                    if shares > 0:
+                        order_value = shares * row['close']
+                        pf.buy(s, row['close'], shares, date, strategy_name="Ensemble")
+                        # 매수 집행 후 남은 구매력 갱신
+                        remaining_bp -= order_value
+                        # status 및 cp_status는 루프 내에서 매번 갱신하지 않고 
+                        # remaining_bp를 통해 논리적 제약을 유지함 (MFU2-3 정책)
+
 
     results = calculate_metrics(equity_history, pf, config, safety_stats)
     if verbose: analyze_results(equity_history, pf, config)

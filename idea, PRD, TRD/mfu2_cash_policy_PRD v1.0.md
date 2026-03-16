@@ -1,39 +1,36 @@
-# [PRD] MFU2 2단계: 현금 정책 엔진 연결 및 관찰성 강화 v1.0
+# [PRD] MFU2 3단계: 현금 정책 집행 제약 반영 v1.0
 
 ## 1. 개요 (Background & Objectives)
-*   **배경**: MFU2 1단계에서 구현한 현금 정책 helper가 엔진 내부에서 실제로 호출되지 않아, 매 거래일의 구매력(Buying Power) 수치를 확인할 수 없음.
-*   **목표**: `backtest_engine.py`의 일일 루프에 현금 정책 helper를 연결하여, 정책 준수 여부와 가용 자금을 매일 계산하고 로그에 기록함.
+*   **배경**: MFU2 2단계를 통해 현금 정책 수치가 엔진 로그에 기록되고 있으나, 실제 매수 집행 시에는 이 수치가 강제적인 제약으로 작용하지 않음.
+*   **목표**: `available_buying_power`를 신규 매수 루프에 직접 연결하여, 목표 현금 비중을 침범하는 모든 신규 진입을 구조적으로 차단함.
 
 ## 2. 주요 기능 범위 (Feature Scope)
 
-### 2.1 엔진 내부 연결 (Engine Integration)
-*   **데이터 흐름**: 엔진의 현재 자산(`total_equity`), 현금(`cash`), 목표 비중(`target_cash_ratio`)을 정책 helper에 전달.
-*   **계산 시점**: 매일 리밸런싱 판정 후, 실제 매수 집행 직전에 정책 상태를 계산.
+### 2.1 매수 집행 제약 (Execution Constraint)
+*   **가용 자금 기반 매수**: 신규 매수 시 `available_buying_power`를 매수 가능 총액의 상한선으로 사용.
+*   **수량 결정 정책**: `min(종목당 배분 금액, 남은 구매력)`을 기준으로 매수 수량 산출.
+*   **순차적 차감**: 매 거래일 내 여러 종목 매수 시, 이전 매수 금액을 차감한 `remaining_bp`를 다음 종목 매수에 실시간 반영.
 
-### 2.2 관찰성 보강 (Observability)
-*   **DecisionLogger 확장**: 로그 파일(`decision_*.csv`)에 현금 정책 관련 3개 필드 추가.
-    - `required_cash_buffer`: 필수 유지 현금액.
-    - `available_buying_power`: 신규 매수 가능 금액.
-    - `is_violating_buffer`: 정책 위반 여부.
+### 2.2 차단 사유 명세 (Reason Logging)
+*   **원천 차단 (`ORDER_BLOCKED`)**: 가용 구매력이 0 이하이거나 정책 위반 상태일 때 매수 루프 진입 전 차단.
+*   **자금 부족 (`ORDER_SKIPPED`)**: 개별 종목 매수 시 필요한 최소 금액(1주 가격)보다 남은 구매력이 적을 때 해당 종목 스킵.
 
-### 2.3 정책 정합성 검증 (Validation)
-*   **통합 테스트**: 백테스트 실행 시 로그 파일에 정책 수치가 정확히 기록되는지 검증하는 테스트 추가.
+### 2.3 정책 보호 및 검증 (Validation)
+*   **강제 집행 확인**: `target_cash_ratio`가 높게 설정된 시나리오에서 실제 현금 비중이 목표치 이하로 떨어지지 않는지 검증.
 
 ## 3. 기술적 상세 사양 (Technical Specifications)
-*   **수정 파일**:
-    - `core/backtest_engine.py`: 정책 helper 호출 및 데이터 매핑.
-    - `backtesting/logger.py`: 로그 헤더 및 데이터 기록 로직 확장.
-*   **데이터 출처**:
-    - `total_equity`, `current_cash`: `pf.get_account_status()`로부터 획득.
-    - `target_cash_ratio`: `target_state.target_cash_ratio`로부터 획득.
+*   **수정 파일**: `core/backtest_engine.py`
+*   **로직 변경**:
+    - 레거시 `req_cash` 기반 단순 비교 로직을 삭제하고 `remaining_bp` 기반의 동적 제약 로직으로 교체.
+    - 매수 성공 후 `remaining_bp -= order_value` 수행으로 누적 제약 보장.
 
 ## 4. 성공 지표 (Success Metrics)
-*   **관찰 가능성**: 백테스트 로그를 통해 매일의 '필수 현금 버퍼'와 '실제 구매력'을 수치로 확인 가능함.
-*   **정확성**: 통합 테스트(`test_mfu2_2_integration.py`)를 통해 계산 로직과 기록 로직의 정합성 확인.
-*   **안정성**: 기존 백테스트 실행 결과(수익률 등)에 영향을 주지 않음 (Shallow Integration).
+*   **정책 준수**: 모든 백테스트 시나리오에서 `actual_cash_ratio >= target_cash_ratio`가 강제됨.
+*   **추적성**: 로그를 통해 어떤 종목이 어떤 금액 부족으로 못 샀는지 `INSUFFICIENT_BUYING_POWER` 사유로 확인 가능.
+*   **안정성**: 기존 매도/포지션 유지 로직과의 충돌 없음.
 
 ## 5. 단계별 구현 로드맵 (MFU2 Roadmap Update)
 *   **1단계**: 정책 명세화 및 계산 Helper 구현 (완료).
-*   **2단계 (현재)**: 엔진 연결 및 로깅 강화 (완료).
-*   **3단계**: `available_buying_power`를 실제 신규 매수 수량 제한에 반영 (예정).
-*   **4단계**: 현금 부족 시 진입 차단 사유 상세 로깅 (예정).
+*   **2단계**: 엔진 연결 및 로깅 강화 (완료).
+*   **3단계 (현재)**: 실제 집행 제약 반영 (완료).
+*   **4단계**: 현금 부족 시 진입 차단 사유 상세 로깅 및 정책 예외 처리 고도화 (예정).
