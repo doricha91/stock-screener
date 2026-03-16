@@ -215,7 +215,79 @@ def build_target_portfolio_state(
         target_symbols=target_symbols
     )
 
-# --- B단계: 현재 상태 비교 및 리밸런싱 판정 ---
+# --- C단계: 현금 집행 정책 (Cash Execution Policy) ---
+
+"""
+[MFU2 Phase 1: 현금 비중 정책 해석 정의]
+
+이 섹션은 목표 현금 비중(target_cash_ratio)을 실제 매매 집행 시 어떻게 제약으로 해석할지 정의합니다.
+
+정책 원칙:
+1. Minimum Cash Buffer: target_cash_ratio는 계좌에서 '반드시 유지해야 하는 최소 현금 비율'로 해석합니다.
+2. Buying Power 제한: 신규 매수 가능 금액(Buying Power)은 '현재 현금 - 필수 현금 버퍼'의 초과분으로 제한됩니다.
+3. 보수적 집행: 현재 현금이 필수 버퍼보다 적을 경우, 추가 매수는 완전히 차단됩니다 (Buying Power = 0).
+4. MFU2 1단계: 이 함수들은 정책을 '계산 가능'하게 만드는 helper이며, 실제 엔진(backtest_engine)과의 
+   깊은 연결은 후속 단계에서 진행합니다.
+"""
+
+def calculate_required_cash_buffer(total_equity: float, target_cash_ratio: float) -> float:
+    """
+    [정책] 총 자산 대비 유지해야 할 최소 현금 버퍼 금액을 계산합니다.
+    
+    계산식: total_equity * target_cash_ratio
+    """
+    if total_equity <= 0:
+        return 0.0
+    return total_equity * max(0.0, min(1.0, target_cash_ratio))
+
+def calculate_available_buying_power(
+    current_cash: float, 
+    total_equity: float, 
+    target_cash_ratio: float
+) -> float:
+    """
+    [정책] 현재 현금과 목표 비중을 기반으로 실제 신규 매수 가능한 금액을 계산합니다.
+    
+    정책 해석:
+    1. required_buffer = total_equity * target_cash_ratio
+    2. available_buying_power = max(0, current_cash - required_buffer)
+    
+    의도:
+    - 현재 현금이 target_cash_ratio에 의해 보호받아야 할 버퍼보다 많을 때만 그 초과분을 사용합니다.
+    - 만약 현재 현금이 부족하다면(buffer 이하), 신규 매수는 불가능한 것으로 봅니다.
+    """
+    if total_equity <= 0:
+        return 0.0
+        
+    required_buffer = calculate_required_cash_buffer(total_equity, target_cash_ratio)
+    available = current_cash - required_buffer
+    
+    return max(0.0, available)
+
+def get_cash_policy_status(
+    current_cash: float,
+    total_equity: float,
+    target_cash_ratio: float
+) -> Dict[str, Any]:
+    """
+    [정책] 현금 정책 준수 현황을 종합하여 반환합니다. (로깅 및 판단용)
+    """
+    required_buffer = calculate_required_cash_buffer(total_equity, target_cash_ratio)
+    buying_power = calculate_available_buying_power(current_cash, total_equity, target_cash_ratio)
+    
+    current_cash_ratio = current_cash / total_equity if total_equity > 0 else 1.0
+    is_violating_buffer = current_cash < required_buffer
+    
+    return {
+        'total_equity': total_equity,
+        'current_cash': current_cash,
+        'current_cash_ratio': current_cash_ratio,
+        'target_cash_ratio': target_cash_ratio,
+        'required_cash_buffer': required_buffer,
+        'available_buying_power': buying_power,
+        'is_violating_buffer': is_violating_buffer
+    }
+
 
 def compare_symbol_sets(current: List[str], target: List[str]) -> Dict[str, Any]:
     """
