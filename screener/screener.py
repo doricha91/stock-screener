@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 import config
 import market_analyzer
+from core.decision_core import compute_candidate_score, is_enterable_candidate
 from core.paths import OUTPUTS, market_db_path
 from screener import data_manager, indicator, strategy
 
@@ -66,19 +67,6 @@ def _prepare_data_for_ensemble(df: pd.DataFrame) -> pd.DataFrame | None:
     return df
 
 
-def _calculate_ensemble_score(latest_row: pd.Series) -> tuple[float, list[str]]:
-    total_score = 0.0
-    triggered_strategies: list[str] = []
-
-    for strategy_name, weight in STRATEGY_WEIGHTS.items():
-        col_name = f"signal_{strategy_name}"
-        if col_name in latest_row and latest_row[col_name] == 1:
-            total_score += weight
-            triggered_strategies.append(strategy_name)
-
-    return total_score, triggered_strategies
-
-
 def _resolve_market_state(market_state: dict | None = None) -> dict:
     if market_state is not None:
         return market_state
@@ -129,9 +117,9 @@ def build_screener_results(
             df = strategy.apply_ensemble_strategy(df, DEFAULT_PARAMS)
 
             latest_row = df.iloc[-1]
-            score, reasons = _calculate_ensemble_score(latest_row)
+            score, reasons = compute_candidate_score(latest_row, STRATEGY_WEIGHTS)
 
-            if score >= SCORE_THRESHOLD:
+            if is_enterable_candidate(score, SCORE_THRESHOLD, regime):
                 recommendations.append(
                     {
                         "Symbol": symbol,
