@@ -36,8 +36,8 @@ def is_enterable_candidate(score: float, threshold: float, regime: str) -> bool:
     Returns:
         bool: 진입 가능 여부
     """
-    # 1. PANIC 국면인 경우 무조건 진입 불가
-    if regime == "PANIC":
+    # 1. PANIC 국면인 경우 무조건 진입 불가 (대소문자 무시)
+    if regime.upper() == "PANIC":
         return False
     
     # 2. 점수가 임계값 이상인지 확인

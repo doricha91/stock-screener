@@ -33,7 +33,18 @@ def test_compute_candidate_score():
     assert score == 3.5
     assert set(reasons) == {"turtle", "sma"}
     
-    # 3. 신호가 없는 경우
+    # 3. 신호 컬럼 자체가 누락된 경우 (Edge Case: 지표 계산 실패 등)
+    # 가중치 딕셔너리에는 'rsi'가 있지만, row에는 'signal_rsi' 컬럼이 없는 경우
+    row_missing_col = pd.Series({
+        "signal_turtle": 1,
+        "close": 100
+        # signal_rsi, signal_sma 누락
+    })
+    score, reasons = compute_candidate_score(row_missing_col, weights)
+    assert score == 2.0
+    assert reasons == ["turtle"]
+    
+    # 4. 신호가 없는 경우
     row_none = pd.Series({
         "signal_turtle": 0,
         "signal_rsi": 0,
@@ -52,13 +63,15 @@ def test_is_enterable_candidate():
     
     # 2. BULL 국면, 점수 충족
     assert is_enterable_candidate(2.0, threshold, "BULL") is True
-    assert is_enterable_candidate(3.0, threshold, "BULL") is True
     
-    # 3. PANIC 국면 (점수 관계없이 False)
+    # 3. PANIC 국면 (대소문자 무시 체크)
     assert is_enterable_candidate(5.0, threshold, "PANIC") is False
+    assert is_enterable_candidate(5.0, threshold, "panic") is False
+    assert is_enterable_candidate(5.0, threshold, "Panic") is False
     
-    # 4. BEAR 국면, 점수 충족
+    # 4. BEAR 국면 (대소문자 무시 체크)
     assert is_enterable_candidate(2.5, threshold, "BEAR") is True
+    assert is_enterable_candidate(2.5, threshold, "bear") is True
 
 if __name__ == "__main__":
     pytest.main([__file__])

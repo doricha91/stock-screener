@@ -87,11 +87,7 @@ def build_screener_results(
     print("=" * 50)
     print(f"\n[Step 1] Market: {regime} | {description}")
 
-    if regime == "PANIC":
-        print("\nPANIC regime. Skip new buy candidates.")
-        return pd.DataFrame()
-
-    if regime == "BEAR":
+    if regime.upper() == "BEAR":
         print("\nBEAR regime. Continue screening with conservative interpretation.")
 
     if tickers is None:
