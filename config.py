@@ -33,6 +33,9 @@ TICKER_LIST = [
 # 리밸런싱 주기 설정: 'D' (Daily), 'W' (Weekly), 'M' (Monthly), 'Q' (Quarterly)
 REBALANCE_FREQUENCY = 'M'
 
+# 교체 매매 프리미엄: 신규 종목 점수가 기존 종목보다 이 값 이상 높아야 교체 수행
+SWITCHING_PREMIUM = 1.0
+
 # (총 자산 대비) 한 번의 거래에서 감수할 최대 손실 비율
 RISK_PER_TRADE_PERCENT = 0.01  # (예: 1%)
 
