@@ -4,6 +4,7 @@ import json
 import market_analyzer
 import csv
 from multiprocessing import Pool, cpu_count
+from core.decision_core import compute_candidate_score, is_enterable_candidate
 from screener import data_manager, strategy, indicator
 from screener.portfolio import PortfolioDB
 from pathlib import Path
@@ -88,7 +89,7 @@ def process_single_stock(args):
         if 'entry_high' not in df.columns:
             return None
 
-        # 점수 합산
+        # 점수 합산 가중치 정의
         weights = {
             'turtle': context.get('turtle_weight', 1.0),
             'rsi': context.get('rsi_weight', 1.0),
@@ -100,17 +101,16 @@ def process_single_stock(args):
             'obv': context.get('obv_weight', 0.5),
             'mfi': context.get('mfi_weight', 0.5),
             'vol_spike': context.get('vol_spike_weight', 0.5),
-            'rs': context.get('rs_weight', 0.0)
         }
 
-        df['score'] = 0.0
-        for name, weight in weights.items():
-            col_name = f'signal_{name}'
-            if col_name in df.columns:
-                df['score'] += df[col_name].apply(lambda x: weight if x == 1 else 0)
-
-        if weights['rs'] > 0:
-            df['score'] += (df['rs_val'] > 0).astype(int) * weights['rs']
+        # 하이브리드 코어 모듈을 사용하여 DataFrame 전체에 대해 벡터 점수 계산 수행
+        df['score'], _ = compute_candidate_score(df, weights)
+        
+        # RS 가중치 별도 합산 (현재 signal_rs 형태가 아니므로 벡터 연산으로 기존 로직 유지)
+        rs_weight = context.get('rs_weight', 0.0)
+        if rs_weight > 0:
+            # RS가 0보다 큰 경우에만 가중치 합산 (벡터 연산)
+            df['score'] += (df['rs_val'] > 0).astype(float) * rs_weight
 
         df['vol_ratio'] = df['volume'] / df['volume'].rolling(20).mean()
         df['symbol'] = symbol
@@ -398,7 +398,15 @@ def run_backtest_with_config(config, verbose=False):
                 if remaining_bp <= 0 and target_cash_ratio > 0:
                     safety_stats['order_blocked_count'] += 1
             else:
+                # 1. buy_signal이 True인 후보들 추출
                 candidates = day_data[day_data['buy_signal'] == True]
+                
+                if not candidates.empty:
+                    # 2. decision_core의 벡터화된 판단 함수를 사용하여 필터링 (PANIC 국면 등 차단)
+                    # day_data는 symbol을 인덱스로 가짐. 각 행의 score와 전역 regime_name을 사용
+                    valid_mask = is_enterable_candidate(candidates['score'], config['score_threshold'], regime_name)
+                    candidates = candidates[valid_mask]
+                
                 candidates = candidates[~candidates.index.isin(pf.get_positions().keys())].sort_values(by='rs_val', ascending=False)
                 
                 for s, row in candidates.iterrows():
