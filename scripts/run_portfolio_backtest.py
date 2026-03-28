@@ -23,7 +23,14 @@ def run_portfolio_simulation():
     if config is None:
         raise ValueError("config must be provided")
 
-    run_backtest_with_config(config, verbose=True)
+    print(f"📅 테스트 기간: {start_date} ~ {end_date}")
+    print(f"🔄 리밸런싱 주기: {config.get('REBALANCE_FREQUENCY', 'D')}")
+
+    results = run_backtest_with_config(config, verbose=True)
+    
+    if results and 'all_trades' in results:
+        print(f"\n✅ 백테스트 완료. 총 {len(results['all_trades'])}건의 거래가 기록되었습니다.")
+
 
 if __name__ == "__main__":
     run_portfolio_simulation()

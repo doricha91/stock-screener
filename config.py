@@ -30,7 +30,10 @@ TICKER_LIST = [
 ]
 
 # 5. Backtesting Settings
-# (총 자본 대비) 한 번의 거래에서 감수할 최대 손실 비율
+# 리밸런싱 주기 설정: 'D' (Daily), 'W' (Weekly), 'M' (Monthly), 'Q' (Quarterly)
+REBALANCE_FREQUENCY = 'M'
+
+# (총 자산 대비) 한 번의 거래에서 감수할 최대 손실 비율
 RISK_PER_TRADE_PERCENT = 0.01  # (예: 1%)
 
 # (N = ATR) 1주당 손절폭(리스크)을 ATR의 몇 배로 잡을 것인가
@@ -71,8 +74,8 @@ DEMA_LONG_PERIOD = 50
 
 # 13. Data Partitioning (OOS 검증용)
 # 훈련 데이터 (In-Sample): 여기서 규칙을 찾습니다.
-IN_SAMPLE_START = '2022-01-01'
-IN_SAMPLE_END = '2023-12-31'
+IN_SAMPLE_START = '2024-01-01'
+IN_SAMPLE_END = '2026-03-01'
 
 # 검증 데이터 (Out-of-Sample): 여기서 규칙을 검증합니다. (절대 훈련에 쓰면 안 됨)
 OUT_OF_SAMPLE_START = '2024-01-01'

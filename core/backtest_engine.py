@@ -177,6 +177,32 @@ def prepare_market_data(config):
     return {date: data for date, data in full_df.groupby('date')}, full_df['date'].unique()
 
 
+def is_rebalance_day(date: pd.Timestamp, freq: str) -> bool:
+    """
+    현재 날짜가 설정된 리밸런싱 주기에 해당하는지 판별합니다.
+    
+    Args:
+        date: 현재 시뮬레이션 날짜
+        freq: 'D' (Daily), 'W' (Weekly), 'M' (Monthly), 'Q' (Quarterly)
+        
+    Returns:
+        bool: 리밸런싱 수행 여부
+    """
+    if freq == 'D':
+        return True
+    elif freq == 'W':
+        # 주의 마지막 거래일(금요일 또는 데이터상 마지막 날) 판별
+        # 간단하게 금요일(4)로 처리하거나, pandas의 WeekOfMonth 등을 활용할 수 있음
+        return date.weekday() == 4
+    elif freq == 'M':
+        # 월말 판별
+        return date.is_month_end
+    elif freq == 'Q':
+        # 분기말 판별
+        return date.is_quarter_end
+    return True
+
+
 def run_backtest_with_config(config, verbose=False):
     """백테스트 메인 엔진"""
     market_data, date_list = prepare_market_data(config)
@@ -382,8 +408,11 @@ def run_backtest_with_config(config, verbose=False):
             ts_trig, _ = pf.check_trailing_stop(s, row['close'], row['atr'], ts_mult)
             if row['sell_signal'] or ts_trig: pf.sell(s, row['close'], info['shares'], date, reason="Exit")
 
-        # 신규 매수 루프
-        if (not trade_halted) and len(pf.get_positions()) < config['max_positions']:
+        # 신규 매수 루프 (리밸런싱 주기에만 실행)
+        rebal_freq = config.get('REBALANCE_FREQUENCY', 'D')
+        is_rebal = is_rebalance_day(date, rebal_freq)
+
+        if (not trade_halted) and is_rebal and len(pf.get_positions()) < config['max_positions']:
             if remaining_bp <= 0:
                 if target_cash_ratio > 0 and d_logger:
                     d_logger.log_event(
@@ -431,7 +460,6 @@ def run_backtest_with_config(config, verbose=False):
                     affordable_value = min(target_pos_value, remaining_bp)
                     shares = int(affordable_value / row['close'])
                     
-                    if shares > 0:
                         order_value = shares * row['close']
                         pf.buy(s, row['close'], shares, date, strategy_name="Ensemble")
                         remaining_bp -= order_value
@@ -455,7 +483,10 @@ def calculate_metrics(equity_history, pf, config, safety_stats):
     std = history_df['daily_ret'].std() * np.sqrt(252)
     sharpe = (cagr / 100) / max(std, 0.0001)
 
-    conn = pf.conn; trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn)
+    conn = pf.conn
+    all_trades_df = pd.read_sql("SELECT * FROM trade_history ORDER BY date, id", conn)
+    trades_df = all_trades_df[all_trades_df['type'] == 'SELL']
+    
     total_trades = len(trades_df)
     win_rate = 0.0
     profit_factor = 0.0
@@ -486,6 +517,7 @@ def calculate_metrics(equity_history, pf, config, safety_stats):
         'total_trades': total_trades, 'win_rate': win_rate, 'profit_factor': profit_factor,
         'yearly_json': yearly_json,
         'safety_stats': safety_stats,
+        'all_trades': all_trades_df,
         'period': f"{history_df.index[0].date()} ~ {history_df.index[-1].date()}"
     }
 
@@ -498,13 +530,31 @@ def analyze_results(equity_history, pf, config):
     print("\n" + "=" * 50); print(f"📊 [최종 백테스트 상세 리포트]"); print("=" * 50)
     print(f"💰 자산: ${config['initial_capital']:,.0f} ➔ ${final:,.0f}"); print(f"🚀 수익률: {total_ret:.2f}% | MDD: {mdd:.2f}%")
     
-    conn = pf.conn; trades_df = pd.read_sql("SELECT * FROM trade_history WHERE type='SELL'", conn)
+    conn = pf.conn; 
+    all_trades_df = pd.read_sql("SELECT * FROM trade_history ORDER BY date, id", conn)
+    trades_df = all_trades_df[all_trades_df['type'] == 'SELL']
+    
     if not trades_df.empty:
         total = len(trades_df); wins = len(trades_df[trades_df['profit'] > 0])
         gross_profit = trades_df[trades_df['profit'] > 0]['profit'].sum()
         gross_loss = abs(trades_df[trades_df['profit'] <= 0]['profit'].sum())
         pf_val = gross_profit / gross_loss if gross_loss > 0 else 99.9
         print(f"🔄 거래: {total}회 | 승률: {wins/total*100:.2f}% | PF: {pf_val:.2f}")
+    
+    print("\n📜 [매매 내역 상세]")
+    rebal_freq = config.get('REBALANCE_FREQUENCY', 'D')
+    for _, row in all_trades_df.iterrows():
+        date_val = pd.to_datetime(row['date'])
+        is_end_of_period = ""
+        if row['type'] == 'BUY':
+            if rebal_freq == 'M':
+                is_month_end = date_val.is_month_end
+                is_end_of_period = " (Month End)" if is_month_end else " (NOT Month End! ⚠️)"
+            elif rebal_freq == 'W':
+                is_end_of_period = " (Week End)" if date_val.weekday() == 4 else ""
+        
+        print(f"  {row['date']} | {row['type']:4} | {row['symbol']:5} | {row['shares']:4}주 | {row['price']:8.2f} | {row['strategy_name']}{is_end_of_period}")
+
     print("=" * 50)
 
 

@@ -23,6 +23,8 @@ def make_config(params: dict, start_date: str, end_date: str, fast_mode: bool = 
         'USE_DRAWDOWN_TRIGGER', 'USE_VIX_BREAKOUT',
         # Market Regime 및 기타 정책
         'MARKET_BENCHMARK_SYMBOL', 'REGIME_SMA_PERIOD', 'REGIME_ADX_PERIOD', 'REGIME_RULES',
+        # 리밸런싱 관련
+        'REBALANCE_FREQUENCY',
         # Logging 관련
         'enable_decision_logging'
     ]

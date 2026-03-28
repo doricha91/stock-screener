@@ -9,12 +9,12 @@ def compute_candidate_score(data: pd.Series | pd.DataFrame, weights: dict[str, f
     """
     if isinstance(data, pd.DataFrame):
         # 1. DataFrame 벡터 연산 (백테스트용)
-        # 각 전략 컬럼에 가중치를 곱하여 한 번에 합산 (NaN은 0 처리)
+        # 신호값이 정확히 1인 경우에만 가중치를 부여하여 로직 왜곡 방지
         total_score = pd.Series(0.0, index=data.index)
         for strategy_name, weight in weights.items():
             col_name = f"signal_{strategy_name}"
             if col_name in data.columns:
-                total_score += data[col_name].fillna(0) * weight
+                total_score += (data[col_name] == 1).astype(float) * weight
         return total_score, [] # 벡터 모드에서는 성능을 위해 전략 리스트 반환 생략
     
     else:
