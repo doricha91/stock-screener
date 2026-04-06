@@ -113,7 +113,7 @@ class PortfolioDB:
     # =========================================================================
     # 🛒 매매 실행 (Transaction)
     # =========================================================================
-    def buy(self, symbol, price, shares, date, strategy_name="Unknown", sector="", commission=0.0):
+    def buy(self, symbol, price, shares, date, strategy_name="Unknown", sector="", reason="Entry", commission=0.0):
         """매수 실행 및 DB 업데이트"""
 
         # [수정] 날짜가 Timestamp 객체일 경우 문자열로 변환
@@ -157,9 +157,9 @@ class PortfolioDB:
 
             # 3. 거래 기록
             cursor.execute('''
-                INSERT INTO trade_history (date, type, symbol, shares, price, amount, commission, strategy_name)
-                VALUES (?, 'BUY', ?, ?, ?, ?, ?, ?)
-            ''', (date_str, symbol, shares, price, cost, commission, strategy_name))
+                INSERT INTO trade_history (date, type, symbol, shares, price, amount, commission, strategy_name, reason)
+                VALUES (?, 'BUY', ?, ?, ?, ?, ?, ?, ?)
+            ''', (date_str, symbol, shares, price, cost, commission, strategy_name, reason))
 
             self.conn.commit()
             return True

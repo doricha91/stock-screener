@@ -14,6 +14,7 @@ from core.target_portfolio_state import (
     evaluate_rebalance_need,
     get_cash_policy_status
 )
+from backtesting.reason_codes import ReasonCode
 
 
 def init_worker(spy_data):
@@ -289,19 +290,19 @@ def run_backtest_with_config(config, verbose=False):
                         pos_list.sort(key=lambda x: x.get(prio, 0))
                         for p in pos_list:
                             if pf.get_account_status()['cash'] >= target_val: break
-                            pf.sell(p['symbol'], current_prices.get(p['symbol'], 0), p['shares'], date, reason="Hedge Liq")
+                            pf.sell(p['symbol'], current_prices.get(p['symbol'], 0), p['shares'], date, reason=ReasonCode.HEDGE_LIQUIDATION)
 
                     h_asset = config.get('HEDGE_ASSET', 'PSQ')
                     h_price = hedge_asset_prices.get(h_asset, {}).get(date)
                     if h_price:
                         shares = int(min(pf.get_account_status()['cash'], target_val) / h_price)
-                        if shares > 0: pf.buy(h_asset, h_price, shares, date, strategy_name="Hedge")
+                        if shares > 0: pf.buy(h_asset, h_price, shares, date, strategy_name="Hedge", reason=ReasonCode.HEDGE_ENTER)
 
                 elif regime_name in ['BULL', 'UNSTABLE'] and current_mode == "HEDGE" and can_switch:
                     current_mode = "LONG"; mode_start_date = date
                     for s, info in pf.get_positions().items():
                         if info.get('strategy_name') == "Hedge":
-                            pf.sell(s, hedge_asset_prices.get(s, {}).get(date, info['current_price']), info['shares'], date, reason="Hedge Exit")
+                            pf.sell(s, hedge_asset_prices.get(s, {}).get(date, info['current_price']), info['shares'], date, reason=ReasonCode.HEDGE_EXIT)
 
             regime_map = {'PANIC': 'panic_days', 'BEAR': 'bear_days', 'UNSTABLE': 'unstable_days', 'BULL': 'bull_days'}
             if regime_name in regime_map: safety_stats[regime_map[regime_name]] += 1
@@ -406,7 +407,11 @@ def run_backtest_with_config(config, verbose=False):
             if s not in day_data.index: continue
             row = day_data.loc[s]; ts_mult = config.get('trailing_stop_multiplier', 2.5)
             ts_trig, _ = pf.check_trailing_stop(s, row['close'], row['atr'], ts_mult)
-            if row['sell_signal'] or ts_trig: pf.sell(s, row['close'], info['shares'], date, reason="Exit")
+            
+            if row['sell_signal']:
+                pf.sell(s, row['close'], info['shares'], date, reason=ReasonCode.EXIT_SIGNAL)
+            elif ts_trig:
+                pf.sell(s, row['close'], info['shares'], date, reason=ReasonCode.EXIT_TRAILING_STOP)
 
         # 신규 매수 루프 (리밸런싱 주기에만 실행)
         rebal_freq = config.get('REBALANCE_FREQUENCY', 'D')
@@ -455,7 +460,7 @@ def run_backtest_with_config(config, verbose=False):
                         date=date_str, regime=regime_name, mode=current_mode,
                         event="ORDER_BLOCKED", details=f"Cash policy restriction. BP: {remaining_bp:.2f}",
                         status=status, target_cash_ratio=target_state.target_cash_ratio,
-                        rebalance_reason="BUY_BLOCKED_BY_CASH_BUFFER",
+                        rebalance_reason=ReasonCode.BUY_BLOCKED_BY_CASH_BUFFER,
                         required_cash_buffer=cp_status['required_cash_buffer'],
                         available_buying_power=cp_status['available_buying_power'],
                         is_violating_buffer=cp_status['is_violating_buffer']
@@ -467,14 +472,40 @@ def run_backtest_with_config(config, verbose=False):
                 candidates = day_data[day_data['buy_signal'] == True]
                 
                 if not candidates.empty:
-                    # 2. decision_core의 벡터화된 판단 함수를 사용하여 필터링 (PANIC 국면 등 차단)
+                    # 2. [MFU3] 진입 차단(Reject) 로그 추가를 위한 필터링 단계 분리
                     valid_mask = is_enterable_candidate(candidates['score'], config['score_threshold'], regime_name)
+                    
+                    # 탈락 사유 기록
+                    rejected = candidates[~valid_mask]
+                    if d_logger and not rejected.empty:
+                        for s, r_row in rejected.iterrows():
+                            if regime_name == "PANIC":
+                                r_reason = ReasonCode.REJECT_BY_PANIC
+                            elif r_row['score'] < config['score_threshold']:
+                                r_reason = ReasonCode.REJECT_LOW_SCORE
+                            else:
+                                r_reason = "REJECT_OTHER"
+                            
+                            d_logger.log_event(
+                                date=date_str, regime=regime_name, mode=current_mode,
+                                event="ENTRY_REJECTED", details=f"Symbol: {s}, Score: {r_row['score']:.2f}",
+                                status=pf.get_account_status(), target_cash_ratio=target_state.target_cash_ratio,
+                                rebalance_reason=r_reason
+                            )
+                    
                     candidates = candidates[valid_mask]
                 
                 candidates = candidates[~candidates.index.isin(pf.get_positions().keys())].sort_values(by='rs_val', ascending=False)
                 
                 for s, row in candidates.iterrows():
                     if len(pf.get_positions()) >= config['max_positions']:
+                        if d_logger:
+                            d_logger.log_event(
+                                date=date_str, regime=regime_name, mode=current_mode,
+                                event="ORDER_SKIPPED", details=f"Max positions ({config['max_positions']}) reached. Skipping {s}",
+                                status=pf.get_account_status(), target_cash_ratio=target_state.target_cash_ratio,
+                                rebalance_reason=ReasonCode.ORDER_SKIPPED_MAX_POS
+                            )
                         break
                         
                     # 현금 부족 시 교체 매매 판단
@@ -489,14 +520,14 @@ def run_backtest_with_config(config, verbose=False):
                             s_to_sell = target_sell['symbol']
                             sell_price = day_data.loc[s_to_sell, 'close'] if s_to_sell in day_data.index else target_sell['price']
                             
-                            pf.sell(s_to_sell, sell_price, target_sell['shares'], date, reason=f"Switching (to {s})")
+                            pf.sell(s_to_sell, sell_price, target_sell['shares'], date, reason=ReasonCode.SWITCH_OUT)
                             
                             if d_logger:
                                 d_logger.log_event(
                                     date=date_str, regime=regime_name, mode=current_mode,
                                     event="POSITION_SWITCHED", details=f"Sell {s_to_sell} (Score: {target_sell['score']:.1f}, Ret: {target_sell['return']*100:.1f}%) to Buy {s} (Score: {row['score']:.1f})",
                                     status=pf.get_account_status(), target_cash_ratio=target_state.target_cash_ratio,
-                                    rebalance_reason="SWITCHING_FOR_HIGHER_SCORE",
+                                    rebalance_reason=ReasonCode.SWITCH_OUT,
                                     required_cash_buffer=cp_status['required_cash_buffer'],
                                     available_buying_power=pf.get_account_status()['cash'] - cp_status['required_cash_buffer'],
                                     is_violating_buffer=False
@@ -513,11 +544,12 @@ def run_backtest_with_config(config, verbose=False):
                     if not can_buy:
                         if d_logger:
                             event_type = "ORDER_SKIPPED" if not switched else "SWITCH_FAILED"
+                            r_reason = ReasonCode.INSUFFICIENT_BUYING_POWER if not switched else ReasonCode.SWITCH_FAILED
                             d_logger.log_event(
                                 date=date_str, regime=regime_name, mode=current_mode,
                                 event=event_type, details=f"Insufficient BP for {s}. Req: {row['close']:.2f}, BP: {remaining_bp:.2f}",
                                 status=pf.get_account_status(), target_cash_ratio=target_state.target_cash_ratio,
-                                rebalance_reason="INSUFFICIENT_BUYING_POWER",
+                                rebalance_reason=r_reason,
                                 required_cash_buffer=cp_status['required_cash_buffer'],
                                 available_buying_power=remaining_bp,
                                 is_violating_buffer=cp_status['is_violating_buffer']
@@ -531,7 +563,8 @@ def run_backtest_with_config(config, verbose=False):
                     
                     if shares > 0:
                         order_value = shares * row['close']
-                        pf.buy(s, row['close'], shares, date, strategy_name="Ensemble")
+                        buy_reason = ReasonCode.SWITCH_IN if switched else ReasonCode.ENTRY_SCORE_PASS
+                        pf.buy(s, row['close'], shares, date, strategy_name="Ensemble", reason=buy_reason)
                         remaining_bp -= order_value
 
 
