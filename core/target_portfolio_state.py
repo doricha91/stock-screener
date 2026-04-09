@@ -23,10 +23,32 @@ class CurrentPortfolioState:
     
     TargetPortfolioState와 비교하여 리밸런싱 필요 여부를 판단하는 데 사용됩니다.
     """
-    current_symbols: List[str]  # 현재 보유 중인 롱(매수) 종목 리스트
-    current_cash_ratio: float   # 현재 계좌 내 현금 비중 (0.0 ~ 1.0)
-    current_hedge_ratio: float  # 현재 계좌 내 헤지(인버스) 종목 비중 (0.0 ~ 1.0)
+    current_symbols: List[str]      # 현재 보유 중인 롱(매수) 종목 리스트
+    current_cash_ratio: float       # 현재 계좌 내 현금 비중 (0.0 ~ 1.0)
+    current_hedge_ratio: float      # 현재 계좌 내 헤지(인버스) 종목 비중 (0.0 ~ 1.0)
+    absolute_cash: float            # 현재 계좌 내 실제 현금 금액
+    shares: Dict[str, int]          # 종목별 보유 수량 (symbol: shares)
+    avg_price: Dict[str, float]     # 종목별 평균 단가 (symbol: avg_price)
+    highest_prices: Dict[str, float] # 보유 기간 중 최고가 (Trailing Stop용)
     hedge_symbols: List[str] = field(default_factory=list) # 현재 보유 중인 헤지 종목 리스트
+
+    def __post_init__(self):
+        """데이터 무결성 검증 (MFU-FT3 보완)"""
+        if self.absolute_cash < 0:
+            raise ValueError(f"❌ [Fail-safe] absolute_cash must be >= 0: {self.absolute_cash}")
+        
+        for symbol, qty in self.shares.items():
+            if not isinstance(qty, int):
+                raise ValueError(f"❌ [Fail-safe] shares for {symbol} must be int: {qty}")
+        
+        for symbol, price in self.avg_price.items():
+            # 수량이 있는 종목에 대해서만 가격 검증
+            if self.shares.get(symbol, 0) > 0:
+                if price <= 0:
+                    raise ValueError(f"❌ [Fail-safe] avg_price for {symbol} must be > 0: {price}")
+                if self.highest_prices.get(symbol, 0) < price:
+                    # 최고가는 최소한 평단보다는 크거나 같아야 함 (데이터 정합성)
+                    raise ValueError(f"❌ [Fail-safe] highest_price for {symbol} cannot be less than avg_price")
 
 @dataclass(frozen=True)
 class RebalanceDecision:
@@ -243,26 +265,28 @@ def calculate_required_cash_buffer(total_equity: float, target_cash_ratio: float
 def calculate_available_buying_power(
     current_cash: float, 
     total_equity: float, 
-    target_cash_ratio: float
+    target_cash_ratio: float,
+    buffer_ratio: float = 0.02
 ) -> float:
     """
     [정책] 현재 현금과 목표 비중을 기반으로 실제 신규 매수 가능한 금액을 계산합니다.
-    
+
     정책 해석:
     1. required_buffer = total_equity * target_cash_ratio
     2. available_buying_power = max(0, current_cash - required_buffer)
-    
-    의도:
-    - 현재 현금이 target_cash_ratio에 의해 보호받아야 할 버퍼보다 많을 때만 그 초과분을 사용합니다.
-    - 만약 현재 현금이 부족하다면(buffer 이하), 신규 매수는 불가능한 것으로 봅니다.
+    3. 수동 주문 리스크 방어: 산출된 BP에서 buffer_ratio(기본 2%)만큼 추가로 제외하여 
+       장중 가격 변동에 의한 주문 거부를 방지합니다.
     """
     if total_equity <= 0:
         return 0.0
-        
+
     required_buffer = calculate_required_cash_buffer(total_equity, target_cash_ratio)
     available = current_cash - required_buffer
-    
-    return max(0.0, available)
+
+    # 버퍼 적용 (예: 2% 여유 현금 남김)
+    safe_available = available * (1.0 - buffer_ratio)
+
+    return max(0.0, safe_available)
 
 def get_cash_policy_status(
     current_cash: float,
