@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.execution_logger import parse_journal_from_markdown, append_to_execution_log, map_journal_to_trades
-from core.portfolio_state_manager import update_portfolio_state_after_close
+from core.portfolio_state_manager import update_portfolio_state_after_close, load_current_state
+from core.performance_tracker import PerformanceTracker
 from core.paths import FRONT_TEST_DIR
 
 def main():
@@ -104,8 +105,14 @@ def main():
             actual_cash=actual_cash
         )
         print(f"✅ Portfolio state updated and saved to snapshot: {new_state_path.name}")
+
+        # 5. 성과 추적 기록 (FT8 연동)
+        updated_state = load_current_state(formatted_date)
+        tracker = PerformanceTracker()
+        tracker.update_performance(formatted_date, updated_state)
+
     except Exception as e:
-        print(f"\n❌ Failed to update portfolio state: {e}")
+        print(f"\n❌ Failed to update portfolio state or track performance: {e}")
         sys.exit(1)
 
     print("\n✨ NIGHTLY CLOSE COMPLETE. Ready for tomorrow's preflight check.")

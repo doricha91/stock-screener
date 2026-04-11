@@ -209,6 +209,9 @@ def run_backtest_with_config(config, verbose=False):
     market_data, date_list = prepare_market_data(config)
     if not market_data: return None
 
+    # 원본 설정을 보존하여 매일 새로운 국면 설정을 적용할 때 템플릿으로 사용 (AGENTS.md SSOT 준수)
+    base_run_config = config.copy()
+
     pf = PortfolioDB(db_path=":memory:", initial_cash=config['initial_capital'])
     equity_history = []
     current_mode = "LONG"
@@ -247,13 +250,19 @@ def run_backtest_with_config(config, verbose=False):
 
         if config.get('use_market_regime', True):
             state = market_analyzer.get_market_state(target_date=date_str, write_log=False)
-            regime_name, regime_rule = state["regime"], state["plan"]
+            regime_name = state["regime"]
             trade_halted = bool(state.get("trade_halted", False))
+
+            # [신규] 국면별 동적 Config 덮어쓰기 (SSOT 준수)
+            from core.config_factory import get_regime_config
+            config = get_regime_config(regime_name, config)
 
             if regime_name != prev_regime_name:
                 safety_stats['regime_change_count'] += 1
                 if d_logger:
                     status = pf.get_account_status()
+                    # config에서 업데이트된 target_cash_ratio 사용
+                    target_cash_ratio = config.get('target_cash_ratio', 0.0)
                     cp_status = get_cash_policy_status(status['cash'], status['total_equity'], target_cash_ratio)
                     d_logger.log_event(
                         date_str, regime_name, current_mode, "REGIME_CHANGE", 
@@ -264,9 +273,8 @@ def run_backtest_with_config(config, verbose=False):
                     )
                 prev_regime_name = regime_name
 
-            for strat, weight in regime_rule['weights'].items(): config[f"{strat}_weight"] = weight
-            config['trailing_stop_multiplier'] = regime_rule['trailing_stop_multiplier']
-            target_cash_ratio = regime_rule['target_cash_ratio']
+            # config에서 업데이트된 값 사용
+            target_cash_ratio = config.get('target_cash_ratio', 0.0)
 
             if config.get('USE_HEDGE_MODE', False):
                 min_days = config.get('MIN_MODE_MAINTAIN_DAYS', 5)
@@ -352,6 +360,10 @@ def run_backtest_with_config(config, verbose=False):
             current_symbols=current_symbols,
             current_cash_ratio=current_cash_ratio,
             current_hedge_ratio=current_hedge_ratio,
+            absolute_cash=float(status['cash']),
+            shares={s: int(info['shares']) for s, info in positions.items()},
+            avg_price={s: float(info['avg_price']) for s, info in positions.items()},
+            highest_prices={s: float(info.get('highest_price', info['avg_price'])) for s, info in positions.items()},
             hedge_symbols=hedge_symbols
         )
 

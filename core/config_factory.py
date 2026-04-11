@@ -54,3 +54,36 @@ def make_config(params: dict, start_date: str, end_date: str, fast_mode: bool = 
             cfg["use_market_regime"] = True
 
     return cfg
+
+def get_regime_config(current_regime: str, base_config: dict) -> dict:
+    """
+    현재 국면(current_regime)에 맞춰 base_config를 덮어씌워(Override) 반환합니다.
+    (AGENTS.md SSOT 준수: 데이터는 config.REGIME_RULES에서 가져옴)
+    """
+    # 1. 원본 설정 복사 (Side-effect 방지)
+    new_config = base_config.copy()
+    
+    # 2. 해당 국면의 설정 가져오기 (config.py의 REGIME_RULES 참조)
+    regime_rules = getattr(config, 'REGIME_RULES', {})
+    
+    # 명칭 호환성 처리 (SIDEWAY -> RANGE 등)
+    target_key = current_regime
+    if target_key not in regime_rules:
+        if target_key == "SIDEWAY": target_key = "RANGE"
+        else: target_key = "UNSTABLE"
+        
+    regime_params = regime_rules.get(target_key, regime_rules.get('UNSTABLE', {}))
+    
+    # 3. 파라미터 오버라이드
+    for key, value in regime_params.items():
+        if key == 'weights':
+            # 가중치는 {strat}_weight 형태로 주입
+            for strat, weight in value.items():
+                new_config[f"{strat}_weight"] = weight
+        elif key == 'description':
+            continue # 설명 필드는 무시
+        else:
+            # 일반 설정값 (target_cash_ratio, SWITCHING_PREMIUM, trailing_stop_multiplier 등)
+            new_config[key] = value
+            
+    return new_config

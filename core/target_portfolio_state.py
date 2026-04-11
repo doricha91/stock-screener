@@ -94,17 +94,18 @@ def get_target_allocation_by_market_state(market_state: str, config: Dict[str, A
     [정책 명세] 시장 국면에 따른 자산 배분 및 슬롯 정책을 결정합니다.
     
     정책 출처:
-    - target_cash_ratio: 기존 config.REGIME_RULES 값을 재사용합니다.
-    - target_hedge_ratio: 기존 config 의 HEDGE_RATIO_... 값을 재사용하며, 
-      HEDGE_MODE 가 꺼져있으면 0.0을 반환합니다.
+    - target_cash_ratio: config['target_cash_ratio'] (동적 오버라이드 우선) 
+      또는 기존 config.REGIME_RULES 값을 사용합니다.
     """
-    # 1. 기존 REGIME_RULES에서 정책 추출
-    regime_rules = config.get('REGIME_RULES', {})
-    rule = regime_rules.get(market_state, regime_rules.get('UNSTABLE', {
-        'target_cash_ratio': 0.3
-    }))
-    
-    target_cash_ratio = rule.get('target_cash_ratio', 0.0)
+    # 1. 동적 오버라이드된 값이 있으면 우선 사용, 없으면 REGIME_RULES에서 추출
+    if 'target_cash_ratio' in config:
+        target_cash_ratio = config['target_cash_ratio']
+    else:
+        regime_rules = config.get('REGIME_RULES', {})
+        rule = regime_rules.get(market_state, regime_rules.get('UNSTABLE', {
+            'target_cash_ratio': 0.3
+        }))
+        target_cash_ratio = rule.get('target_cash_ratio', 0.0)
     
     # 2. 헤지 비중 계산 (기존 정책 재사용)
     target_hedge_ratio = 0.0

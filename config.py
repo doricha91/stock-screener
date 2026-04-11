@@ -31,7 +31,7 @@ TICKER_LIST = [
 
 # 5. Backtesting Settings
 # 리밸런싱 주기 설정: 'D' (Daily), 'W' (Weekly), 'M' (Monthly), 'Q' (Quarterly)
-REBALANCE_FREQUENCY = 'M'
+REBALANCE_FREQUENCY = 'D'
 
 # 교체 매매 프리미엄: 신규 종목 점수가 기존 종목보다 이 값 이상 높아야 교체 수행
 SWITCHING_PREMIUM = 1.0
@@ -111,46 +111,55 @@ REGIME_RULES = {
     'BULL': {
         'description': "📈 강세장: 추세 추종 강화, 현금 0%",
         'target_cash_ratio': 0.0,
+        'SWITCHING_PREMIUM': 0.5,
         'trailing_stop_multiplier': 3.0, # 여유로운 손절
         'weights': {
             'turtle': 1.5,   # 추세 전략 강화
             'sma': 1.0,
             'rsi': 0.5,      # 역추세 약화
             'bbands': 1.0,
-            'dema': 1.2
+            'dema': 1.2,
+            'obv': 0.5, 'mfi': 0.5, 'vol_spike': 0.5
         }
     },
     'BEAR': {
         'description': "📉 약세장: 방어 모드, 현금 50%, 역추세 단타 위주",
-        'target_cash_ratio': 0.5,        # 자산의 50%는 현금 보유
+        'target_cash_ratio': 0.5,
+        'SWITCHING_PREMIUM': 2.0,
         'trailing_stop_multiplier': 2.0, # 조금 더 타이트한 관리
         'weights': {
             'turtle': 0.0,   # 추세 전략 중지 (가짜 상승 주의)
             'sma': 0.0,
-            'rsi': 2.0,      # 과낙폭 반등(RSI) 노림
-            'bbands': 1.5,   # 밴드 하단 반등 노림
-            'dema': 0.0
+            'rsi': 0.5,      # 과낙폭 반등(RSI) 노림
+            'bbands': 0.5,   # 밴드 하단 반등 노림
+            'dema': 0.0,
+            'obv': 0.2, 'mfi': 0.5, 'vol_spike': 0.5
         }
     },
+    # 기존 RANGE 국면은 삭제하고 UNSTABLE(횡보/조정장)로 기능 통합
     'UNSTABLE': {
-        'description': "⚠️ 혼조세: 보수적 운용, 현금 30%",
+        'description': "↔️ 횡보/조정장: 역추세 스윙 매매, 현금 30%, 짧은 손절/익절",
         'target_cash_ratio': 0.3,
-        'trailing_stop_multiplier': 2.5,
+        'SWITCHING_PREMIUM': 1.5,        # 불필요한 잦은 매매 통제
+        'trailing_stop_multiplier': 1.5, # (수정) 수익 나면 즉시 챙기도록 타이트하게 조임
         'weights': {
-            'turtle': 0.5,
-            'sma': 0.5,
-            'rsi': 1.0,
-            'bbands': 1.5,   # 횡보장엔 볼린저밴드가 유리
-            'dema': 0.5
+            'turtle': 0.0,   # (수정) 횡보장 돌파는 속임수일 확률이 높으므로 차단
+            'sma': 0.0,      # (수정) 추세선 신뢰도 하락으로 차단
+            'rsi': 2.0,      # 박스권 하단(과매도) 반등 노림 극대화
+            'bbands': 2.0,   # 볼린저 밴드 하단 반등 노림 극대화
+            'dema': 0.0,
+            'obv': 0.5, 'mfi': 1.0, 'vol_spike': 0.5
         }
     },
     'PANIC': {
         'description': "🚨 공포장: 생존 우선, 신규 매수 금지, 초강력 손절",
         'target_cash_ratio': 1.0,        # 현금 100% 목표 (신규 매수 불가)
+        'SWITCHING_PREMIUM': 5.0,
         'trailing_stop_multiplier': 1.5, # 아주 짧은 손절 (스치면 매도)
         'weights': {
             # 모든 매수 신호 차단
-            'turtle': 0.0, 'sma': 0.0, 'rsi': 0.0, 'bbands': 0.0, 'dema': 0.0
+            'turtle': 0.0, 'sma': 0.0, 'rsi': 0.0, 'bbands': 0.0, 'dema': 0.0,
+            'obv': 0.0, 'mfi': 0.0, 'vol_spike': 0.0
         }
     }
 }
