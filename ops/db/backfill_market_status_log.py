@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 DB_PATH = str(ROOT / "outputs" / "market_data.db")
-START_DATE = "2020-01-01"
+START_DATE = "2000-02-01"
 
 
 def get_latest_spy_date(conn: sqlite3.Connection) -> str:

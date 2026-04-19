@@ -5,7 +5,7 @@
 PORTFOLIO_CONFIG = {
     'initial_capital': 100000.0,
     'risk_per_trade': 0.05,
-    'max_positions': 4,
+    'max_positions': 5,
     'entry_period': 20,
     'exit_period': 10,
     'score_threshold': 1.0,

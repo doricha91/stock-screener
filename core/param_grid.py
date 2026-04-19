@@ -6,9 +6,9 @@
 
 params_grid = {
     # 1. 핵심 진입/청산 전략
-    'entry_period': [20],       # 진입(신고가) 기준일
-    'exit_period': [10],        # 익절/손절 기준일
-    'rs_lookback': [30],        # RS(상대강도) 비교 기간
+    'entry_period': [12],       # 진입(신고가) 기준일
+    'exit_period': [20],        # 익절/손절 기준일
+    'rs_lookback': [25, 30, 35],        # RS(상대강도) 비교 기간
 
     # 2. 포트폴리오 운용 비중
     'max_positions': [5],       # 최대 보유 종목 수

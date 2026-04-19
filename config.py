@@ -110,9 +110,9 @@ REGIME_ADX_THRESHOLD = 25
 REGIME_RULES = {
     'BULL': {
         'description': "📈 강세장: 추세 추종 강화, 현금 0%",
-        'target_cash_ratio': 0.0,
+        'target_cash_ratio': 0.05, # 최소 현금 버퍼
         'SWITCHING_PREMIUM': 0.5,
-        'trailing_stop_multiplier': 3.0, # 여유로운 손절
+        'trailing_stop_multiplier': 4.0, # 여유로운 손절
         'weights': {
             'turtle': 1.5,   # 추세 전략 강화
             'sma': 1.0,
@@ -123,17 +123,19 @@ REGIME_RULES = {
         }
     },
     'BEAR': {
-        'description': "📉 약세장: 방어 모드, 현금 50%, 역추세 단타 위주",
-        'target_cash_ratio': 0.5,
-        'SWITCHING_PREMIUM': 2.0,
-        'trailing_stop_multiplier': 2.0, # 조금 더 타이트한 관리
+        'description': "📉 약세장: 방어 모드, 현금 70%, 제한적 단타",
+        'target_cash_ratio': 0.7,
+        'SWITCHING_PREMIUM': 2.5, # 잦은 교체 매매
+        'trailing_stop_multiplier': 1.5, # 조금 더 타이트한 관리
         'weights': {
             'turtle': 0.0,   # 추세 전략 중지 (가짜 상승 주의)
             'sma': 0.0,
-            'rsi': 0.5,      # 과낙폭 반등(RSI) 노림
-            'bbands': 0.5,   # 밴드 하단 반등 노림
+            'rsi': 0.2,      # 바닥 없는 지하실 피하기
+            'bbands': 0.2,   # 바닥 없는 지하실 피하기
             'dema': 0.0,
-            'obv': 0.2, 'mfi': 0.5, 'vol_spike': 0.5
+            'obv': 0.8,         # 하락장에서는 돈이 들어오는 종목만 신뢰
+            'mfi': 0.8,         # 자금 유입 지표 강화
+            'vol_spike': 1.0    # 강력한 거래량 폭발이 하락 추세를 깨는 단서
         }
     },
     # 기존 RANGE 국면은 삭제하고 UNSTABLE(횡보/조정장)로 기능 통합
@@ -141,21 +143,23 @@ REGIME_RULES = {
         'description': "↔️ 횡보/조정장: 역추세 스윙 매매, 현금 30%, 짧은 손절/익절",
         'target_cash_ratio': 0.3,
         'SWITCHING_PREMIUM': 1.5,        # 불필요한 잦은 매매 통제
-        'trailing_stop_multiplier': 1.5, # (수정) 수익 나면 즉시 챙기도록 타이트하게 조임
+        'trailing_stop_multiplier': 1.5, # 노이즈 예방
         'weights': {
             'turtle': 0.0,   # (수정) 횡보장 돌파는 속임수일 확률이 높으므로 차단
             'sma': 0.0,      # (수정) 추세선 신뢰도 하락으로 차단
-            'rsi': 2.0,      # 박스권 하단(과매도) 반등 노림 극대화
-            'bbands': 2.0,   # 볼린저 밴드 하단 반등 노림 극대화
+            'rsi': 1.5,      # 강세장의 추세추종과 밸런스 맞춤
+            'bbands': 1.2,   #
             'dema': 0.0,
-            'obv': 0.5, 'mfi': 1.0, 'vol_spike': 0.5
+            'obv': 0.8,     # 박스권 하단에서 거래량이 동반 해야됨
+            'mfi': 1.0,
+            'vol_spike': 0.8 # 박스권 돌파 또는 바닥 탈출 시점 포착 위함
         }
     },
     'PANIC': {
         'description': "🚨 공포장: 생존 우선, 신규 매수 금지, 초강력 손절",
         'target_cash_ratio': 1.0,        # 현금 100% 목표 (신규 매수 불가)
         'SWITCHING_PREMIUM': 5.0,
-        'trailing_stop_multiplier': 1.5, # 아주 짧은 손절 (스치면 매도)
+        'trailing_stop_multiplier': 0.5, # 아주 짧은 손절 (스치면 매도)
         'weights': {
             # 모든 매수 신호 차단
             'turtle': 0.0, 'sma': 0.0, 'rsi': 0.0, 'bbands': 0.0, 'dema': 0.0,
@@ -196,15 +200,29 @@ VIX_MULTIPLIER = 1.5       # 1.5배 돌파 시 공포로 간주
 # 17. Hedge Mode Settings
 USE_HEDGE_MODE = True
 HEDGE_TICKERS = ['SH', 'SDS', 'SPXU', 'PSQ', 'QID', 'SQQQ', 'SOXS', 'BIL']
-HEDGE_ASSET = 'PSQ'        # 헤지 시 매수할 메인 인버스 ETF (나스닥 1배 인버스)
+HEDGE_ASSET = 'SQQQ'        # 헤지 시 매수할 메인 인버스 ETF (나스닥 1배 인버스)
 
 # 국면별 헤지 투입 비중 (전체 자산 대비)
-HEDGE_RATIO_BEAR = 0.2     # BEAR 국면 시 자산의 20% 투입
-HEDGE_RATIO_PANIC = 0.5    # PANIC 국면 시 자산의 50% 투입
+HEDGE_RATIO_BEAR = 0.3     # BEAR 국면 시 자산의 30% 투입
+HEDGE_RATIO_PANIC = 1.0    # PANIC 국면 시 자산의 100% 투입
 
 # 자금 확보를 위한 기존 종목 매각 우선순위
 # 옵션: 'rs_low' (상대강도 저하), 'return_low' (손실 순), 'weight_low' (비중 작은 순), 'age_high' (보유기간 긴 순)
 HEDGE_LIQUIDATION_PRIORITY = 'rs_low' 
 
 # 모드 전환 관성 (Whipsaw 방지)
-MIN_MODE_MAINTAIN_DAYS = 5 # 모드 전환 후 최소 유지 일수
+# 한번 LONG 또는 HEDGE 모드로 바뀌면, 최소 N일 동안은 상태를 유지하여 잦은 매매 발생을 억제합니다.
+MIN_MODE_MAINTAIN_DAYS = 5 
+
+# 18. Selective Backtest Settings (국면 선택적 백테스트)
+# 특정 시장 국면에서만 전략이 어떻게 작동하는지 정밀 검증하기 위한 설정입니다.
+
+# 백테스트를 수행할 대상 국면 리스트 (비어있으면 모든 국면 테스트)
+# 예: ['BEAR', 'PANIC'] -> 하락장과 공포장에서만 매매 로직 작동 확인
+TARGET_REGIMES = [] 
+
+# 국면 필터 작동 모드
+# 1) 'EXCLUSIVE': 지정된 국면이 아니면 전액 현금화 (해당 국면만 격리해서 성과 측정)
+# 2) 'FREEZE': 지정된 국면이 아니면 기존 종목은 유지하되, 신규 매수만 금지
+REGIME_FILTER_MODE = 'FREEZE' 
+ 
