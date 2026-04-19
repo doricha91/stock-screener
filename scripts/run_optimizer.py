@@ -14,15 +14,6 @@ from core.optimizer_engine import run_optimization
 # 기본 설정 (CLI 인자가 없을 경우)
 FAST_MODE = False
 
-# 고정 안전장치 조합 (실험의 일관성을 위해 고정)
-SAFETY_FIXED = {
-    "USE_CIRCUIT_BREAKER": True,
-    "USE_MA_CROSS": False,
-    "USE_MARKET_BREADTH": False,
-    "USE_DRAWDOWN_TRIGGER": False,
-    "USE_VIX_BREAKOUT": False,
-}
-
 @contextmanager
 def patch_global_config(overrides: dict):
     old = {}
@@ -41,8 +32,8 @@ def parse_args():
         "--hedge", 
         type=str, 
         choices=["on", "off"], 
-        default="off",
-        help="Hedge Mode ON/OFF (default: off)"
+        default="on",
+        help="Hedge Mode ON/OFF (default: on)"
     )
     parser.add_argument(
         "--hedge-bear-ratio",
@@ -79,6 +70,25 @@ def parse_args():
         action="store_true",
         help="Enable detailed decision event logging (CSV)"
     )
+    parser.add_argument(
+        "--safety",
+        type=str,
+        choices=["on", "off", "config"],
+        default="config",
+        help="Force all Safety Mechanisms ON/OFF or use 'config' (default: config)"
+    )
+    parser.add_argument(
+        "--regimes",
+        type=str,
+        help="Target regimes for optimization, separated by comma (e.g., BULL,UNSTABLE)"
+    )
+    parser.add_argument(
+        "--filter-mode",
+        type=str,
+        choices=["FREEZE", "EXCLUSIVE"],
+        default="FREEZE",
+        help="Regime filter mode (default: FREEZE)"
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -96,18 +106,37 @@ if __name__ == "__main__":
     run_id = f"run_{timestamp}_h{hedge_suffix}"
     if fast_mode: run_id += "_fast"
 
-    # make_config 로직과 동일하게 use_market_regime 결정
-    use_market_regime = not fast_mode 
+    # 국면 필터 파싱
+    target_regimes = []
+    if args.regimes:
+        target_regimes = [r.strip().upper() for r in args.regimes.split(",")]
+        run_id += f"_{'_'.join(target_regimes)}"
+
+    # runtime_overrides 초기화
+    runtime_overrides = {}
     
-    runtime_overrides = SAFETY_FIXED.copy()
-    runtime_overrides["run_id"] = run_id
-    runtime_overrides["run_name"] = run_id # 기존 run_name 호환성 유지
-    runtime_overrides["USE_HEDGE_MODE"] = use_hedge
-    runtime_overrides["HEDGE_RATIO_BEAR"] = args.hedge_bear_ratio
-    runtime_overrides["HEDGE_RATIO_PANIC"] = args.hedge_panic_ratio
-    runtime_overrides["MIN_MODE_MAINTAIN_DAYS"] = args.min_mode_maintain_days
-    runtime_overrides["HEDGE_LIQUIDATION_PRIORITY"] = args.hedge_liquidation_priority
-    runtime_overrides["enable_decision_logging"] = enable_log
+    # 안전장치 오버라이드 처리
+    if args.safety != "config":
+        is_safe = (args.safety == "on")
+        safety_keys = [
+            "USE_CIRCUIT_BREAKER", "USE_MA_CROSS", "USE_MARKET_BREADTH", 
+            "USE_DRAWDOWN_TRIGGER", "USE_VIX_BREAKOUT"
+        ]
+        for key in safety_keys:
+            runtime_overrides[key] = is_safe
+
+    runtime_overrides.update({
+        "run_id": run_id,
+        "run_name": run_id,
+        "USE_HEDGE_MODE": use_hedge,
+        "HEDGE_RATIO_BEAR": args.hedge_bear_ratio,
+        "HEDGE_RATIO_PANIC": args.hedge_panic_ratio,
+        "MIN_MODE_MAINTAIN_DAYS": args.min_mode_maintain_days,
+        "HEDGE_LIQUIDATION_PRIORITY": args.hedge_liquidation_priority,
+        "enable_decision_logging": enable_log,
+        "TARGET_REGIMES": target_regimes,
+        "REGIME_FILTER_MODE": args.filter_mode.upper()
+    })
 
     # 런타임 정보 출력
     hedge_status_str = "ON" if use_hedge else "OFF"
@@ -123,19 +152,26 @@ if __name__ == "__main__":
     print(f"  - HEDGE_LIQUIDATION_PRIORITY: {args.hedge_liquidation_priority}")
     print(f"  - FAST_MODE:           {fast_mode}")
     print(f"  - 기간: {global_config.IN_SAMPLE_START} ~ {global_config.OUT_OF_SAMPLE_END}")
+    print(f"  - SAFETY_MODE:         {args.safety.upper()}")
+    
+    if target_regimes:
+        print(f"  - TARGET_REGIMES:      {target_regimes}")
+        print(f"  - REGIME_FILTER_MODE:  {args.filter_mode.upper()}")
 
-    print(f"\n🔹 고정 안전장치 (Fixed Safety):")
-    for k, v in SAFETY_FIXED.items():
-        print(f"  - {k}: {v}")
+    if args.safety == "config":
+        print(f"\n🔹 안전장치 상태 (config.py 상속):")
+        print(f"  - USE_CIRCUIT_BREAKER: {global_config.USE_CIRCUIT_BREAKER}")
+        print(f"  - USE_MA_CROSS:        {global_config.USE_MA_CROSS}")
+        print(f"  - USE_MARKET_BREADTH:  {global_config.USE_MARKET_BREADTH}")
+        print(f"  - USE_DRAWDOWN_TRIGGER: {global_config.USE_DRAWDOWN_TRIGGER}")
+        print(f"  - USE_VIX_BREAKOUT:    {global_config.USE_VIX_BREAKOUT}")
+    else:
+        print(f"\n🔹 안전장치 상태 (런타임 강제 {args.safety.upper()}):")
+        for key in ["USE_CIRCUIT_BREAKER", "USE_MA_CROSS", "USE_MARKET_BREADTH", "USE_DRAWDOWN_TRIGGER", "USE_VIX_BREAKOUT"]:
+            print(f"  - {key}: {runtime_overrides[key]}")
+            
     print("=" * 60 + "\n")
 
-    # [설정 전달 설계 설명]
-    # 1. runtime_overrides: make_config()를 통해 백테스트 엔진(backtest_engine)에 
-    #    직접 주입되는 최우선 설정값입니다. (명시적 주입 방식)
-    # 2. patch_global_config: 아직 엔진 내부나 다른 모듈에서 'import config'를 통해 
-    #    전역 변수를 직접 참조하는 코드들과의 호환성을 위한 '안전장치'입니다.
-    # 3. 결과적으로 두 방식이 병행되어, 엔진 내부의 어떤 경로에서도 동일한 런타임 설정이 
-    #    유지되도록 보장합니다.
     with patch_global_config(runtime_overrides):
         run_optimization(fast_mode=fast_mode, runtime_overrides=runtime_overrides)
 

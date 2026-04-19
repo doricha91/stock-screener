@@ -253,6 +253,31 @@ def run_backtest_with_config(config, verbose=False):
             regime_name = state["regime"]
             trade_halted = bool(state.get("trade_halted", False))
 
+            # [MFU4 Step 2] 국면 선택적 백테스트 필터 로직 추가
+            # 설정된 TARGET_REGIMES가 있고, 현재 국면이 그에 해당하지 않는 경우 처리
+            target_regimes = config.get('TARGET_REGIMES', [])
+            filter_mode = config.get('REGIME_FILTER_MODE', 'FREEZE')
+            
+            is_outside_regime = len(target_regimes) > 0 and (regime_name not in target_regimes)
+            
+            if is_outside_regime:
+                if filter_mode == 'EXCLUSIVE':
+                    # 1) EXCLUSIVE 모드: 대상 국면이 아니면 모든 포지션 정리 후 관망 (격리 테스트)
+                    positions = pf.get_positions()
+                    if positions:
+                        for s, info in list(positions.items()):
+                            sell_price = current_prices.get(s, info['current_price'])
+                            pf.sell(s, sell_price, info['shares'], date, reason="REGIME_FILTER_EXCLUSIVE")
+                    # 오늘 하루는 거래 중단 상태로 강제 설정
+                    trade_halted = True 
+                elif filter_mode == 'FREEZE':
+                    # 2) FREEZE 모드: 기존 종목은 유지하되, 신규 매수(진입)만 차단
+                    trade_halted = True
+                
+                if d_logger and i % 20 == 0: # 로그 너무 많아지는 것 방지 위해 가끔씩만 기록
+                    d_logger.log_event(date_str, regime_name, current_mode, "REGIME_FILTER_ACTIVE", 
+                                     f"Mode: {filter_mode} | Halted: {trade_halted}", pf.get_account_status())
+
             # [신규] 국면별 동적 Config 덮어쓰기 (SSOT 준수)
             from core.config_factory import get_regime_config
             config = get_regime_config(regime_name, config)
@@ -587,7 +612,7 @@ def run_backtest_with_config(config, verbose=False):
 
 
 def calculate_metrics(equity_history, pf, config, safety_stats):
-    """지표 계산 공통 로직 (MFU2-4 확장)"""
+    """지표 계산 공통 로직 (MFU2-4 확장, Avg Win/Loss, Sortino, Calmar 추가)"""
     history_df = pd.DataFrame(equity_history).set_index('date')
     history_df['daily_ret'] = history_df['equity'].pct_change().fillna(0)
     final_equity = history_df['equity'].iloc[-1]
@@ -598,6 +623,14 @@ def calculate_metrics(equity_history, pf, config, safety_stats):
     std = history_df['daily_ret'].std() * np.sqrt(252)
     sharpe = (cagr / 100) / max(std, 0.0001)
 
+    # [추가] Sortino Ratio: 하방 편차(Downside Deviation) 기반
+    negative_rets = history_df['daily_ret'][history_df['daily_ret'] < 0]
+    downside_std = negative_rets.std() * np.sqrt(252) if not negative_rets.empty else 0.0001
+    sortino = (cagr / 100) / max(downside_std, 0.0001)
+
+    # [추가] Calmar Ratio: CAGR / Abs(MDD)
+    calmar = (cagr / abs(mdd)) if mdd != 0 else 0
+
     conn = pf.conn
     all_trades_df = pd.read_sql("SELECT * FROM trade_history ORDER BY date, id", conn)
     trades_df = all_trades_df[all_trades_df['type'] == 'SELL']
@@ -605,6 +638,8 @@ def calculate_metrics(equity_history, pf, config, safety_stats):
     total_trades = len(trades_df)
     win_rate = 0.0
     profit_factor = 0.0
+    avg_win = 0.0
+    avg_loss = 0.0
     
     if total_trades > 0:
         win_trades = trades_df[trades_df['profit'] > 0]
@@ -613,6 +648,10 @@ def calculate_metrics(equity_history, pf, config, safety_stats):
         gross_profit = win_trades['profit'].sum()
         gross_loss = abs(loss_trades['profit'].sum())
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 99.9
+        
+        # [추가] Avg Win / Avg Loss
+        avg_win = win_trades['profit'].mean() if not win_trades.empty else 0.0
+        avg_loss = abs(loss_trades['profit'].mean()) if not loss_trades.empty else 0.0
 
     # MFU2-4: 현금 정책 통계 최종 계산
     total_days = max(safety_stats.get('total_days', 1), 1)
@@ -628,8 +667,10 @@ def calculate_metrics(equity_history, pf, config, safety_stats):
     yearly_json = json.dumps({str(k.year): round(v, 2) for k, v in yearly.items()})
 
     return {
-        'return': total_ret, 'cagr': cagr, 'mdd': mdd, 'final_equity': final_equity, 'sharpe': sharpe,
+        'return': total_ret, 'cagr': cagr, 'mdd': mdd, 'final_equity': final_equity, 
+        'sharpe': sharpe, 'sortino': sortino, 'calmar': calmar,
         'total_trades': total_trades, 'win_rate': win_rate, 'profit_factor': profit_factor,
+        'avg_win': avg_win, 'avg_loss': avg_loss,
         'yearly_json': yearly_json,
         'safety_stats': safety_stats,
         'all_trades': all_trades_df,

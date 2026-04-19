@@ -64,7 +64,7 @@ def run_optimization(fast_mode: bool = False, runtime_overrides: dict = None):
         try:
             res = run_backtest_with_config(current_config)
             if res:
-                print(f"✅ Sharpe: {res.get('sharpe', 0):.2f}")
+                print(f"✅ Sharpe: {res.get('sharpe', 0):.2f} | Sortino: {res.get('sortino', 0):.2f} | Calmar: {res.get('calmar', 0):.2f}")
 
                 # 1. 기존 방식대로 모든 결과 DB 저장
                 save_dynamic_result(conn, params, res)
@@ -75,6 +75,8 @@ def run_optimization(fast_mode: bool = False, runtime_overrides: dict = None):
                     'train_cagr': res['cagr'],
                     'train_mdd': res['mdd'],
                     'train_sharpe': res.get('sharpe', 0),
+                    'train_sortino': res.get('sortino', 0),
+                    'train_calmar': res.get('calmar', 0),
                     'cb_halt': res.get('safety_stats', {}).get('cb_halt_days', 0),
                     'panic_days': res.get('safety_stats', {}).get('panic_days', 0),
                     'raw_res': res  # OOS 저장용 원본
