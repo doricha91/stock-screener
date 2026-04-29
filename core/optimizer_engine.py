@@ -53,15 +53,14 @@ def run_optimization(fast_mode: bool = False, runtime_overrides: dict = None):
     print("=" * 60)
 
     for i, params in enumerate(combinations):
-        # make_config를 사용하여 모든 설정 범주 병합
-        current_config = make_config(params, TRAIN_START, TRAIN_END, fast_mode=fast_mode, runtime_overrides=runtime_overrides)
-
         # 진행 상황 출력
         param_str = ", ".join([f"{k}={v}" for k, v in params.items()])
         print(f"[{i + 1}/{len(combinations)}] {param_str} ...", end=" ", flush=True)
 
-
         try:
+            # make_config를 사용하여 모든 설정 범주 병합 (라우팅 오류 검증 포함)
+            current_config = make_config(params, TRAIN_START, TRAIN_END, fast_mode=fast_mode, runtime_overrides=runtime_overrides)
+
             res = run_backtest_with_config(current_config)
             if res:
                 print(f"✅ Sharpe: {res.get('sharpe', 0):.2f} | Sortino: {res.get('sortino', 0):.2f} | Calmar: {res.get('calmar', 0):.2f}")
@@ -85,8 +84,13 @@ def run_optimization(fast_mode: bool = False, runtime_overrides: dict = None):
             else:
                 print("❌ 결과 없음")
 
+        except ValueError as e:
+            print(f"⚠️ [실험 건너뜀] 파라미터 구성 오류: {e}")
+            continue
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"❌ [예기치 못한 오류]: {e}")
+            continue
+
 
     # 기존 기능: Train 기간 Top 5 출력
     if train_results_list:
@@ -115,13 +119,12 @@ def run_optimization(fast_mode: bool = False, runtime_overrides: dict = None):
 
     for idx, row in top_n.iterrows():
         best_params = {k: row[k] for k in params_grid.keys()}
-
-        # make_config를 사용하여 모든 설정 범주 병합 (runtime_overrides 포함)
-        test_config = make_config(best_params, TEST_START, TEST_END, fast_mode=fast_mode, runtime_overrides=runtime_overrides)
-
-        print(f"🔎 검증 중 (Train Sharpe: {row['train_sharpe']:.2f})...", end=" ")
+        print(f"🔎 검증 중 (Train Sharpe: {row['train_sharpe']:.2f})...", end=" ", flush=True)
 
         try:
+            # make_config를 사용하여 모든 설정 범주 병합 (라우팅 오류 검증 포함)
+            test_config = make_config(best_params, TEST_START, TEST_END, fast_mode=fast_mode, runtime_overrides=runtime_overrides)
+            
             res_test = run_backtest_with_config(test_config)
 
             if res_test:
@@ -144,8 +147,12 @@ def run_optimization(fast_mode: bool = False, runtime_overrides: dict = None):
             else:
                 print("❌ 결과 없음")
 
+        except ValueError as e:
+            print(f"⚠️ [검증 건너뜀] 파라미터 구성 오류: {e}")
+            continue
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"❌ [검증 중 예기치 못한 오류]: {e}")
+            continue
 
     conn.close()
 

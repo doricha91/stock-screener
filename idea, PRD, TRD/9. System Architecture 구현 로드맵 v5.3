@@ -11,10 +11,11 @@ IS/OOS 괴리 해소: 과거에만 잘하는 전략이 아닌, 현재 시장 성
     1-1. 시장 상태 판단 모듈 (market_analyzer.py 고도화)
     목표: 현재 시장이 상승장(Bull), 하락장(Bear), 횡보장(Sideways)인지 정의.
     작업: market_analyzer.py 업데이트
-    로직:
-        추세: SPY 주가 vs 200일 이동평균선 위치 비교.
-        공포: VIX 지수 레벨 확인 (예: 30 이상이면 극단적 공포).
-        모멘텀: 나스닥 100 종목 중 20일 이평선 위에 있는 종목 비율(Market Breadth).
+    핵심 비즈니스 로직:
+        1) 우선순위 기반 판정: PANIC(생존) > OVERSOLD(반등) > BEAR(하락) > UNSTABLE(불안정) > BULL(상승).
+        2) 5일 관성 유지(Inertia): 잦은 국면 전환(Whipsaw) 방지를 위해 최소 5일(MIN_MODE_MAINTAIN_DAYS) 동안 이전 국면을 강제 유지 (Lock).
+        3) PANIC 즉각 탈출: 공포 지표 해소 시, 관성(5일)을 무시하고 즉시 정상 국면으로 복귀하여 기회 비용 최소화.
+        4) OVERSOLD 반등 우선순위: 시장 폭(Breadth)이 15% 이하일 경우, 추세 하락보다 기술적 반등 가능성을 높게 평가하여 UNSTABLE(스윙)로 판정.
 
     1-2. 국면별 전략 스위칭 (Dynamic Logic)
     목표: 시장 상태에 따라 config를 동적으로 변경하여 대응.

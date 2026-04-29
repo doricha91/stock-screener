@@ -11,7 +11,25 @@
 - `triggers` (JSON): 판정 근거 (Breadth 수치, SMA 이격률 등 정교한 값들)
 - `description` (TEXT): 판정 요약 텍스트
 
-## 2. 국면 선택적 백테스트 로직 (Step 3)
+## 2. 국면 판정 알고리즘 및 전환 관성 (Decision Engine)
+단순 상태 판정을 넘어, 시스템의 안정성을 위한 로직을 `_decide_regime` 함수에 구현한다.
+
+### 2.1. 판정 우선순위 (Priority Queue)
+1. **PANIC:** VIX 돌파 혹은 급격한 낙폭 발생 시 즉각 전환.
+2. **BEAR:** 지수(SPY/QQQ) 중 하나라도 200일선 하회 시.
+3. **UNSTABLE:** 브레드스 경고, 50일선 이탈, 혹은 데드크로스 발생 시.
+4. **BULL:** 모든 지표 정상.
+
+### 2.2. 국면 전환 관성 (Inertia)
+- **목적:** 휩소(Whipsaw)에 의한 잦은 포지션 교체 비용 최소화.
+- **로직:** 
+    - `PANIC` 진입은 예외 없이 즉시 수행.
+    - 그 외 국면 전환 시, 이전 국면이 `PANIC`이 아니었고 유지 기간(`duration`)이 `MIN_MODE_MAINTAIN_DAYS`(5일) 미만이면 국면 전환을 잠금(Lock).
+    - 만약 어제 `PANIC`이었으나 오늘 지표가 해소되었다면, 관성을 무시하고 즉시 다음 국면(BEAR, BULL 등)으로 전환하여 기회 비용 최소화.
+- **특수 우선순위 (OVERSOLD):**
+    - 시장 폭(Breadth)이 15% 이하(`BREADTH_OVERSOLD_THRESHOLD`)인 경우, 장기 이평선 하회(BEAR)보다 우선하여 `UNSTABLE`(스윙) 국면으로 판정. 이는 패닉 셀링 후의 기술적 반등 구간을 공략하기 위함.
+
+## 3. 국면 선택적 백테스트 로직 (Step 3)
 백테스트 엔진(`core/backtest_engine.py`)의 일일 리밸런싱 루프에 필터 로직을 추가한다.
 
 ### 로직 개요

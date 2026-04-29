@@ -33,8 +33,10 @@ TICKER_LIST = [
 # 리밸런싱 주기 설정: 'D' (Daily), 'W' (Weekly), 'M' (Monthly), 'Q' (Quarterly)
 REBALANCE_FREQUENCY = 'D'
 
-# 교체 매매 프리미엄: 신규 종목 점수가 기존 종목보다 이 값 이상 높아야 교체 수행
+# 교체 매매 설정 (MFU 5)
 SWITCHING_PREMIUM = 1.0
+ALLOW_PROFIT_SWITCH = False
+SWITCHING_MAX_COUNT = 2
 
 # (총 자산 대비) 한 번의 거래에서 감수할 최대 손실 비율
 RISK_PER_TRADE_PERCENT = 0.01  # (예: 1%)
@@ -77,12 +79,12 @@ DEMA_LONG_PERIOD = 50
 
 # 13. Data Partitioning (OOS 검증용)
 # 훈련 데이터 (In-Sample): 여기서 규칙을 찾습니다.
-IN_SAMPLE_START = '2024-01-01'
-IN_SAMPLE_END = '2026-03-01'
+IN_SAMPLE_START = '2020-01-01'
+IN_SAMPLE_END = '2023-12-31'
 
 # 검증 데이터 (Out-of-Sample): 여기서 규칙을 검증합니다. (절대 훈련에 쓰면 안 됨)
 OUT_OF_SAMPLE_START = '2024-01-01'
-OUT_OF_SAMPLE_END = '2026-03-01'
+OUT_OF_SAMPLE_END = '2025-12-31'
 
 # 14. Market Regime Definitions (시장 상태 정의)
 # 시장의 기준이 되는 벤치마크 심볼
@@ -90,6 +92,7 @@ MARKET_BENCHMARK_SYMBOL = 'SPY'
 
 # 추세 판단용 SMA (이동평균선)
 REGIME_SMA_PERIOD = 200
+REGIME_SMA_SHORT_PERIOD = 50 # 단기 추세선
 
 # 추세 강도 판단용 ADX (Average Directional Index)
 # ADX가 낮으면 '횡보', 높으면 '추세(상승/하락)'
@@ -185,7 +188,8 @@ MA_CROSS_SLOW = 200
 
 # 3) 마켓 브레드스 (Market Breadth)
 USE_MARKET_BREADTH = True
-BREADTH_THRESHOLD = 20.0   # 200일선 상회 종목 비율이 20% 미만이면 위험
+BREADTH_THRESHOLD = 40.0   # 200일선 상회 종목 비율이 40% 미만이면 위험
+BREADTH_OVERSOLD_THRESHOLD = 15.0 # 과매도 반등 기준점
 
 # 4) 고점 대비 하락 (Drawdown Trigger)
 USE_DRAWDOWN_TRIGGER = True

@@ -3,6 +3,7 @@ import numpy as np
 import json
 import market_analyzer
 import csv
+from typing import List, Dict, Any, Optional
 from multiprocessing import Pool, cpu_count
 from core.decision_core import compute_candidate_score, is_enterable_candidate
 from screener import data_manager, strategy, indicator
@@ -21,6 +22,56 @@ def init_worker(spy_data):
     """메인 프로세스에서 SPY 데이터를 받아와 전역 변수에 저장"""
     global spy_global
     spy_global = spy_data
+
+
+def evaluate_switching_opportunity(
+    candidates: pd.DataFrame, 
+    current_pos_scores: List[Dict[str, Any]], 
+    config: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """
+    신규 후보와 현재 보유 종목을 비교하여 교체 기회를 평가합니다. (MFU 5)
+    """
+    premium = config.get('SWITCHING_PREMIUM', 1.0)
+    allow_profit_switch = config.get('ALLOW_PROFIT_SWITCH', False)
+    max_switches = config.get('SWITCHING_MAX_COUNT', 2)
+    
+    switch_pairs = []
+    
+    # [안정성] 방어적 복사 및 명시적 정렬 (점수 낮은 순)
+    temp_holdings = sorted(
+        [dict(h) for h in current_pos_scores], 
+        key=lambda x: (x['score'], x['return'])
+    )
+    
+    # [안정성] 후보 데이터프레임 복사본 사용
+    sorted_candidates = candidates.copy().sort_values(by=['score', 'rs_val'], ascending=False)
+    
+    for symbol, c_row in sorted_candidates.iterrows():
+        if not temp_holdings or len(switch_pairs) >= max_switches:
+            break
+            
+        # 가장 점수가 낮은 보유 종목과 비교
+        worst_h = temp_holdings[0]
+        
+        # 조건 1: 점수 차이가 프리미엄보다 큰가
+        score_gap = c_row['score'] - worst_h['score']
+        
+        # 조건 2: 수익 중인 종목 교체 허용 여부
+        is_loss = worst_h['return'] < 0
+        can_switch_by_profit = allow_profit_switch or is_loss
+        
+        if score_gap > premium and can_switch_by_profit:
+            switch_pairs.append({
+                'sell_symbol': worst_h['symbol'],
+                'buy_symbol': symbol,
+                'buy_row': c_row,
+                'worst_h': worst_h,
+                'score_gap': score_gap
+            })
+            temp_holdings.pop(0) # 매도 예정이므로 목록에서 제거
+            
+    return switch_pairs
 
 
 def calculate_relative_strength(stock_df, spy_df, lookback=120):
@@ -147,7 +198,13 @@ def prepare_market_data(config):
     if not target_tickers:
         target_tickers = data_manager.get_ticker_list()
 
-    bulk_start = '2021-01-01'
+    # [수정] 하드코딩 제거: 설정된 시작일로부터 1년(약 252거래일) 앞선 날짜부터 데이터를 로드
+    # SMA 200 등 장기 지표 계산을 위한 충분한 버퍼 확보
+    # (주의: 인자이름 config와 모듈 config 충돌 방지를 위해 market_analyzer.config 참조)
+    requested_start = pd.to_datetime(config.get('start_date', market_analyzer.config.IN_SAMPLE_START))
+    bulk_start_dt = requested_start - pd.Timedelta(days=400) # 넉넉하게 약 1년 이상
+    bulk_start = bulk_start_dt.strftime('%Y-%m-%d')
+
     load_tickers = list(set(target_tickers + ['SPY', 'QQQ', '^VIX']))
     df_all = data_manager.get_all_price_data_bulk(start_date=bulk_start, tickers=load_tickers)
     
@@ -172,7 +229,11 @@ def prepare_market_data(config):
 
     full_df = pd.concat(all_signals)
     full_df['date'] = pd.to_datetime(full_df['date'])
-    start_date, end_date = config.get('start_date', '2021-01-01'), config.get('end_date', '2025-12-31')
+    
+    # [수정] 하위 호환성을 위해 config.py의 전역 설정값을 기본값으로 사용
+    start_date = pd.to_datetime(config.get('start_date', market_analyzer.config.IN_SAMPLE_START))
+    end_date = pd.to_datetime(config.get('end_date', market_analyzer.config.OUT_OF_SAMPLE_END))
+    
     full_df = full_df[(full_df['date'] >= start_date) & (full_df['date'] <= end_date)].sort_values(['date', 'symbol'])
 
     return {date: data for date, data in full_df.groupby('date')}, full_df['date'].unique()
@@ -249,7 +310,8 @@ def run_backtest_with_config(config, verbose=False):
         regime_name = "UNKNOWN"
 
         if config.get('use_market_regime', True):
-            state = market_analyzer.get_market_state(target_date=date_str, write_log=False)
+            # config_overrides에 현재 설정을 주입하여 최적화 파라미터가 반영되게 함
+            state = market_analyzer.get_market_state(target_date=date_str, write_log=False, config_overrides=config)
             regime_name = state["regime"]
             trade_halted = bool(state.get("trade_halted", False))
 
@@ -307,7 +369,11 @@ def run_backtest_with_config(config, verbose=False):
 
                 if regime_name in ['BEAR', 'PANIC'] and current_mode == "LONG" and can_switch:
                     current_mode = "HEDGE"; mode_start_date = date; safety_stats['mode_change_count'] += 1
-                    ratio = config.get('HEDGE_RATIO_PANIC' if regime_name == 'PANIC' else 'HEDGE_RATIO_BEAR', 0.2)
+                    
+                    # [MFU 6] 동적 라우팅된 hedge_ratio 우선 참조, 없으면 레거시 변수 사용
+                    legacy_ratio = config.get('HEDGE_RATIO_PANIC' if regime_name == 'PANIC' else 'HEDGE_RATIO_BEAR', 0.2)
+                    ratio = config.get('hedge_ratio', legacy_ratio)
+                    
                     status = pf.get_account_status(); target_val = status['total_equity'] * ratio
                     
                     day_data = market_data[date].set_index('symbol')
@@ -450,27 +516,20 @@ def run_backtest_with_config(config, verbose=False):
             elif ts_trig:
                 pf.sell(s, row['close'], info['shares'], date, reason=ReasonCode.EXIT_TRAILING_STOP)
 
-        # 신규 매수 루프 (리밸런싱 주기에만 실행)
+        # 신규 매수 및 교체 루프
         rebal_freq = config.get('REBALANCE_FREQUENCY', 'D')
         is_rebal = is_rebalance_day(date, rebal_freq)
 
-        if (not trade_halted) and is_rebal and len(pf.get_positions()) < config['max_positions']:
-            # [MFU 4-2] 교체 매매(Switching)를 위한 보유 종목 재평가
+        if (not trade_halted) and is_rebal:
+            # 1. 현재 보유 종목 재평가 (교체 판단용)
             current_pos_scores = []
             positions = pf.get_positions()
-            
-            # 현재 적용 중인 전략 가중치 재구성
             active_weights = {
-                'turtle': config.get('turtle_weight', 1.0),
-                'rsi': config.get('rsi_weight', 1.0),
-                'sma': config.get('sma_weight', 1.0),
-                'bbands': config.get('bbands_weight', 1.0),
-                'macd': config.get('macd_weight', 1.0),
-                'bbs': config.get('bbs_weight', 1.0),
-                'dema': config.get('dema_weight', 1.0),
-                'obv': config.get('obv_weight', 0.5),
-                'mfi': config.get('mfi_weight', 0.5),
-                'vol_spike': config.get('vol_spike_weight', 0.5),
+                'turtle': config.get('turtle_weight', 1.0), 'rsi': config.get('rsi_weight', 1.0),
+                'sma': config.get('sma_weight', 1.0), 'bbands': config.get('bbands_weight', 1.0),
+                'macd': config.get('macd_weight', 1.0), 'bbs': config.get('bbs_weight', 1.0),
+                'dema': config.get('dema_weight', 1.0), 'obv': config.get('obv_weight', 0.5),
+                'mfi': config.get('mfi_weight', 0.5), 'vol_spike': config.get('vol_spike_weight', 0.5),
             }
 
             for s, info in positions.items():
@@ -479,130 +538,79 @@ def run_backtest_with_config(config, verbose=False):
                     row = day_data.loc[s]
                     score, _ = compute_candidate_score(row, active_weights)
                     rs_weight = config.get('rs_weight', 0.0)
-                    if rs_weight > 0 and row.get('rs_val', 0) > 0:
-                        score += rs_weight
-                    
+                    if rs_weight > 0 and row.get('rs_val', 0) > 0: score += rs_weight
                     p_ret = (info['current_price'] - info['avg_price']) / info['avg_price'] if info['avg_price'] > 0 else 0
                     current_pos_scores.append({
                         'symbol': s, 'score': score, 'return': p_ret, 
                         'shares': info['shares'], 'price': info['current_price']
                     })
-            
-            # 점수 낮은 순으로 정렬
-            current_pos_scores.sort(key=lambda x: x['score'])
+            current_pos_scores.sort(key=lambda x: x['score']) # 점수 낮은 순
 
-            if remaining_bp <= 0 and not current_pos_scores:
-                if target_cash_ratio > 0 and d_logger:
-                    d_logger.log_event(
-                        date=date_str, regime=regime_name, mode=current_mode,
-                        event="ORDER_BLOCKED", details=f"Cash policy restriction. BP: {remaining_bp:.2f}",
-                        status=status, target_cash_ratio=target_state.target_cash_ratio,
-                        rebalance_reason=ReasonCode.BUY_BLOCKED_BY_CASH_BUFFER,
-                        required_cash_buffer=cp_status['required_cash_buffer'],
-                        available_buying_power=cp_status['available_buying_power'],
-                        is_violating_buffer=cp_status['is_violating_buffer']
-                    )
-                if remaining_bp <= 0 and target_cash_ratio > 0:
-                    safety_stats['order_blocked_count'] += 1
-            else:
-                # 1. buy_signal이 True인 후보들 추출
-                candidates = day_data[day_data['buy_signal'] == True]
-                
-                if not candidates.empty:
-                    # 2. [MFU3] 진입 차단(Reject) 로그 추가를 위한 필터링 단계 분리
-                    valid_mask = is_enterable_candidate(candidates['score'], config['score_threshold'], regime_name)
-                    
-                    # 탈락 사유 기록
-                    rejected = candidates[~valid_mask]
-                    if d_logger and not rejected.empty:
-                        for s, r_row in rejected.iterrows():
-                            if regime_name == "PANIC":
-                                r_reason = ReasonCode.REJECT_BY_PANIC
-                            elif r_row['score'] < config['score_threshold']:
-                                r_reason = ReasonCode.REJECT_LOW_SCORE
-                            else:
-                                r_reason = "REJECT_OTHER"
-                            
-                            d_logger.log_event(
-                                date=date_str, regime=regime_name, mode=current_mode,
-                                event="ENTRY_REJECTED", details=f"Symbol: {s}, Score: {r_row['score']:.2f}",
-                                status=pf.get_account_status(), target_cash_ratio=target_state.target_cash_ratio,
-                                rebalance_reason=r_reason
-                            )
-                    
-                    candidates = candidates[valid_mask]
-                
-                candidates = candidates[~candidates.index.isin(pf.get_positions().keys())].sort_values(by='rs_val', ascending=False)
-                
-                for s, row in candidates.iterrows():
-                    if len(pf.get_positions()) >= config['max_positions']:
-                        if d_logger:
-                            d_logger.log_event(
-                                date=date_str, regime=regime_name, mode=current_mode,
-                                event="ORDER_SKIPPED", details=f"Max positions ({config['max_positions']}) reached. Skipping {s}",
-                                status=pf.get_account_status(), target_cash_ratio=target_state.target_cash_ratio,
-                                rebalance_reason=ReasonCode.ORDER_SKIPPED_MAX_POS
-                            )
-                        break
-                        
-                    # 현금 부족 시 교체 매매 판단
-                    can_buy = remaining_bp >= row['close']
-                    switched = False
+            # 2. 신규 후보군 추출 및 필터링
+            candidates = day_data[day_data['buy_signal'] == True]
+            candidates = candidates[~candidates.index.isin(pf.get_positions().keys())]
+            if not candidates.empty:
+                valid_mask = is_enterable_candidate(candidates['score'], config['score_threshold'], regime_name)
+                # 탈락 사유 기록 (MFU3)
+                rejected = candidates[~valid_mask]
+                if d_logger and not rejected.empty:
+                    for s, r_row in rejected.iterrows():
+                        r_reason = ReasonCode.REJECT_BY_PANIC if regime_name == "PANIC" else ReasonCode.REJECT_LOW_SCORE
+                        d_logger.log_event(date_str, regime_name, current_mode, "ENTRY_REJECTED", f"Score: {r_row['score']:.2f}", pf.get_account_status(), target_state.target_cash_ratio, rebalance_reason=r_reason)
+                candidates = candidates[valid_mask].sort_values(by='rs_val', ascending=False)
 
-                    if not can_buy and current_pos_scores:
-                        premium = config.get('SWITCHING_PREMIUM', 1.0)
-                        target_sell = current_pos_scores[0]
-                        
-                        if row['score'] > (target_sell['score'] + premium) and target_sell['return'] < 0:
-                            s_to_sell = target_sell['symbol']
-                            sell_price = day_data.loc[s_to_sell, 'close'] if s_to_sell in day_data.index else target_sell['price']
-                            
-                            pf.sell(s_to_sell, sell_price, target_sell['shares'], date, reason=ReasonCode.SWITCH_OUT)
-                            
-                            if d_logger:
-                                d_logger.log_event(
-                                    date=date_str, regime=regime_name, mode=current_mode,
-                                    event="POSITION_SWITCHED", details=f"Sell {s_to_sell} (Score: {target_sell['score']:.1f}, Ret: {target_sell['return']*100:.1f}%) to Buy {s} (Score: {row['score']:.1f})",
-                                    status=pf.get_account_status(), target_cash_ratio=target_state.target_cash_ratio,
-                                    rebalance_reason=ReasonCode.SWITCH_OUT,
-                                    required_cash_buffer=cp_status['required_cash_buffer'],
-                                    available_buying_power=pf.get_account_status()['cash'] - cp_status['required_cash_buffer'],
-                                    is_violating_buffer=False
-                                )
-                            
-                            new_status = pf.get_account_status()
-                            new_cp = get_cash_policy_status(new_status['cash'], new_status['total_equity'], target_state.target_cash_ratio)
-                            remaining_bp = new_cp['available_buying_power']
-                            
-                            current_pos_scores.pop(0)
-                            can_buy = remaining_bp >= row['close']
-                            switched = True
-
-                    if not can_buy:
-                        if d_logger:
-                            event_type = "ORDER_SKIPPED" if not switched else "SWITCH_FAILED"
-                            r_reason = ReasonCode.INSUFFICIENT_BUYING_POWER if not switched else ReasonCode.SWITCH_FAILED
-                            d_logger.log_event(
-                                date=date_str, regime=regime_name, mode=current_mode,
-                                event=event_type, details=f"Insufficient BP for {s}. Req: {row['close']:.2f}, BP: {remaining_bp:.2f}",
-                                status=pf.get_account_status(), target_cash_ratio=target_state.target_cash_ratio,
-                                rebalance_reason=r_reason,
-                                required_cash_buffer=cp_status['required_cash_buffer'],
-                                available_buying_power=remaining_bp,
-                                is_violating_buffer=cp_status['is_violating_buffer']
-                            )
-                        safety_stats['order_skipped_count'] += 1
-                        continue
+            # 3. 능동적 스위칭 (Active Switching)
+            switched_count = 0
+            if not candidates.empty and current_pos_scores:
+                switch_opportunities = evaluate_switching_opportunity(candidates, current_pos_scores, config)
+                for opt in switch_opportunities:
+                    s_sell = opt['sell_symbol']
+                    s_buy = opt['buy_symbol']
+                    buy_row = opt['buy_row']
                     
-                    target_pos_value = total_equity / config['max_positions']
-                    affordable_value = min(target_pos_value, remaining_bp)
-                    shares = int(affordable_value / row['close'])
+                    # [순서 강제] 1. 매도 먼저 실행하여 현금 확보
+                    pf.sell(s_sell, current_prices.get(s_sell, opt['worst_h']['price']), opt['worst_h']['shares'], date, reason=ReasonCode.SWITCH_OUT)
+                    switched_count += 1
                     
+                    # [상태 갱신] 2. 매도 후 즉시 계좌 상태 및 BP 재계산
+                    new_status = pf.get_account_status()
+                    new_cp = get_cash_policy_status(new_status['cash'], new_status['total_equity'], target_state.target_cash_ratio)
+                    remaining_bp = new_cp['available_buying_power']
+                    
+                    # [순서 강제] 3. 확보된 현금으로 매수 실행
+                    shares = int(remaining_bp / buy_row['close'])
                     if shares > 0:
-                        order_value = shares * row['close']
-                        buy_reason = ReasonCode.SWITCH_IN if switched else ReasonCode.ENTRY_SCORE_PASS
-                        pf.buy(s, row['close'], shares, date, strategy_name="Ensemble", reason=buy_reason)
-                        remaining_bp -= order_value
+                        pf.buy(s_buy, buy_row['close'], shares, date, strategy_name="Ensemble", reason=ReasonCode.SWITCH_IN)
+                        if d_logger:
+                            d_logger.log_event(date_str, regime_name, current_mode, "POSITION_SWITCHED", 
+                                f"Active Switch: {s_sell}({opt['worst_h']['score']:.1f}) -> {s_buy}({buy_row['score']:.1f})", 
+                                new_status, target_state.target_cash_ratio, rebalance_reason=ReasonCode.SWITCH_OUT)
+                        
+                        # [상태 갱신] 후보 및 보유 목록에서 즉시 제거하여 중복 매매 방지
+                        candidates = candidates.drop(s_buy)
+                        current_pos_scores = [h for h in current_pos_scores if h['symbol'] != s_sell]
+                        remaining_bp -= (shares * buy_row['close'])
+                    
+                    if switched_count >= config.get('SWITCHING_MAX_COUNT', 2): break
+
+            # 4. 일반 매수 (남은 슬롯 및 현금 범위 내)
+            for s, row in candidates.iterrows():
+                if len(pf.get_positions()) >= config['max_positions']: 
+                    if d_logger: d_logger.log_event(date_str, regime_name, current_mode, "ORDER_SKIPPED", f"Max pos reached. Skipping {s}", pf.get_account_status(), target_state.target_cash_ratio, ReasonCode.ORDER_SKIPPED_MAX_POS)
+                    break
+                
+                cp_now = get_cash_policy_status(pf.get_account_status()['cash'], pf.get_account_status()['total_equity'], target_state.target_cash_ratio)
+                remaining_bp = cp_now['available_buying_power']
+                
+                if remaining_bp >= row['close']:
+                    target_pos_value = cp_now['total_equity'] / config['max_positions']
+                    shares = int(min(target_pos_value, remaining_bp) / row['close'])
+                    if shares > 0:
+                        pf.buy(s, row['close'], shares, date, strategy_name="Ensemble", reason=ReasonCode.ENTRY_SCORE_PASS)
+                        remaining_bp -= (shares * row['close'])
+                elif d_logger:
+                    d_logger.log_event(date_str, regime_name, current_mode, "ORDER_SKIPPED", f"Low BP for {s}", pf.get_account_status(), target_state.target_cash_ratio, ReasonCode.INSUFFICIENT_BUYING_POWER)
+
 
 
     results = calculate_metrics(equity_history, pf, config, safety_stats)

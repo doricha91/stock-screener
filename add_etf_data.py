@@ -20,7 +20,7 @@ def add_etf_to_daily_price():
     for ticker in etfs:
         print(f" - {ticker} 다운로드 중...")
         # 전체 기간 다운로드
-        df = yf.download(ticker, start="2010-01-01", progress=False, auto_adjust=False)
+        df = yf.download(ticker, start="2000-01-01", progress=False, auto_adjust=False)
 
         if df.empty:
             print(f"   ⚠️ {ticker} 데이터 없음")

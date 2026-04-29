@@ -38,6 +38,11 @@ PORTFOLIO_CONFIG = {
     # 트레일링 스탑 설정
     'trailing_stop_multiplier': 2.5,
 
+    # 능동적 스위칭 (MFU 5)
+    'SWITCHING_PREMIUM': 1.0,
+    'ALLOW_PROFIT_SWITCH': False,
+    'SWITCHING_MAX_COUNT': 2,
+
     # [Legacy/Moved] 전역 정책 관련 설정은 config.py에서 관리합니다.
     # PORTFOLIO_CONFIG는 포트폴리오 기본 구조 및 백테스트 실행을 위한 기본값만 정의합니다.
 }

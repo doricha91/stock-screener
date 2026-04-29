@@ -112,9 +112,27 @@ if __name__ == "__main__":
         target_regimes = [r.strip().upper() for r in args.regimes.split(",")]
         run_id += f"_{'_'.join(target_regimes)}"
 
-    # runtime_overrides 초기화
-    runtime_overrides = {}
+    # 런타임 오버라이드 구성 (기본값에 의한 그리드 값 오염 방지)
+    runtime_overrides = {
+        "run_id": run_id,
+        "run_name": run_id,
+        "USE_HEDGE_MODE": use_hedge,
+        "enable_decision_logging": enable_log,
+        "TARGET_REGIMES": target_regimes,
+        "REGIME_FILTER_MODE": args.filter_mode.upper()
+    }
     
+    # 사용자가 명시적으로 입력한 경우에만 오버라이드에 추가 (그리드 실험 허용)
+    cli_args = sys.argv
+    if "--hedge-bear-ratio" in cli_args:
+        runtime_overrides["HEDGE_RATIO_BEAR"] = args.hedge_bear_ratio
+    if "--hedge-panic-ratio" in cli_args:
+        runtime_overrides["HEDGE_RATIO_PANIC"] = args.hedge_panic_ratio
+    if "--min-mode-maintain-days" in cli_args:
+        runtime_overrides["MIN_MODE_MAINTAIN_DAYS"] = args.min_mode_maintain_days
+    if "--hedge-liquidation-priority" in cli_args:
+        runtime_overrides["HEDGE_LIQUIDATION_PRIORITY"] = args.hedge_liquidation_priority
+
     # 안전장치 오버라이드 처리
     if args.safety != "config":
         is_safe = (args.safety == "on")
@@ -124,19 +142,6 @@ if __name__ == "__main__":
         ]
         for key in safety_keys:
             runtime_overrides[key] = is_safe
-
-    runtime_overrides.update({
-        "run_id": run_id,
-        "run_name": run_id,
-        "USE_HEDGE_MODE": use_hedge,
-        "HEDGE_RATIO_BEAR": args.hedge_bear_ratio,
-        "HEDGE_RATIO_PANIC": args.hedge_panic_ratio,
-        "MIN_MODE_MAINTAIN_DAYS": args.min_mode_maintain_days,
-        "HEDGE_LIQUIDATION_PRIORITY": args.hedge_liquidation_priority,
-        "enable_decision_logging": enable_log,
-        "TARGET_REGIMES": target_regimes,
-        "REGIME_FILTER_MODE": args.filter_mode.upper()
-    })
 
     # 런타임 정보 출력
     hedge_status_str = "ON" if use_hedge else "OFF"

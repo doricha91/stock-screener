@@ -19,6 +19,7 @@ from core.target_portfolio_state import (
     RebalanceDecision
 )
 from core.paths import FRONT_TEST_DIR
+from core.backtest_engine import evaluate_switching_opportunity
 
 def check_trailing_stop_manual(
     symbol: str, 
@@ -99,18 +100,86 @@ def generate_daily_plan(date_str: str = None) -> str:
         target_state.target_cash_ratio
     )
 
+    # [MFU 5] 능동적 스위칭 (Active Switching) 판단
+    switch_pairs = []
+    if not df_candidates.empty and current_state.current_symbols:
+        # 1. 현재 보유 종목 점수 재계산 (백테스트와 동일 로직)
+        current_pos_scores = []
+        # 국면별 가중치 가져오기 (config.REGIME_RULES 참조)
+        regime_config = config.REGIME_RULES.get(regime, {})
+        active_weights = regime_config.get('weights', config.PORTFOLIO_CONFIG)
+        
+        from core.decision_core import compute_candidate_score
+        
+        for s in current_state.current_symbols:
+            try:
+                # 최신 지표가 포함된 데이터 필요 (screener/indicator.py 활용 권장하나, 여기서는 후보군 생성 시 계산된 값 참조가 어려우므로 단순화된 비교 수행)
+                # 실전에서는 build_screener_results()가 이미 모든 종목(보유주 포함)의 점수를 계산하도록 설계되어 있어야 함.
+                # 현재 build_screener_results는 후보만 반환하므로, 보유주가 후보에 포함되지 않았을 경우를 대비해 기본 점수 획득 로직 필요.
+                
+                # 보유 종목이 후보군(df_candidates)에 있다면 그 점수를 사용
+                if s in df_candidates.index:
+                    score = df_candidates.loc[s, 'Score']
+                else:
+                    # 후보군에 없다는 것은 점수가 낮거나 시그널이 없다는 뜻이므로 보수적으로 0점 처리 또는 재계산
+                    # 여기서는 안전하게 0.0으로 처리하여 교체 대상 1순위가 되도록 유도
+                    score = 0.0
+                
+                p_ret = (current_prices[s] - current_state.avg_price[s]) / current_state.avg_price[s] if current_state.avg_price[s] > 0 else 0
+                current_pos_scores.append({
+                    'symbol': s, 'score': score, 'return': p_ret, 
+                    'shares': current_state.shares[s], 'price': current_prices[s]
+                })
+            except Exception as e:
+                print(f"⚠️ Failed to re-evaluate score for {s}: {e}")
+
+        # 2. 교체 기회 평가
+        # candidates 데이터프레임 형식 맞추기 (score, rs_val 등 필요)
+        c_df = df_candidates.rename(columns={'Score': 'score', 'Price': 'close'})
+        # rs_val이 없을 경우를 대비해 0.0 기본값
+        if 'rs_val' not in c_df.columns: c_df['rs_val'] = 0.0
+        
+        switch_pairs = evaluate_switching_opportunity(c_df, current_pos_scores, config.__dict__)
+
     # 5. 상세 행동 산출 (매도/매수 수량)
     action_items = []
     stop_alerts = [] # 트레일링 스탑 감시 목록
     
-    # 5-1. 매도 판단 (Trailing Stop 우선! - 지침 1 반영)
-    processed_symbols = set()
-    
-    for symbol in current_state.current_symbols:
-        shares = current_state.shares.get(symbol, 0)
-        if shares <= 0: continue
+    # [MFU 5] 5-0. 교체 매매 액션 추가 (최우선 순위 - 슬롯 확보용)
+    for pair in switch_pairs:
+        s_sell = pair['sell_symbol']
+        s_buy = pair['buy_symbol']
+        b_row = pair['buy_row']
+        shares_to_sell = current_state.shares[s_sell]
         
-        # (A) Trailing Stop 체크 (Safety First)
+        # 1. 매도 지시
+        action_items.append({
+            "type": "SELL",
+            "symbol": s_sell,
+            "shares": shares_to_sell,
+            "price": current_prices.get(s_sell, 0),
+            "reason": f"SWITCH_OUT (to {s_buy}, Score Gap: {pair['score_gap']:.1f})"
+        })
+        
+        # 2. 매수 지시 (매도 후 확보될 가상 현금 고려 - 실전에서는 주의 요망)
+        # 매수 수량 계산: (기존 가치 + 가용 현금 일부) 기반이나, 여기서는 안전하게 기존 슬롯 대체로 계산
+        price_buy = b_row['close']
+        shares_to_buy = int((shares_to_sell * current_prices.get(s_sell, 0)) / price_buy)
+        
+        if shares_to_buy > 0:
+            action_items.append({
+                "type": "BUY",
+                "symbol": s_buy,
+                "shares": shares_to_buy,
+                "price": price_buy,
+                "reason": f"SWITCH_IN (from {s_sell})"
+            })
+            
+        processed_symbols.add(s_sell)
+
+    # 5-1. 매도 판단 (Trailing Stop 및 일반 리밸런싱 매도)
+    # ... (기존 코드 유지)
+        # ... (기존 코드 유지)
         try:
             df_hist = data_manager.get_price_data(symbol, start_date=date_str)
             if df_hist is not None and not df_hist.empty:
