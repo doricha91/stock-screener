@@ -4,17 +4,17 @@ from screener import data_manager
 # 사용자 전략 성적 (방금 나온 결과 입력)
 # ==========================================
 MY_STRATEGY = {
-    'name': 'My Strategy (Trend)',
-    'return': 111.11,
-    'mdd': -35.71,
-    'cagr': 9.82
+    'name': 'id 704',
+    'return': 120.9,
+    'mdd': -23.11,
+    'cagr': 49.59
 }
 
 
 # ==========================================
 # 벤치마크 계산 함수
 # ==========================================
-def calculate_benchmark_stats(ticker, start_date='2018-01-02', end_date='2025-12-22'):
+def calculate_benchmark_stats(ticker, start_date='2024-01-02', end_date='2025-12-31'):
     df = data_manager.get_price_data(ticker, start_date=start_date, end_date=end_date)
 
     if df is None or df.empty:
@@ -49,7 +49,7 @@ def calculate_benchmark_stats(ticker, start_date='2018-01-02', end_date='2025-12
 # ==========================================
 def run_comparison():
     print(f"⚖️ [전략 vs 벤치마크 성과 비교]")
-    print(f"📅 기간: 2018-01-02 ~ 2025-12-22")
+    print(f"📅 기간: start_date ~ end_date")
     print("-" * 65)
     print(f"{'Strategy':<20} | {'Return (%)':<12} {'CAGR (%)':<10} {'MDD (%)':<10}")
     print("-" * 65)

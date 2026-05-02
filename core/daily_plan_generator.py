@@ -64,14 +64,40 @@ def generate_daily_plan(date_str: str = None) -> str:
     m_state = market_analyzer.get_market_state(target_date=date_str)
     regime = m_state["regime"]
     
-    # 3. 신규 매수 후보 스크리닝
+    # 3. 신규 매수 후보 스크리닝 (Raw Signals)
     df_candidates = build_screener_results(market_state=m_state)
+    
+    # [MFU 6-4] Phase 4: 실시간 국면 가중치 적용 (백테스트 엔진과 동일 로직)
+    # 현재 국면 가중치 구성 (config.REGIME_RULES 및 전역 기본값 병합)
+    from core.decision_core import compute_candidate_score
+    
+    regime_config = config.REGIME_RULES.get(regime, {})
+    active_weights = regime_config.get('weights', {
+        'turtle': 1.0, 'rsi': 1.0, 'sma': 1.0, 'bbands': 1.0,
+        'macd': 1.0, 'bbs': 1.0, 'dema': 1.0, 'obv': 0.5,
+        'mfi': 0.5, 'vol_spike': 0.5
+    })
+
+    if not df_candidates.empty:
+        # 모든 후보에 대해 실시간 점수 계산 (백테스트와 100% 동일 가중치)
+        # build_screener_results에서 온 컬럼명(Signal_*)을 compute_candidate_score가 이해하는 형식으로 매핑
+        df_candidates['score'], _ = compute_candidate_score(df_candidates, active_weights)
+        
+        # RS 가중치 합산
+        rs_weight = regime_config.get('rs_weight', getattr(config, 'RS_WEIGHT', 1.0))
+        if rs_weight > 0:
+            df_candidates['score'] += (df_candidates.get('rs_val', 0) > 0).astype(float) * rs_weight
+        
+        # 실시간 기준에 따른 최종 필터링 및 정렬
+        score_threshold = regime_config.get('score_threshold', getattr(config, 'SCORE_THRESHOLD', 1.5))
+        df_candidates = df_candidates[df_candidates['score'] >= score_threshold].sort_values(by='rs_val', ascending=False)
+
     candidate_rows = df_candidates.to_dict(orient='records') if not df_candidates.empty else []
     formatted_candidates = []
     for c in candidate_rows:
         formatted_candidates.append({
             'symbol': c['Symbol'],
-            'score': c['Score'],
+            'score': c['score'],
             'rs_val': c.get('rs_val', 1.0),
             'entry_signal': True,
             'price': c['Price']
@@ -82,6 +108,7 @@ def generate_daily_plan(date_str: str = None) -> str:
     rebalance = evaluate_rebalance_need(current_state, target_state, config.__dict__)
     
     # 총 자산 계산을 위해 현재 보유 종목의 최신가 필요
+    # ... (생략된 기존 가격 수집 로직)
     total_stock_value = 0
     current_prices = {}
     for s in current_state.current_symbols:

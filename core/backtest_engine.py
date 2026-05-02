@@ -141,42 +141,26 @@ def process_single_stock(args):
         if 'entry_high' not in df.columns:
             return None
 
-        # 점수 합산 가중치 정의
-        weights = {
-            'turtle': context.get('turtle_weight', 1.0),
-            'rsi': context.get('rsi_weight', 1.0),
-            'sma': context.get('sma_weight', 1.0),
-            'bbands': context.get('bbands_weight', 1.0),
-            'macd': context.get('macd_weight', 1.0),
-            'bbs': context.get('bbs_weight', 1.0),
-            'dema': context.get('dema_weight', 1.0),
-            'obv': context.get('obv_weight', 0.5),
-            'mfi': context.get('mfi_weight', 0.5),
-            'vol_spike': context.get('vol_spike_weight', 0.5),
-        }
-
-        # 하이브리드 코어 모듈을 사용하여 DataFrame 전체에 대해 벡터 점수 계산 수행
-        df['score'], _ = compute_candidate_score(df, weights)
+        # [MFU 6-1] Phase 1: 점수 계산 로직 제거
+        # 가중치가 국면별로 다르므로, 여기서 미리 계산하지 않고 메인 루프에서 실시간으로 계산함.
         
-        # RS 가중치 별도 합산 (현재 signal_rs 형태가 아니므로 벡터 연산으로 기존 로직 유지)
-        rs_weight = context.get('rs_weight', 0.0)
-        if rs_weight > 0:
-            # RS가 0보다 큰 경우에만 가중치 합산 (벡터 연산)
-            df['score'] += (df['rs_val'] > 0).astype(float) * rs_weight
-
         df['vol_ratio'] = df['volume'] / df['volume'].rolling(20).mean()
         df['symbol'] = symbol
 
-        # 신호 생성
-        df['buy_signal'] = (df['score'] >= context['score_threshold']) & (df['rs_val'] > 0)
+        # [MFU 6-1] Phase 1: 매수 신호 제거 (메인 루프에서 생성)
+        # 매도 신호는 기술적 절대 기준(Turtle Exit 등)이므로 유지 가능
         df['sell_signal'] = df['close'] < df['exit_low']
 
         if 'date' not in df.columns:
             df = df.reset_index()
         df.rename(columns={'index': 'date', 'Date': 'date'}, inplace=True)
 
+        # 반환 컬럼 최적화 (점수와 매수신호 제외)
         cols = ['date', 'symbol', 'open', 'high', 'low', 'close', 'atr',
-                'buy_signal', 'sell_signal', 'score', 'vol_ratio', 'rs_val']
+                'sell_signal', 'vol_ratio', 'rs_val',
+                'turtle_signal', 'rsi_signal', 'sma_signal', 'bbands_signal', 
+                'macd_signal', 'bbs_signal', 'dema_signal', 
+                'signal_obv', 'signal_mfi', 'signal_vol_spike']
         return df[[c for c in cols if c in df.columns]]
 
     except Exception as e:
@@ -360,56 +344,36 @@ def run_backtest_with_config(config, verbose=False):
                     )
                 prev_regime_name = regime_name
 
-            # config에서 업데이트된 값 사용
-            target_cash_ratio = config.get('target_cash_ratio', 0.0)
+        # [MFU 6-2] Phase 2: 실시간 동적 점수 및 신호 생성
+        day_data = market_data[date].set_index('symbol')
+        current_prices = day_data['close'].to_dict()
 
-            if config.get('USE_HEDGE_MODE', False):
-                min_days = config.get('MIN_MODE_MAINTAIN_DAYS', 5)
-                can_switch = (mode_start_date is None) or ((date - mode_start_date).days >= min_days)
+        # 현재 국면 가중치 구성
+        active_weights = {
+            'turtle': config.get('turtle_weight', 1.0), 'rsi': config.get('rsi_weight', 1.0),
+            'sma': config.get('sma_weight', 1.0), 'bbands': config.get('bbands_weight', 1.0),
+            'macd': config.get('macd_weight', 1.0), 'bbs': config.get('bbs_weight', 1.0),
+            'dema': config.get('dema_weight', 1.0), 'obv': config.get('obv_weight', 0.5),
+            'mfi': config.get('mfi_weight', 0.5), 'vol_spike': config.get('vol_spike_weight', 0.5),
+        }
 
-                if regime_name in ['BEAR', 'PANIC'] and current_mode == "LONG" and can_switch:
-                    current_mode = "HEDGE"; mode_start_date = date; safety_stats['mode_change_count'] += 1
-                    
-                    # [MFU 6] 동적 라우팅된 hedge_ratio 우선 참조, 없으면 레거시 변수 사용
-                    legacy_ratio = config.get('HEDGE_RATIO_PANIC' if regime_name == 'PANIC' else 'HEDGE_RATIO_BEAR', 0.2)
-                    ratio = config.get('hedge_ratio', legacy_ratio)
-                    
-                    status = pf.get_account_status(); target_val = status['total_equity'] * ratio
-                    
-                    day_data = market_data[date].set_index('symbol')
-                    current_prices = day_data['close'].to_dict()
-                    positions = pf.get_positions()
-                    if positions:
-                        prio = config.get('HEDGE_LIQUIDATION_PRIORITY', 'rs_low')
-                        pos_list = []
-                        for s, info in positions.items():
-                            if info.get('strategy_name') == "Hedge": continue
-                            rs = day_data.loc[s, 'rs_val'] if s in day_data.index else -1.0
-                            pos_list.append({'symbol': s, 'shares': info['shares'], 'rs_low': rs})
-                        pos_list.sort(key=lambda x: x.get(prio, 0))
-                        for p in pos_list:
-                            if pf.get_account_status()['cash'] >= target_val: break
-                            pf.sell(p['symbol'], current_prices.get(p['symbol'], 0), p['shares'], date, reason=ReasonCode.HEDGE_LIQUIDATION)
+        # 모든 종목에 대해 실시간 점수 계산 (Vectorized)
+        day_data['score'], _ = compute_candidate_score(day_data, active_weights)
+        
+        # RS 가중치 합산
+        rs_weight = config.get('rs_weight', 0.0)
+        if rs_weight > 0:
+            day_data['score'] += (day_data['rs_val'] > 0).astype(float) * rs_weight
+            
+        # 매수 신호 생성 (현재 국면의 threshold 적용)
+        day_data['buy_signal'] = (day_data['score'] >= config['score_threshold']) & (day_data['rs_val'] > 0)
 
-                    h_asset = config.get('HEDGE_ASSET', 'PSQ')
-                    h_price = hedge_asset_prices.get(h_asset, {}).get(date)
-                    if h_price:
-                        shares = int(min(pf.get_account_status()['cash'], target_val) / h_price)
-                        if shares > 0: pf.buy(h_asset, h_price, shares, date, strategy_name="Hedge", reason=ReasonCode.HEDGE_ENTER)
-
-                elif regime_name in ['BULL', 'UNSTABLE'] and current_mode == "HEDGE" and can_switch:
-                    current_mode = "LONG"; mode_start_date = date
-                    for s, info in pf.get_positions().items():
-                        if info.get('strategy_name') == "Hedge":
-                            pf.sell(s, hedge_asset_prices.get(s, {}).get(date, info['current_price']), info['shares'], date, reason=ReasonCode.HEDGE_EXIT)
-
+        # 시장 지표 통계 업데이트
+        if config.get('use_market_regime', True):
             regime_map = {'PANIC': 'panic_days', 'BEAR': 'bear_days', 'UNSTABLE': 'unstable_days', 'BULL': 'bull_days'}
             if regime_name in regime_map: safety_stats[regime_map[regime_name]] += 1
             if trade_halted: safety_stats['cb_halt_days'] += 1
 
-        day_data = market_data[date].set_index('symbol')
-        current_prices = day_data['close'].to_dict()
-        
         for s in list(pf.get_positions().keys()):
             if s in current_prices: pf.update_market_status(s, current_prices[s])
         
@@ -420,9 +384,9 @@ def run_backtest_with_config(config, verbose=False):
         for s, row in day_data.iterrows():
             candidate_rows.append({
                 'symbol': s,
-                'score': row.get('score', 0.0),
+                'score': row['score'],
                 'rs_val': row.get('rs_val', 0.0),
-                'entry_signal': bool(row.get('buy_signal', False))
+                'entry_signal': bool(row['buy_signal'])
             })
         
         target_state = build_target_portfolio_state(
@@ -521,24 +485,16 @@ def run_backtest_with_config(config, verbose=False):
         is_rebal = is_rebalance_day(date, rebal_freq)
 
         if (not trade_halted) and is_rebal:
-            # 1. 현재 보유 종목 재평가 (교체 판단용)
+            # 1. 현재 보유 종목 재평가 (Phase 2: 실시간 점수 참조)
             current_pos_scores = []
             positions = pf.get_positions()
-            active_weights = {
-                'turtle': config.get('turtle_weight', 1.0), 'rsi': config.get('rsi_weight', 1.0),
-                'sma': config.get('sma_weight', 1.0), 'bbands': config.get('bbands_weight', 1.0),
-                'macd': config.get('macd_weight', 1.0), 'bbs': config.get('bbs_weight', 1.0),
-                'dema': config.get('dema_weight', 1.0), 'obv': config.get('obv_weight', 0.5),
-                'mfi': config.get('mfi_weight', 0.5), 'vol_spike': config.get('vol_spike_weight', 0.5),
-            }
 
             for s, info in positions.items():
                 if info.get('strategy_name') == "Hedge": continue
                 if s in day_data.index:
                     row = day_data.loc[s]
-                    score, _ = compute_candidate_score(row, active_weights)
-                    rs_weight = config.get('rs_weight', 0.0)
-                    if rs_weight > 0 and row.get('rs_val', 0) > 0: score += rs_weight
+                    # [MFU 6-2] 이미 상단에서 계산된 실시간 점수 사용
+                    score = row['score']
                     p_ret = (info['current_price'] - info['avg_price']) / info['avg_price'] if info['avg_price'] > 0 else 0
                     current_pos_scores.append({
                         'symbol': s, 'score': score, 'return': p_ret, 
@@ -546,18 +502,13 @@ def run_backtest_with_config(config, verbose=False):
                     })
             current_pos_scores.sort(key=lambda x: x['score']) # 점수 낮은 순
 
-            # 2. 신규 후보군 추출 및 필터링
+            # 2. 신규 후보군 추출 (Phase 2: 이미 생성된 buy_signal 사용)
             candidates = day_data[day_data['buy_signal'] == True]
             candidates = candidates[~candidates.index.isin(pf.get_positions().keys())]
+            
             if not candidates.empty:
-                valid_mask = is_enterable_candidate(candidates['score'], config['score_threshold'], regime_name)
-                # 탈락 사유 기록 (MFU3)
-                rejected = candidates[~valid_mask]
-                if d_logger and not rejected.empty:
-                    for s, r_row in rejected.iterrows():
-                        r_reason = ReasonCode.REJECT_BY_PANIC if regime_name == "PANIC" else ReasonCode.REJECT_LOW_SCORE
-                        d_logger.log_event(date_str, regime_name, current_mode, "ENTRY_REJECTED", f"Score: {r_row['score']:.2f}", pf.get_account_status(), target_state.target_cash_ratio, rebalance_reason=r_reason)
-                candidates = candidates[valid_mask].sort_values(by='rs_val', ascending=False)
+                # [MFU 6-2] 이미 상단에서 threshold 필터링이 완료된 상태이므로 정렬만 수행
+                candidates = candidates.sort_values(by='rs_val', ascending=False)
 
             # 3. 능동적 스위칭 (Active Switching)
             switched_count = 0
