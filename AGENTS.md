@@ -157,3 +157,139 @@
   3. 아키텍처 보존
   4. 문서 동기화
   5. 개발 편의
+
+## 13. Default Agent Workflow
+
+Unless the user explicitly asks for immediate editing, the agent must follow this order:
+
+1. Inspect relevant files.
+2. Summarize current behavior.
+3. Identify the minimal safe change.
+4. List files that may need modification.
+5. Edit only the necessary files.
+6. Validate the change.
+7. Report results, risks, and remaining limitations.
+
+For high-risk areas such as DB schema, strategy logic, backtest metrics, market regime logic, hedge mode, optimizer behavior, and live trading logic, the agent must first provide an analysis before editing.
+
+## 14. Protected Files and Directories
+
+Do not modify, delete, rename, or overwrite the following unless explicitly approved:
+
+- `.env`
+- `.env.*`
+- `outputs/*.db`
+- `outputs/**/*.db`
+- `*.sqlite`
+- `*.sqlite3`
+- API key files
+- broker credential files
+- generated reports used for comparison
+- raw market data files
+
+Read-only inspection is allowed when needed for debugging or validation.
+
+## 15. Forbidden Commands
+
+Do not run destructive commands unless explicitly approved.
+
+Forbidden examples:
+
+- `rm -rf`
+- `del /s`
+- `rmdir /s`
+- commands that delete or overwrite `outputs/`
+- commands that rewrite database files
+- commands that run live trading or broker order placement
+- commands that upload secrets or private data to external services
+- commands that install, upgrade, or replace many packages at once without approval
+
+## 16. Backtest Bias Prevention
+
+The agent must not introduce look-ahead bias.
+
+Rules:
+
+- Do not use future prices, future indicators, or future benchmark values for current-day decisions.
+- Signal generation must only use data available at the decision timestamp.
+- If shifting signals, returns, or positions, explain the timing assumption.
+- When modifying entry/exit logic, explicitly state whether the trade is assumed to occur at close, next open, or next close.
+- Do not silently fill missing market data in a way that changes strategy behavior.
+
+## 17. Strategy Change Boundary
+
+Do not change strategy behavior for the purpose of improving performance unless the task explicitly asks for strategy research or parameter experimentation.
+
+Bug fixes must preserve the intended strategy behavior as much as possible.
+
+When a change affects performance metrics, report:
+
+1. Whether the metric change is expected.
+2. Which logic caused the change.
+3. Whether the change is a bug fix, behavior change, or experimental strategy change.
+
+## 18. Live Trading Safety
+
+The agent must not place, simulate as real, or enable live broker orders unless explicitly requested.
+
+Rules:
+
+- Do not add code that submits live orders by default.
+- Any broker integration must default to dry-run or paper trading mode.
+- Do not change live trading flags from false to true.
+- Do not store broker credentials in code.
+- Any order execution logic must include explicit confirmation and logging.
+
+## 19. Git Hygiene
+
+Before editing, check the current git status when possible.
+
+Rules:
+
+- Do not overwrite unrelated user changes.
+- Do not commit automatically unless explicitly requested.
+- Do not create, delete, or rename branches unless explicitly requested.
+- If there are pre-existing uncommitted changes, report them before editing.
+- Keep diffs small and reviewable.
+
+## 20. Test Reporting Rule
+
+The agent must clearly distinguish between:
+
+- Tests actually run
+- Tests only recommended
+- Tests that could not be run
+
+If a test was not run, the agent must state the reason.
+
+## 21. Required Final Report Format
+
+After every task, report:
+
+1. Summary
+2. Changed files
+3. Behavior changes
+4. Tests run
+5. Tests not run and why
+6. Risks and limitations
+7. Suggested next step
+
+## 22. Legacy Code Handling
+
+Existing scripts may contain legacy business logic. Do not perform large moves only to satisfy the directory role rules.
+
+When improving structure:
+
+- Prefer small extraction steps.
+- Preserve existing CLI behavior.
+- Move logic only when the task explicitly asks for refactoring.
+
+## 23. Documentation Conflict Handling
+
+If documentation and code conflict, do not make broad changes automatically.
+
+Instead:
+
+1. Identify the conflict.
+2. Decide whether the current task scope includes fixing it.
+3. If not in scope, report the conflict as a follow-up item.
