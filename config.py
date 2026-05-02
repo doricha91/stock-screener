@@ -114,8 +114,8 @@ REGIME_RULES = {
     'BULL': {
         'description': "📈 강세장: 추세 추종 강화, 현금 0%",
         'target_cash_ratio': 0.05, # 최소 현금 버퍼
-        'SWITCHING_PREMIUM': 0.5,
-        'trailing_stop_multiplier': 4.0, # 여유로운 손절
+        'SWITCHING_PREMIUM': 1.5,
+        'trailing_stop_multiplier': 3.25, # 후보 B 기준 추적 손절
         'weights': {
             'turtle': 1.5,   # 추세 전략 강화
             'sma': 1.0,
@@ -146,7 +146,7 @@ REGIME_RULES = {
         'description': "↔️ 횡보/조정장: 역추세 스윙 매매, 현금 30%, 짧은 손절/익절",
         'target_cash_ratio': 0.3,
         'SWITCHING_PREMIUM': 1.5,        # 불필요한 잦은 매매 통제
-        'trailing_stop_multiplier': 1.5, # 노이즈 예방
+        'trailing_stop_multiplier': 2.5, # 후보 B 기준 완만한 추적 손절
         'weights': {
             'turtle': 0.0,   # (수정) 횡보장 돌파는 속임수일 확률이 높으므로 차단
             'sma': 0.0,      # (수정) 추세선 신뢰도 하락으로 차단

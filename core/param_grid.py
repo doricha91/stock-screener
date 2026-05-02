@@ -5,6 +5,35 @@
 모든 리스트를 1개로 고정하여 단일 백테스트를 수행합니다.
 """
 
+# Regime prefix routing guide
+# Format: '<REGIME>_<param>'
+# REGIME: BULL, BEAR, UNSTABLE, PANIC
+#
+# Allowed regime-prefixed params:
+# - target_cash_ratio
+# - hedge_ratio
+# - switching_premium
+# - SWITCHING_PREMIUM
+# - score_threshold
+# - trailing_stop_multiplier
+# - ALLOW_PROFIT_SWITCH
+# - SWITCHING_MAX_COUNT
+# - MIN_MODE_MAINTAIN_DAYS
+# - HEDGE_LIQUIDATION_PRIORITY
+#
+# Allowed regime-prefixed weight keys:
+# - turtle_weight
+# - rsi_weight
+# - sma_weight
+# - bbands_weight
+# - macd_weight
+# - bbs_weight
+# - dema_weight
+# - obv_weight
+# - mfi_weight
+# - vol_spike_weight
+# - rs_weight
+
 params_grid = {
     # ------------------------------------------------------------------
     # ID 586 고정 파라미터 (Success Formula)
@@ -26,9 +55,9 @@ params_grid = {
 
     # --- [국면별 설정 (ID 586 재현)] ---
     'BULL_target_cash_ratio': [0.05],
-    'BULL_switching_premium': [1.0, 1.3, 1.5, 1.8],
-    'BULL_score_threshold': [1.5, 1.8], # 586 당시 추정값
-    'BULL_trailing_stop_multiplier': [4.0],
+    'BULL_switching_premium': [1.5],
+    'BULL_score_threshold': [2.0],
+    'BULL_trailing_stop_multiplier': [3.25],
 
     'BEAR_target_cash_ratio': [0.7],
     'BEAR_score_threshold': [2.0],
@@ -36,6 +65,8 @@ params_grid = {
 
     'UNSTABLE_target_cash_ratio': [0.3],
     'UNSTABLE_score_threshold': [1.5],
+    'UNSTABLE_trailing_stop_multiplier': [2.5],
+
     'PANIC_target_cash_ratio': [1.0],
     'PANIC_trailing_stop_multiplier': [0.5],
 }

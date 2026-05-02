@@ -5,10 +5,10 @@
 PORTFOLIO_CONFIG = {
     'initial_capital': 100000.0,
     'risk_per_trade': 0.05,
-    'max_positions': 5,
-    'entry_period': 20,
-    'exit_period': 10,
-    'score_threshold': 1.0,
+    'max_positions': 10,
+    'entry_period': 12,
+    'exit_period': 20,
+    'score_threshold': 1.5,
 
     # 가중치 변수들
     'turtle_weight': 1.0,
@@ -33,7 +33,7 @@ PORTFOLIO_CONFIG = {
     'macd_slow_period': 26,
     'dema_short_period': 20,
     'mfi_period': 14,
-    'rs_lookback': 120,
+    'rs_lookback': 30,
 
     # 트레일링 스탑 설정
     'trailing_stop_multiplier': 2.5,
