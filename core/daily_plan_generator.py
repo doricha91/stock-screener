@@ -23,6 +23,7 @@ from core.target_portfolio_state import (
 from core.paths import FRONT_TEST_DIR, market_db_path
 from core.backtest_engine import evaluate_switching_opportunity
 from core.config_factory import make_config, get_regime_config
+from core.decision_core import compute_candidate_score
 from core.universe_manager import load_latest_universe_snapshot
 
 
@@ -108,6 +109,57 @@ def calculate_candidate_rs_val(
         return None
 
     return float(stock_ret - bench_ret)
+
+
+def compute_holding_score_for_switching(
+    symbol: str,
+    data_date: str,
+    active_weights: dict,
+    benchmark_close: pd.Series,
+    rs_lookback: int,
+    rs_weight: float,
+    merged_config: dict,
+) -> tuple[float | None, float | None, list[str]]:
+    """Recompute a holding score from latest data for switching evaluation only."""
+    asof_date = pd.to_datetime(data_date)
+    history_days = max(400, rs_lookback * 3)
+    start_date = (asof_date - pd.Timedelta(days=history_days)).strftime("%Y-%m-%d")
+    df = data_manager.get_price_data(symbol, start_date=start_date, end_date=data_date)
+    if df is None or df.empty:
+        return None, None, []
+
+    df = df.sort_index()
+    df = df[df.index <= asof_date]
+    if len(df) < 130:
+        return None, None, []
+
+    context = merged_config.copy()
+    context["symbol"] = symbol
+
+    try:
+        df = indicator.add_turtle_indicators(df, context)
+        df = indicator.add_atr_indicators(df, context)
+        df = indicator.add_rsi_indicators(df, context)
+        df = indicator.add_sma_indicators(df, context)
+        df = indicator.add_bollinger_band_indicators(df, context)
+        df = indicator.add_macd_indicators(df, context)
+        df = indicator.add_bbs_indicators(df, context)
+        df = indicator.add_dema_indicators(df, context)
+        df = indicator.add_volume_indicators(df, context)
+        df = strategy.apply_ensemble_strategy(df, context)
+    except Exception:
+        return None, None, []
+
+    if df.empty:
+        return None, None, []
+
+    latest_row = df.iloc[-1]
+    score, reasons = compute_candidate_score(latest_row, active_weights)
+    rs_val = calculate_candidate_rs_val(symbol, asof_date, benchmark_close, rs_lookback)
+    if rs_val is not None and rs_val > 0:
+        score += rs_weight
+
+    return float(score), rs_val, reasons
 
 
 def build_candidate_filter_diagnostics(
@@ -226,7 +278,7 @@ def check_trailing_stop_manual(
     is_triggered = current_price < stop_price
     return is_triggered, stop_price
 
-from screener import data_manager
+from screener import data_manager, indicator, strategy
 
 def generate_daily_plan(date_str: str = None) -> str:
     """
@@ -254,6 +306,15 @@ def generate_daily_plan(date_str: str = None) -> str:
     print(f"[INFO] plan_date={plan_date}, data_date={data_date}")
     base_config = make_config({}, data_date, data_date)
     merged_config = get_regime_config(regime, base_config)
+    rs_lookback = int(merged_config.get('rs_lookback', 120))
+    benchmark_symbol = merged_config.get('MARKET_BENCHMARK_SYMBOL', 'SPY')
+    asof_date = pd.to_datetime(data_date)
+    bench_start = (asof_date - pd.Timedelta(days=max(rs_lookback * 3, rs_lookback + 30))).strftime("%Y-%m-%d")
+    benchmark_close = load_market_index_series(
+        benchmark_symbol,
+        end_date=data_date,
+        start_date=bench_start,
+    )
     universe_snapshot = load_latest_universe_snapshot()
     removed_universe_symbols = {
         str(symbol).strip().upper()
@@ -294,16 +355,6 @@ def generate_daily_plan(date_str: str = None) -> str:
             'Score': 'score',
         }).copy()
         if 'rs_val' not in df_candidates.columns:
-            rs_lookback = int(merged_config.get('rs_lookback', 120))
-            benchmark_symbol = merged_config.get('MARKET_BENCHMARK_SYMBOL', 'SPY')
-            asof_date = pd.to_datetime(data_date)
-            bench_start = (asof_date - pd.Timedelta(days=max(rs_lookback * 3, rs_lookback + 30))).strftime("%Y-%m-%d")
-            benchmark_close = load_market_index_series(
-                benchmark_symbol,
-                end_date=data_date,
-                start_date=bench_start,
-            )
-
             rs_values: List[float] = []
             rs_calc_success: List[bool] = []
             rs_success = 0
@@ -332,8 +383,6 @@ def generate_daily_plan(date_str: str = None) -> str:
     
     # [MFU 6-4] Phase 4: 실시간 국면 가중치 적용 (백테스트 엔진과 동일 로직)
     # 현재 국면 가중치 구성 (config.REGIME_RULES 및 전역 기본값 병합)
-    from core.decision_core import compute_candidate_score
-    
     active_weights = {
         'turtle': merged_config.get('turtle_weight', 1.0),
         'rsi': merged_config.get('rsi_weight', 1.0),
@@ -458,10 +507,31 @@ def generate_daily_plan(date_str: str = None) -> str:
                 # 보유 종목이 후보군(df_candidates)에 있다면 그 점수를 사용
                 if not candidates_by_symbol.empty and s in candidates_by_symbol.index:
                     score = candidates_by_symbol.loc[s, 'score']
+                    holding_rs = candidates_by_symbol.loc[s, 'rs_val'] if 'rs_val' in candidates_by_symbol.columns else None
+                    print(
+                        f"Holding switching score: {s} score={float(score):.2f} "
+                        f"rs={'N/A' if pd.isna(holding_rs) else f'{float(holding_rs):.4f}'} reasons=candidate_reuse"
+                    )
                 else:
-                    # 후보군에 없다는 것은 점수가 낮거나 시그널이 없다는 뜻이므로 보수적으로 0점 처리 또는 재계산
-                    # 여기서는 안전하게 0.0으로 처리하여 교체 대상 1순위가 되도록 유도
-                    score = 0.0
+                    rs_weight = merged_config.get('rs_weight', getattr(config, 'RS_WEIGHT', 1.0))
+                    score, holding_rs, holding_reasons = compute_holding_score_for_switching(
+                        s,
+                        data_date,
+                        active_weights,
+                        benchmark_close,
+                        rs_lookback,
+                        rs_weight,
+                        merged_config,
+                    )
+                    if score is None:
+                        print(f"[WARN] Skipping switching score for {s}: unable to compute holding score")
+                        continue
+                    reason_text = ",".join(holding_reasons) if holding_reasons else "none"
+                    print(
+                        f"Holding switching score: {s} score={float(score):.2f} "
+                        f"rs={'N/A' if holding_rs is None or pd.isna(holding_rs) else f'{float(holding_rs):.4f}'} "
+                        f"reasons={reason_text}"
+                    )
                 
                 p_ret = (current_prices[s] - current_state.avg_price[s]) / current_state.avg_price[s] if current_state.avg_price[s] > 0 else 0
                 current_pos_scores.append({
@@ -471,17 +541,23 @@ def generate_daily_plan(date_str: str = None) -> str:
             except Exception as e:
                 print(f"[WARN] Failed to re-evaluate score for {s}: {e}")
 
+        current_pos_scores.sort(key=lambda x: x['score'])
+
         # 2. 교체 기회 평가
         # candidates 데이터프레임 형식 맞추기 (score, rs_val 등 필요)
         c_df = df_candidates.copy()
         # rs_val이 없을 경우를 대비해 0.0 기본값
         if 'rs_val' not in c_df.columns:
             c_df['rs_val'] = 0.0
-        
-        switch_pairs = evaluate_switching_opportunity(c_df, current_pos_scores, merged_config)
+
+        if current_pos_scores:
+            switch_pairs = evaluate_switching_opportunity(c_df, current_pos_scores, merged_config)
+        else:
+            print("[WARN] Skipping active switching: no holding scores could be computed.")
 
     # 5. 상세 행동 산출 (매도/매수 수량)
     action_items = []
+    rebalance_review_items = []
     processed_symbols = set()
     stop_alerts = [] # 트레일링 스탑 감시 목록
     
@@ -562,15 +638,14 @@ def generate_daily_plan(date_str: str = None) -> str:
             print(f"[WARN] Trailing stop check failed for {symbol}: {e}")
 
         # (B) 리밸런싱 매도 체크 (전략적 제외)
-        if symbol in rebalance.symbol_diff_removed:
-            action_items.append({
-                "type": "SELL",
+        if symbol in rebalance.symbol_diff_removed and symbol not in processed_symbols:
+            rebalance_review_items.append({
                 "symbol": symbol,
                 "shares": shares,
                 "price": current_prices.get(symbol, 0),
-                "reason": "STRATEGY_EXIT (Rebalance Out)"
+                "reason": "REVIEW_EXIT",
+                "note": "Target portfolio에서 제외됨. 즉시 매도 지시가 아니라 수동 검토 대상."
             })
-            processed_symbols.add(symbol)
 
     # 5-2. 매수 판단
     buying_power = calculate_available_buying_power(
@@ -617,6 +692,11 @@ def generate_daily_plan(date_str: str = None) -> str:
             "rec_price": f"{item['price']:.2f}"
         })
 
+    if rebalance_review_items:
+        print(
+            f"Rebalance review items: {len(rebalance_review_items)} moved from immediate SELL to review-only"
+        )
+
     report_content = format_markdown_report(
         plan_date,
         m_state,
@@ -624,6 +704,7 @@ def generate_daily_plan(date_str: str = None) -> str:
         action_items,
         stop_alerts,
         journal_rows,
+        rebalance_review_items=rebalance_review_items,
         candidate_diagnostics=candidate_diagnostics,
         stale_exclusions=stale_exclusions,
         stale_candidate_max_days=stale_candidate_max_days,
@@ -644,6 +725,7 @@ def format_markdown_report(
     action_items: List[dict],
     stop_alerts: List[dict],
     journal_rows: List[dict],
+    rebalance_review_items: Optional[List[Dict[str, Any]]] = None,
     candidate_diagnostics: Optional[List[Dict[str, Any]]] = None,
     stale_exclusions: Optional[List[Dict[str, Any]]] = None,
     stale_candidate_max_days: int = 7,
@@ -707,6 +789,23 @@ def format_markdown_report(
     else:
         for item in action_items:
             report += f"| {item['type']} | **{item['symbol']}** | {item['shares']}주 | ${item['price']:,.2f} | {item['reason']} |\n"
+
+    report += """
+## 4-0. 리밸런싱 검토 필요 (Not an Immediate Sell)
+> 아래 종목은 목표 포트폴리오에서는 제외되었지만, 백테스트의 실제 매도 실행 경로와 직접 일치하지 않을 수 있습니다.
+> 즉시 매도 지시가 아니라 수동 검토 대상입니다.
+
+| Symbol | Shares | Ref Price | Reason | Note |
+| :--- | ---: | ---: | :--- | :--- |
+"""
+    if not rebalance_review_items:
+        report += "| - | - | - | - | 검토 대상 없음 |\n"
+    else:
+        for item in rebalance_review_items:
+            report += (
+                f"| **{item['symbol']}** | {item['shares']} | ${item['price']:,.2f} | "
+                f"{item['reason']} | {item['note']} |\n"
+            )
 
     # MFU-FT2: 기록용 템플릿 섹션 (세분화 및 빈칸 강제)
     report += """
