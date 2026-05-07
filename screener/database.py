@@ -1,8 +1,9 @@
 import sqlite3
 import os
+from core.paths import market_db_path
 
 # DB 파일 경로 설정
-DB_PATH = "../outputs/market_data.db"
+DB_PATH = market_db_path()
 
 
 def get_connection():

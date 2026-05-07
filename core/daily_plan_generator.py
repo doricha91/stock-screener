@@ -26,6 +26,22 @@ from core.config_factory import make_config, get_regime_config
 from core.decision_core import compute_candidate_score
 from core.universe_manager import load_latest_universe_snapshot
 
+ACTION_BUY = "BUY"
+ACTION_SELL = "SELL"
+
+REVIEW_EXIT = "REVIEW_EXIT"
+
+WARNING_STALE_HOLDING = "WARNING_STALE_HOLDING"
+WARNING_UNIVERSE_REMOVED_HOLDING = "WARNING_UNIVERSE_REMOVED_HOLDING"
+WARNING_STALE_CANDIDATE = "WARNING_STALE_CANDIDATE"
+WARNING_RS_CALC_FAILED = "WARNING_RS_CALC_FAILED"
+WARNING_DATA_INSUFFICIENT = "WARNING_DATA_INSUFFICIENT"
+WARNING_LOW_BUYING_POWER = "WARNING_LOW_BUYING_POWER"
+
+SEVERITY_LOW = "LOW"
+SEVERITY_MEDIUM = "MEDIUM"
+SEVERITY_HIGH = "HIGH"
+
 
 def _configure_console_encoding() -> None:
     """Best-effort UTF-8 console setup for Windows terminals."""
@@ -160,6 +176,118 @@ def compute_holding_score_for_switching(
         score += rs_weight
 
     return float(score), rs_val, reasons
+
+
+def build_holding_sell_diagnostic(
+    symbol: str,
+    data_date: str,
+    current_state: CurrentPortfolioState,
+    merged_config: dict,
+) -> Dict[str, Any]:
+    """Build read-only SELL diagnostics for a current holding without affecting actions."""
+    asof_date = pd.to_datetime(data_date)
+    history_days = 400
+    start_date = (asof_date - pd.Timedelta(days=history_days)).strftime("%Y-%m-%d")
+    notes: List[str] = []
+    close = None
+    exit_low = None
+    sell_signal = None
+    atr = None
+    atr_source = "unavailable"
+    highest_price = None
+    highest_source = "unavailable"
+    stop_price = None
+    trailing_triggered = None
+
+    df = data_manager.get_price_data(symbol, start_date=start_date, end_date=data_date)
+    if df is None or df.empty:
+        notes.append("price history unavailable")
+    else:
+        df = df.sort_index()
+        df = df[df.index <= asof_date]
+        if df.empty:
+            notes.append("no rows on or before data_date")
+        else:
+            context = merged_config.copy()
+            context["symbol"] = symbol
+            try:
+                df = indicator.add_turtle_indicators(df, context)
+                df = indicator.add_atr_indicators(df, context)
+                df = indicator.add_rsi_indicators(df, context)
+                df = indicator.add_sma_indicators(df, context)
+                df = indicator.add_bollinger_band_indicators(df, context)
+                df = indicator.add_macd_indicators(df, context)
+                df = indicator.add_bbs_indicators(df, context)
+                df = indicator.add_dema_indicators(df, context)
+                df = indicator.add_volume_indicators(df, context)
+                df = strategy.apply_ensemble_strategy(df, context)
+            except Exception as exc:
+                notes.append(f"indicator/strategy pipeline failed: {exc}")
+
+            if not df.empty:
+                latest_row = df.iloc[-1]
+                close_val = latest_row.get("close")
+                if pd.notna(close_val):
+                    close = float(close_val)
+
+                exit_low_val = latest_row.get("exit_low")
+                if pd.notna(exit_low_val):
+                    exit_low = float(exit_low_val)
+                    if close is not None:
+                        sell_signal = close < exit_low
+                else:
+                    notes.append("exit_low unavailable")
+
+                atr_val = latest_row.get("atr")
+                if pd.notna(atr_val) and float(atr_val) > 0:
+                    atr = float(atr_val)
+                    atr_source = "indicator"
+                elif close is not None:
+                    atr = close * 0.02
+                    atr_source = "fallback_close_2pct"
+                    notes.append("ATR fallback used")
+                else:
+                    notes.append("ATR unavailable")
+
+    snapshot_highest = current_state.highest_prices.get(symbol)
+    if close is not None:
+        if snapshot_highest is None:
+            highest_price = float(close)
+            highest_source = "current_only"
+        else:
+            highest_price = max(float(snapshot_highest), float(close))
+            if float(snapshot_highest) >= float(close):
+                highest_source = "snapshot"
+            else:
+                highest_source = "max(snapshot,current)"
+    elif snapshot_highest is not None:
+        highest_price = float(snapshot_highest)
+        highest_source = "snapshot"
+
+    if close is not None and atr is not None and highest_price is not None:
+        trailing_triggered, stop_price = check_trailing_stop_manual(
+            symbol,
+            float(close),
+            float(highest_price),
+            float(atr),
+            merged_config.get('trailing_stop_multiplier', getattr(config, 'TRAILING_STOP_MULTIPLIER', 2.5)),
+        )
+
+    return {
+        "symbol": symbol,
+        "close": close,
+        "exit_low": exit_low,
+        "sell_signal": sell_signal,
+        "atr": atr,
+        "atr_source": atr_source,
+        "highest_price": highest_price,
+        "highest_source": highest_source,
+        "stop_price": stop_price,
+        "trailing_triggered": trailing_triggered,
+        "review_status": "-",
+        "warning_status": "-",
+        "notes": "; ".join(notes) if notes else "",
+    }
 
 
 def build_candidate_filter_diagnostics(
@@ -558,6 +686,8 @@ def generate_daily_plan(date_str: str = None) -> str:
     # 5. 상세 행동 산출 (매도/매수 수량)
     action_items = []
     rebalance_review_items = []
+    warning_items = []
+    holding_sell_diagnostics: List[Dict[str, Any]] = []
     processed_symbols = set()
     stop_alerts = [] # 트레일링 스탑 감시 목록
     
@@ -570,7 +700,7 @@ def generate_daily_plan(date_str: str = None) -> str:
         
         # 1. 매도 지시
         action_items.append({
-            "type": "SELL",
+            "type": ACTION_SELL,
             "symbol": s_sell,
             "shares": shares_to_sell,
             "price": current_prices.get(s_sell, 0),
@@ -584,7 +714,7 @@ def generate_daily_plan(date_str: str = None) -> str:
         
         if shares_to_buy > 0:
             action_items.append({
-                "type": "BUY",
+                "type": ACTION_BUY,
                 "symbol": s_buy,
                 "shares": shares_to_buy,
                 "price": price_buy,
@@ -601,41 +731,70 @@ def generate_daily_plan(date_str: str = None) -> str:
             continue
 
     # 5-1. 매도 판단 (Trailing Stop 및 일반 리밸런싱 매도)
-    # ... (기존 코드 유지)
-        # ... (기존 코드 유지)
         try:
-            df_hist = load_price_history_until(symbol, data_date, lookback_days=10)
-            if not df_hist.empty:
-                latest_row = df_hist.iloc[-1]
-                # core/backtest_engine.py의 로직과 동일하게 ATR 기반 스탑 계산
-                atr = latest_row.get('atr', latest_row['close'] * 0.02)
-                curr_price = latest_row['close']
-                highest = current_state.highest_prices.get(symbol, curr_price)
-                
-                is_triggered, stop_price = check_trailing_stop_manual(
-                    symbol, curr_price, highest, atr, merged_config.get('trailing_stop_multiplier', getattr(config, 'TRAILING_STOP_MULTIPLIER', 2.5))
-                )
-                
-                if is_triggered:
-                    action_items.append({
-                        "type": "SELL",
-                        "symbol": symbol,
-                        "shares": shares,
-                        "price": curr_price,
-                        "reason": f"TRAILING_STOP (Triggered at ${stop_price:.2f})"
-                    })
-                    processed_symbols.add(symbol)
-                    continue # 스탑 터지면 리밸런싱 체크 건너뜀
-                else:
-                    # 장중 실시간 감시를 위한 알림 목록 추가 (Neo의 비판 1 반영)
-                    stop_alerts.append({
-                        "symbol": symbol,
-                        "stop_price": stop_price,
-                        "current_price": curr_price,
-                        "distance": ((curr_price - stop_price) / curr_price) * 100
-                    })
+            diag = build_holding_sell_diagnostic(symbol, data_date, current_state, merged_config)
+            holding_sell_diagnostics.append(diag)
+
+            if diag["atr_source"] in {"fallback_close_2pct", "unavailable"}:
+                note = "보유 종목 trailing stop ATR이 indicator 기반으로 계산되지 않아 fallback/unavailable 상태입니다."
+                if diag["notes"]:
+                    note = f"{note} ({diag['notes']})"
+                warning_items.append({
+                    "symbol": symbol,
+                    "reason": WARNING_DATA_INSUFFICIENT,
+                    "severity": SEVERITY_MEDIUM,
+                    "note": note,
+                })
+
+            if (
+                diag["trailing_triggered"] is True
+                and diag["close"] is not None
+                and diag["stop_price"] is not None
+            ):
+                action_items.append({
+                    "type": ACTION_SELL,
+                    "symbol": symbol,
+                    "shares": shares,
+                    "price": diag["close"],
+                    "reason": f"TRAILING_STOP (Triggered at ${float(diag['stop_price']):.2f})"
+                })
+                processed_symbols.add(symbol)
+                continue
+
+            if (
+                diag["trailing_triggered"] is False
+                and diag["close"] is not None
+                and diag["stop_price"] is not None
+            ):
+                stop_alerts.append({
+                    "symbol": symbol,
+                    "stop_price": diag["stop_price"],
+                    "current_price": diag["close"],
+                    "distance": ((diag["close"] - diag["stop_price"]) / diag["close"]) * 100
+                })
         except Exception as e:
             print(f"[WARN] Trailing stop check failed for {symbol}: {e}")
+            holding_sell_diagnostics.append({
+                "symbol": symbol,
+                "close": None,
+                "exit_low": None,
+                "sell_signal": None,
+                "atr": None,
+                "atr_source": "unavailable",
+                "highest_price": None,
+                "highest_source": "unavailable",
+                "stop_price": None,
+                "trailing_triggered": None,
+                "review_status": "-",
+                "warning_status": "-",
+                "notes": f"trailing stop diagnostic failed: {e}",
+            })
+            warning_items.append({
+                "symbol": symbol,
+                "reason": WARNING_DATA_INSUFFICIENT,
+                "severity": SEVERITY_MEDIUM,
+                "note": f"trailing stop diagnostic failed: {e}",
+            })
 
         # (B) 리밸런싱 매도 체크 (전략적 제외)
         if symbol in rebalance.symbol_diff_removed and symbol not in processed_symbols:
@@ -643,7 +802,7 @@ def generate_daily_plan(date_str: str = None) -> str:
                 "symbol": symbol,
                 "shares": shares,
                 "price": current_prices.get(symbol, 0),
-                "reason": "REVIEW_EXIT",
+                "reason": REVIEW_EXIT,
                 "note": "Target portfolio에서 제외됨. 즉시 매도 지시가 아니라 수동 검토 대상."
             })
 
@@ -654,6 +813,13 @@ def generate_daily_plan(date_str: str = None) -> str:
         target_state.target_cash_ratio,
         buffer_ratio=0.02
     )
+    if rebalance.symbol_diff_added and buying_power <= 0:
+        warning_items.append({
+            "symbol": "-",
+            "reason": WARNING_LOW_BUYING_POWER,
+            "severity": SEVERITY_MEDIUM,
+            "note": "매수 후보가 있으나 현재 가용 Buying Power가 부족하거나 0입니다.",
+        })
     
     # 매수 종목도 이미 매도된 종목의 현금을 고려하지 않는 보수적 집행 (실전 안정성)
     for symbol in rebalance.symbol_diff_added:
@@ -669,7 +835,7 @@ def generate_daily_plan(date_str: str = None) -> str:
             shares_to_buy = int(buying_power / price)
             if shares_to_buy > 0:
                 action_items.append({
-                    "type": "BUY",
+                    "type": ACTION_BUY,
                     "symbol": symbol,
                     "shares": shares_to_buy,
                     "price": price,
@@ -677,12 +843,49 @@ def generate_daily_plan(date_str: str = None) -> str:
                 })
                 buying_power -= (shares_to_buy * price)
 
+    for symbol in sorted(set(stale_holdings_alert)):
+        warning_items.append({
+            "symbol": symbol,
+            "reason": WARNING_UNIVERSE_REMOVED_HOLDING,
+            "severity": SEVERITY_MEDIUM,
+            "note": "latest universe snapshot removed list에 포함되어 수동 확인 필요",
+        })
+
+    review_symbols = {item["symbol"]: item["reason"] for item in rebalance_review_items}
+    warning_by_symbol: Dict[str, List[str]] = {}
+    for item in warning_items:
+        warning_symbol = str(item.get("symbol", "")).strip()
+        if not warning_symbol or warning_symbol == "-":
+            continue
+        warning_by_symbol.setdefault(warning_symbol, []).append(str(item.get("reason", "")))
+
+    incomplete_holding_diag = 0
+    atr_source_counts = {"indicator": 0, "fallback_close_2pct": 0, "unavailable": 0}
+    for diag in holding_sell_diagnostics:
+        symbol = diag["symbol"]
+        diag["review_status"] = review_symbols.get(symbol, "-")
+        diag["warning_status"] = ",".join(warning_by_symbol.get(symbol, [])) or "-"
+        atr_source = str(diag.get("atr_source", "unavailable"))
+        if atr_source in atr_source_counts:
+            atr_source_counts[atr_source] += 1
+        if (
+            diag["close"] is None
+            or diag["exit_low"] is None
+            or diag["atr_source"] == "unavailable"
+            or diag["trailing_triggered"] is None
+        ):
+            incomplete_holding_diag += 1
+
     # 6. 마크다운 리포트 생성
     report_path = FRONT_TEST_DIR / f"daily_action_plan_{plan_date.replace('-', '')}.md"
     
     # 기록용 사전 기입 데이터 준비 (MFU-FT2 긴급 수정 반영)
     journal_rows = []
     for item in action_items:
+        reason = str(item.get("reason", ""))
+        if reason.startswith("REVIEW") or reason.startswith("WARNING"):
+            print(f"[WARN] Skipping non-action item from journal: {item.get('symbol')} {reason}")
+            continue
         journal_rows.append({
             "date": plan_date,
             "regime": regime,
@@ -696,6 +899,18 @@ def generate_daily_plan(date_str: str = None) -> str:
         print(
             f"Rebalance review items: {len(rebalance_review_items)} moved from immediate SELL to review-only"
         )
+    if warning_items:
+        print(f"Warning items: {len(warning_items)} review-only warnings recorded")
+    print(
+        f"Holding sell diagnostics: {len(holding_sell_diagnostics)} analyzed, "
+        f"{incomplete_holding_diag} incomplete"
+    )
+    print(
+        "Trailing stop ATR source: "
+        f"indicator={atr_source_counts['indicator']}, "
+        f"fallback={atr_source_counts['fallback_close_2pct']}, "
+        f"unavailable={atr_source_counts['unavailable']}"
+    )
 
     report_content = format_markdown_report(
         plan_date,
@@ -704,7 +919,9 @@ def generate_daily_plan(date_str: str = None) -> str:
         action_items,
         stop_alerts,
         journal_rows,
+        holding_sell_diagnostics=holding_sell_diagnostics,
         rebalance_review_items=rebalance_review_items,
+        warning_items=warning_items,
         candidate_diagnostics=candidate_diagnostics,
         stale_exclusions=stale_exclusions,
         stale_candidate_max_days=stale_candidate_max_days,
@@ -725,7 +942,9 @@ def format_markdown_report(
     action_items: List[dict],
     stop_alerts: List[dict],
     journal_rows: List[dict],
+    holding_sell_diagnostics: Optional[List[Dict[str, Any]]] = None,
     rebalance_review_items: Optional[List[Dict[str, Any]]] = None,
+    warning_items: Optional[List[Dict[str, Any]]] = None,
     candidate_diagnostics: Optional[List[Dict[str, Any]]] = None,
     stale_exclusions: Optional[List[Dict[str, Any]]] = None,
     stale_candidate_max_days: int = 7,
@@ -738,9 +957,9 @@ def format_markdown_report(
     vix = m_state['vix_value']
     
     summary_action = "관망 (Wait)"
-    if any(item['type'] == 'SELL' for item in action_items):
+    if any(item['type'] == ACTION_SELL for item in action_items):
         summary_action = "매도 및 리밸런싱 (Sell/Rebalance)"
-    elif any(item['type'] == 'BUY' for item in action_items):
+    elif any(item['type'] == ACTION_BUY for item in action_items):
         summary_action = "신규 매수 (Buy)"
     
     if regime == "PANIC":
@@ -780,6 +999,32 @@ def format_markdown_report(
             report += f"| **{a['symbol']}** | ${a['current_price']:,.2f} | **${a['stop_price']:,.2f}** | {a['distance']:.2f}% | 이탈 시 즉시 매도 |\n"
 
     report += f"""
+## 3-1. 보유 종목 SELL 진단 (Holding Sell Diagnostics)
+> 이 섹션은 보유 종목의 매도 관련 진단 정보입니다.
+> `Sell Signal=True`가 표시되더라도 이번 단계에서는 확정 매도 지시가 아닙니다.
+
+| Symbol | Close | Exit Low | Sell Signal | ATR | ATR Source | Highest | Highest Source | Stop Price | Trail Trigger | Review | Warning | Notes |
+| :--- | ---: | ---: | :--- | ---: | :--- | ---: | :--- | ---: | :--- | :--- | :--- | :--- |
+"""
+    if not holding_sell_diagnostics:
+        report += "| - | - | - | - | - | - | - | - | - | - | - | - | 보유 종목 없음 |\n"
+    else:
+        for diag in holding_sell_diagnostics:
+            close_display = "N/A" if diag["close"] is None else f"${float(diag['close']):,.2f}"
+            exit_low_display = "N/A" if diag["exit_low"] is None else f"${float(diag['exit_low']):,.2f}"
+            sell_signal_display = "N/A" if diag["sell_signal"] is None else ("True" if diag["sell_signal"] else "False")
+            atr_display = "N/A" if diag["atr"] is None else f"{float(diag['atr']):,.4f}"
+            highest_display = "N/A" if diag["highest_price"] is None else f"${float(diag['highest_price']):,.2f}"
+            stop_display = "N/A" if diag["stop_price"] is None else f"${float(diag['stop_price']):,.2f}"
+            trigger_display = "N/A" if diag["trailing_triggered"] is None else ("True" if diag["trailing_triggered"] else "False")
+            report += (
+                f"| {diag['symbol']} | {close_display} | {exit_low_display} | {sell_signal_display} | "
+                f"{atr_display} | {diag['atr_source']} | {highest_display} | {diag['highest_source']} | "
+                f"{stop_display} | {trigger_display} | {diag['review_status']} | {diag['warning_status']} | "
+                f"{diag['notes'] or '-'} |\n"
+            )
+
+    report += f"""
 ## 4. 확정 매매 지시 (장 시작 즉시 실행)
 | 타입 | 종목 | 수량 | 예상단가 | 매매 사유 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -805,6 +1050,23 @@ def format_markdown_report(
             report += (
                 f"| **{item['symbol']}** | {item['shares']} | ${item['price']:,.2f} | "
                 f"{item['reason']} | {item['note']} |\n"
+            )
+
+    report += """
+## 4-0-1. 경고 및 주의 항목 (Warnings)
+> 아래 항목은 데이터/운영/해석상의 주의사항입니다.
+> 매매 지시가 아니며, journal 기록 대상도 아닙니다.
+
+| Symbol | Severity | Reason | Note |
+| :--- | :--- | :--- | :--- |
+"""
+    if not warning_items:
+        report += "| - | - | - | 경고 없음 |\n"
+    else:
+        for item in warning_items:
+            report += (
+                f"| {item.get('symbol', '-')} | {item.get('severity', SEVERITY_LOW)} | "
+                f"{item.get('reason', '-')} | {item.get('note', '')} |\n"
             )
 
     # MFU-FT2: 기록용 템플릿 섹션 (세분화 및 빈칸 강제)

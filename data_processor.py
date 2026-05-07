@@ -15,14 +15,14 @@ def update_technical_indicators():
     conn = database.get_connection()
     cursor = conn.cursor()
 
-    print("🚀 [Data Processor] 보조지표 계산 및 DB 업데이트 시작...")
+    print("[Data Processor] 보조지표 계산 및 DB 업데이트 시작...")
 
     # 1. 대상 종목 가져오기 (전체 종목)
     cursor.execute("SELECT symbol FROM tickers")
     tickers = [row[0] for row in cursor.fetchall()]
 
     if not tickers:
-        print("⚠️ 종목 데이터가 없습니다. data_collector.py를 먼저 실행하세요.")
+        print("[WARN] 종목 데이터가 없습니다. data_collector.py를 먼저 실행하세요.")
         return
 
     updated_count = 0
@@ -101,12 +101,12 @@ def update_technical_indicators():
                 updated_count += 1
 
         except Exception as e:
-            print(f"❌ {symbol} 처리 중 오류: {e}")
+            print(f"[ERROR] {symbol} 처리 중 오류: {e}")
             continue
 
     conn.commit()
     conn.close()
-    print(f"✅ 업데이트 완료: 총 {updated_count}개 종목의 지표가 최신화되었습니다.")
+    print(f"[OK] 업데이트 완료: 총 {updated_count}개 종목의 지표가 최신화되었습니다.")
 
 
 if __name__ == "__main__":
