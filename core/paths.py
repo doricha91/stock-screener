@@ -17,6 +17,10 @@ OUTPUTS.mkdir(parents=True, exist_ok=True)
 FRONT_TEST_DIR = OUTPUTS / "front_test"
 FRONT_TEST_DIR.mkdir(parents=True, exist_ok=True)
 
+# 페이퍼테스트 전용 디렉토리
+PAPER_TEST_DIR = OUTPUTS / "paper_test"
+PAPER_TEST_DIR.mkdir(parents=True, exist_ok=True)
+
 def market_db_path() -> str:
     # 환경변수로 오버라이드 가능 (옵션)
     env = os.getenv("STOCK_SCREENER_MARKET_DB")
@@ -35,3 +39,21 @@ def current_state_snapshot_path(date_str: str) -> Path:
     # date_str: YYYYMMDD 또는 YYYY-MM-DD 형식 모두 처리
     clean_date = date_str.replace("-", "")
     return FRONT_TEST_DIR / f"current_state_{clean_date}.json"
+
+
+def paper_current_state_snapshot_path(date_str: str) -> Path:
+    clean_date = date_str.replace("-", "")
+    return PAPER_TEST_DIR / f"paper_current_state_{clean_date}.json"
+
+
+def paper_execution_log_path() -> Path:
+    return PAPER_TEST_DIR / "paper_execution_log.csv"
+
+
+def paper_account_snapshot_path() -> Path:
+    return PAPER_TEST_DIR / "paper_account_snapshot.csv"
+
+
+def paper_performance_report_path(date_str: str) -> Path:
+    clean_date = date_str.replace("-", "")
+    return PAPER_TEST_DIR / f"paper_performance_report_{clean_date}.md"

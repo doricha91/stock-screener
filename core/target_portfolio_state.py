@@ -30,6 +30,7 @@ class CurrentPortfolioState:
     shares: Dict[str, int]          # 종목별 보유 수량 (symbol: shares)
     avg_price: Dict[str, float]     # 종목별 평균 단가 (symbol: avg_price)
     highest_prices: Dict[str, float] # 보유 기간 중 최고가 (Trailing Stop용)
+    highest_price_meta: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     hedge_symbols: List[str] = field(default_factory=list) # 현재 보유 중인 헤지 종목 리스트
 
     def __post_init__(self):

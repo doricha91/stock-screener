@@ -15,6 +15,7 @@ from core.target_portfolio_state import (
     evaluate_rebalance_need,
     get_cash_policy_status
 )
+from core.position_sizing import calculate_entry_shares
 from backtesting.reason_codes import ReasonCode
 
 
@@ -554,8 +555,12 @@ def run_backtest_with_config(config, verbose=False):
                 remaining_bp = cp_now['available_buying_power']
                 
                 if remaining_bp >= row['close']:
-                    target_pos_value = cp_now['total_equity'] / config['max_positions']
-                    shares = int(min(target_pos_value, remaining_bp) / row['close'])
+                    shares = calculate_entry_shares(
+                        total_equity=cp_now['total_equity'],
+                        available_buying_power=remaining_bp,
+                        price=row['close'],
+                        max_positions=config['max_positions'],
+                    )
                     if shares > 0:
                         pf.buy(s, row['close'], shares, date, strategy_name="Ensemble", reason=ReasonCode.ENTRY_SCORE_PASS)
                         remaining_bp -= (shares * row['close'])

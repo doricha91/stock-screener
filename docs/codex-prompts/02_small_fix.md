@@ -5,13 +5,11 @@ Apply only the smallest safe fix for the issue below.
 ## Goal
 
 [Describe the one-sentence goal]
-hedge mode 진입 여부를 trade log에서 확인할 수 있도록 최소 로그를 추가한다.
 
 
 ## Problem
 
 [Describe the problem]
-현재 hedge mode 조건이 평가되는지는 알 수 있지만, 왜 매수가 발생하지 않았는지 로그로 확인하기 어렵다.
 
 
 ## Allowed Files

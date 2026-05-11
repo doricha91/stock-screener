@@ -8,6 +8,7 @@ from io import StringIO
 import time
 from datetime import datetime
 import config
+from core.market_time import should_skip_download_start_date
 from core.paths import market_db_path
 
 DB_PATH = market_db_path()
@@ -123,8 +124,12 @@ def update_market_indices():
             if last_date:
                 start_date = (pd.to_datetime(last_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
 
-            if start_date > datetime.today().strftime('%Y-%m-%d'):
-                print(f" - {symbol}: 이미 최신입니다.")
+            should_skip, skip_reason = should_skip_download_start_date(start_date, region="US")
+            if should_skip:
+                print(
+                    f" - {symbol}: 이미 최신이거나 오늘 미국장 데이터는 아직 확정 전입니다. "
+                    f"({skip_reason})"
+                )
                 continue
 
             df = yf.download(symbol, start=start_date, progress=False, auto_adjust=False)
@@ -162,8 +167,12 @@ def update_stock_data(tickers):
             if last_date:
                 start_date = (pd.to_datetime(last_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
 
-            if start_date > datetime.today().strftime('%Y-%m-%d'):
-                # print(f"[{i + 1}/{len(tickers)}] {ticker}: 이미 최신입니다.")
+            should_skip, skip_reason = should_skip_download_start_date(start_date, region="US")
+            if should_skip:
+                print(
+                    f"[{i + 1}/{len(tickers)}] {ticker}: 이미 최신이거나 오늘 미국장 데이터는 아직 확정 전입니다. "
+                    f"({skip_reason})"
+                )
                 continue
 
             df = yf.download(ticker, start=start_date, progress=False, auto_adjust=False)

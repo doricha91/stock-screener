@@ -16,15 +16,14 @@ from core.paths import current_state_snapshot_path
 # ==========================================
 # [운영자 설정 블록] 본인의 HTS 잔고에 맞게 수정하세요.
 # ==========================================
-TARGET_DATE = "20260410"  # 시작 날짜 (YYYYMMDD)
+TARGET_DATE = "20260508"  # 시작 날짜 (YYYYMMDD)
 
-MY_CASH = 10000000.0      # 현재 예수금 (총 가용 현금)
+MY_CASH = 100000.0      # 현재 예수금 (총 가용 현금)
 
 # 현재 보유 종목 (롱 포지션 전용)
 # 형식: "티커": {"shares": 수량, "avg_price": 평단가}
 MY_POSITIONS = {
-    "005930": {"shares": 100, "avg_price": 72000.0},  # 예: 삼성전자
-    "000660": {"shares": 50, "avg_price": 180000.0},  # 예: SK하이닉스
+
 }
 # ==========================================
 
@@ -41,6 +40,14 @@ def main():
         
         # [Fail-safe] 최고가는 최초 진입이므로 평단가로 초기화
         highest_prices = {s: p["avg_price"] for s, p in MY_POSITIONS.items()}
+        highest_price_meta = {
+            s: {
+                "updated_at": TARGET_DATE,
+                "source": "init_front_test_state",
+                "basis": "avg_price"
+            }
+            for s in current_symbols
+        }
         
         # 2. CurrentPortfolioState 객체 생성 (데이터 검증 수행됨)
         state = CurrentPortfolioState(
@@ -51,6 +58,7 @@ def main():
             shares=shares,
             avg_price=avg_price,
             highest_prices=highest_prices,
+            highest_price_meta=highest_price_meta,
             hedge_symbols=[]          # 초기 헤지 종목 없음
         )
 

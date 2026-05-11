@@ -26,6 +26,10 @@ def update_portfolio_state_after_close(date_str: str, actual_trades: List[Dict[s
     new_shares = dict(current.shares)
     new_avg_price = dict(current.avg_price)
     new_highest_prices = dict(current.highest_prices)
+    new_highest_price_meta = {
+        symbol: dict(meta)
+        for symbol, meta in current.highest_price_meta.items()
+    }
     
     # 지침 3: 실제 주입된 현금이 있으면 그것을 사용, 없으면 기존 로직대로 계산
     new_cash = actual_cash if actual_cash is not None else current.absolute_cash
@@ -48,6 +52,11 @@ def update_portfolio_state_after_close(date_str: str, actual_trades: List[Dict[s
                 new_shares[symbol] = t_shares
                 new_avg_price[symbol] = t_price
                 new_highest_prices[symbol] = t_price
+                new_highest_price_meta[symbol] = {
+                    "updated_at": date_str,
+                    "source": "actual_trade_buy",
+                    "basis": "trade_price",
+                }
             
             # 현금 입력을 따로 받지 않았을 때만 자동 차감
             if actual_cash is None:
@@ -68,6 +77,7 @@ def update_portfolio_state_after_close(date_str: str, actual_trades: List[Dict[s
                     new_shares.pop(symbol, None)
                     new_avg_price.pop(symbol, None)
                     new_highest_prices.pop(symbol, None)
+                    new_highest_price_meta.pop(symbol, None)
                 else:
                     new_shares[symbol] = new_qty
 
@@ -79,8 +89,19 @@ def update_portfolio_state_after_close(date_str: str, actual_trades: List[Dict[s
             if df is not None and not df.empty:
                 # 오늘(또는 지정일)의 고가 가져오기
                 today_high = df.iloc[-1]['high']
-                # 기존 최고가와 비교하여 갱신 (Rolling Update)
-                new_highest_prices[symbol] = max(new_highest_prices.get(symbol, 0), today_high)
+                try:
+                    today_high_float = float(today_high)
+                except (TypeError, ValueError):
+                    today_high_float = None
+
+                if today_high_float is not None and today_high_float > 0:
+                    previous_highest = float(new_highest_prices.get(symbol, 0) or 0)
+                    new_highest_prices[symbol] = max(previous_highest, today_high_float)
+                    new_highest_price_meta[symbol] = {
+                        "updated_at": date_str,
+                        "source": "update_portfolio_state_after_close",
+                        "basis": "today_high",
+                    }
         except Exception as e:
             print(f"⚠️ Failed to update highest price for {symbol}: {e}")
 
@@ -106,6 +127,7 @@ def update_portfolio_state_after_close(date_str: str, actual_trades: List[Dict[s
         shares=new_shares,
         avg_price=new_avg_price,
         highest_prices=new_highest_prices,
+        highest_price_meta=new_highest_price_meta,
         hedge_symbols=current.hedge_symbols
     )
     
@@ -202,6 +224,7 @@ def load_current_state(date_str: Optional[str] = None) -> CurrentPortfolioState:
             shares=data['shares'],
             avg_price=data['avg_price'],
             highest_prices=data['highest_prices'],
+            highest_price_meta=data.get('highest_price_meta', {}),
             hedge_symbols=data.get('hedge_symbols', [])
         )
     except json.JSONDecodeError as e:

@@ -24,6 +24,7 @@ from core.paths import FRONT_TEST_DIR, market_db_path
 from core.backtest_engine import evaluate_switching_opportunity
 from core.config_factory import make_config, get_regime_config
 from core.decision_core import compute_candidate_score
+from core.position_sizing import calculate_entry_shares
 from core.universe_manager import load_latest_universe_snapshot
 
 ACTION_BUY = "BUY"
@@ -37,6 +38,11 @@ WARNING_STALE_CANDIDATE = "WARNING_STALE_CANDIDATE"
 WARNING_RS_CALC_FAILED = "WARNING_RS_CALC_FAILED"
 WARNING_DATA_INSUFFICIENT = "WARNING_DATA_INSUFFICIENT"
 WARNING_LOW_BUYING_POWER = "WARNING_LOW_BUYING_POWER"
+WARNING_HIGHEST_PRICE_MISSING = "WARNING_HIGHEST_PRICE_MISSING"
+WARNING_HIGHEST_PRICE_INVALID = "WARNING_HIGHEST_PRICE_INVALID"
+WARNING_HIGHEST_PRICE_META_MISSING = "WARNING_HIGHEST_PRICE_META_MISSING"
+WARNING_HIGHEST_PRICE_STALE = "WARNING_HIGHEST_PRICE_STALE"
+WARNING_HIGHEST_PRICE_INCONSISTENT = "WARNING_HIGHEST_PRICE_INCONSISTENT"
 
 SEVERITY_LOW = "LOW"
 SEVERITY_MEDIUM = "MEDIUM"
@@ -127,6 +133,137 @@ def calculate_candidate_rs_val(
     return float(stock_ret - bench_ret)
 
 
+def _parse_state_date(value: Any) -> Optional[pd.Timestamp]:
+    """Parse front-test state dates supporting both YYYYMMDD and YYYY-MM-DD."""
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return pd.Timestamp(datetime.strptime(text, fmt))
+        except ValueError:
+            continue
+
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return pd.Timestamp(parsed)
+    except Exception:
+        return None
+
+
+def diagnose_highest_price_state(
+    symbol: str,
+    data_date: str,
+    current_state: CurrentPortfolioState,
+    close: Optional[float],
+    high: Optional[float] = None,
+) -> tuple[Optional[float], str, List[Dict[str, Any]], List[str]]:
+    """Diagnose highest_price state and return a safe front-test highest value."""
+    warning_entries: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    highest_source = "unavailable"
+    highest_price: Optional[float] = None
+    asof_date = pd.to_datetime(data_date)
+
+    has_snapshot_key = symbol in current_state.highest_prices
+    snapshot_highest_raw = current_state.highest_prices.get(symbol)
+    snapshot_highest: Optional[float] = None
+
+    if not has_snapshot_key:
+        warning_entries.append({
+            "symbol": symbol,
+            "reason": WARNING_HIGHEST_PRICE_MISSING,
+            "severity": SEVERITY_HIGH,
+            "note": "current_state.highest_prices에 값이 없어 current price fallback을 사용합니다.",
+        })
+        notes.append("highest_price missing")
+    else:
+        try:
+            snapshot_highest = float(snapshot_highest_raw)
+            if snapshot_highest <= 0:
+                raise ValueError("highest_price must be > 0")
+        except (TypeError, ValueError):
+            snapshot_highest = None
+            warning_entries.append({
+                "symbol": symbol,
+                "reason": WARNING_HIGHEST_PRICE_INVALID,
+                "severity": SEVERITY_HIGH,
+                "note": f"snapshot highest_price 값이 유효하지 않습니다: {snapshot_highest_raw}",
+            })
+            notes.append("highest_price invalid")
+
+    meta = current_state.highest_price_meta.get(symbol)
+    if meta is None:
+        warning_entries.append({
+            "symbol": symbol,
+            "reason": WARNING_HIGHEST_PRICE_META_MISSING,
+            "severity": SEVERITY_MEDIUM,
+            "note": "highest_price_meta가 없어 마지막 highest update 시점을 확인할 수 없습니다.",
+        })
+        notes.append("highest_price_meta missing")
+    else:
+        updated_at = _parse_state_date(meta.get("updated_at"))
+        if updated_at is None:
+            warning_entries.append({
+                "symbol": symbol,
+                "reason": WARNING_HIGHEST_PRICE_META_MISSING,
+                "severity": SEVERITY_MEDIUM,
+                "note": "highest_price_meta.updated_at를 파싱할 수 없습니다.",
+            })
+            notes.append("highest_price_meta updated_at unreadable")
+        else:
+            stale_days = max((asof_date - updated_at).days, 0)
+            if stale_days > 0:
+                warning_entries.append({
+                    "symbol": symbol,
+                    "reason": WARNING_HIGHEST_PRICE_STALE,
+                    "severity": SEVERITY_MEDIUM,
+                    "note": f"highest_price metadata가 {stale_days}일 오래되었습니다. updated_at={meta.get('updated_at')}",
+                })
+                notes.append(f"highest_price stale ({stale_days}d)")
+
+    observed_reference = None
+    if high is not None:
+        observed_reference = float(high)
+    elif close is not None:
+        observed_reference = float(close)
+
+    if (
+        snapshot_highest is not None
+        and observed_reference is not None
+        and snapshot_highest < observed_reference
+    ):
+        warning_entries.append({
+            "symbol": symbol,
+            "reason": WARNING_HIGHEST_PRICE_INCONSISTENT,
+            "severity": SEVERITY_HIGH,
+            "note": (
+                f"snapshot highest_price({snapshot_highest:.2f})가 최근 관측값({observed_reference:.2f})보다 낮아 "
+                "max(snapshot,current)를 사용합니다."
+            ),
+        })
+        notes.append("highest_price below latest observed value")
+
+    if close is not None:
+        if snapshot_highest is None:
+            highest_price = float(close)
+            highest_source = "current_only"
+        else:
+            highest_price = max(float(snapshot_highest), float(close))
+            highest_source = "snapshot" if float(snapshot_highest) >= float(close) else "max(snapshot,current)"
+    elif snapshot_highest is not None:
+        highest_price = float(snapshot_highest)
+        highest_source = "snapshot"
+
+    return highest_price, highest_source, warning_entries, notes
+
+
 def compute_holding_score_for_switching(
     symbol: str,
     data_date: str,
@@ -194,10 +331,23 @@ def build_holding_sell_diagnostic(
     sell_signal = None
     atr = None
     atr_source = "unavailable"
+    high = None
     highest_price = None
     highest_source = "unavailable"
     stop_price = None
     trailing_triggered = None
+    highest_warnings: List[Dict[str, Any]] = []
+    highest_meta = current_state.highest_price_meta.get(symbol, {})
+    if highest_meta:
+        meta_parts = []
+        if highest_meta.get("updated_at"):
+            meta_parts.append(f"highest_meta updated_at={highest_meta.get('updated_at')}")
+        if highest_meta.get("basis"):
+            meta_parts.append(f"basis={highest_meta.get('basis')}")
+        if highest_meta.get("source"):
+            meta_parts.append(f"source={highest_meta.get('source')}")
+        if meta_parts:
+            notes.append(" ".join(meta_parts))
 
     df = data_manager.get_price_data(symbol, start_date=start_date, end_date=data_date)
     if df is None or df.empty:
@@ -230,6 +380,10 @@ def build_holding_sell_diagnostic(
                 if pd.notna(close_val):
                     close = float(close_val)
 
+                high_val = latest_row.get("high")
+                if pd.notna(high_val):
+                    high = float(high_val)
+
                 exit_low_val = latest_row.get("exit_low")
                 if pd.notna(exit_low_val):
                     exit_low = float(exit_low_val)
@@ -249,20 +403,14 @@ def build_holding_sell_diagnostic(
                 else:
                     notes.append("ATR unavailable")
 
-    snapshot_highest = current_state.highest_prices.get(symbol)
-    if close is not None:
-        if snapshot_highest is None:
-            highest_price = float(close)
-            highest_source = "current_only"
-        else:
-            highest_price = max(float(snapshot_highest), float(close))
-            if float(snapshot_highest) >= float(close):
-                highest_source = "snapshot"
-            else:
-                highest_source = "max(snapshot,current)"
-    elif snapshot_highest is not None:
-        highest_price = float(snapshot_highest)
-        highest_source = "snapshot"
+    highest_price, highest_source, highest_warnings, highest_notes = diagnose_highest_price_state(
+        symbol,
+        data_date,
+        current_state,
+        close,
+        high=high,
+    )
+    notes.extend(highest_notes)
 
     if close is not None and atr is not None and highest_price is not None:
         trailing_triggered, stop_price = check_trailing_stop_manual(
@@ -275,6 +423,7 @@ def build_holding_sell_diagnostic(
 
     return {
         "symbol": symbol,
+        "high": high,
         "close": close,
         "exit_low": exit_low,
         "sell_signal": sell_signal,
@@ -282,10 +431,15 @@ def build_holding_sell_diagnostic(
         "atr_source": atr_source,
         "highest_price": highest_price,
         "highest_source": highest_source,
+        "highest_meta_updated_at": highest_meta.get("updated_at"),
+        "highest_meta_basis": highest_meta.get("basis"),
+        "highest_meta_source": highest_meta.get("source"),
+        "highest_warning_reasons": [str(item.get("reason", "")) for item in highest_warnings],
         "stop_price": stop_price,
         "trailing_triggered": trailing_triggered,
         "review_status": "-",
         "warning_status": "-",
+        "warning_items": highest_warnings,
         "notes": "; ".join(notes) if notes else "",
     }
 
@@ -734,6 +888,8 @@ def generate_daily_plan(date_str: str = None) -> str:
         try:
             diag = build_holding_sell_diagnostic(symbol, data_date, current_state, merged_config)
             holding_sell_diagnostics.append(diag)
+            for warning in diag.get("warning_items", []):
+                warning_items.append(warning)
 
             if diag["atr_source"] in {"fallback_close_2pct", "unavailable"}:
                 note = "보유 종목 trailing stop ATR이 indicator 기반으로 계산되지 않아 fallback/unavailable 상태입니다."
@@ -783,10 +939,15 @@ def generate_daily_plan(date_str: str = None) -> str:
                 "atr_source": "unavailable",
                 "highest_price": None,
                 "highest_source": "unavailable",
+                "highest_meta_updated_at": None,
+                "highest_meta_basis": None,
+                "highest_meta_source": None,
+                "highest_warning_reasons": [],
                 "stop_price": None,
                 "trailing_triggered": None,
                 "review_status": "-",
                 "warning_status": "-",
+                "warning_items": [],
                 "notes": f"trailing stop diagnostic failed: {e}",
             })
             warning_items.append({
@@ -832,7 +993,12 @@ def generate_daily_plan(date_str: str = None) -> str:
                 break
         
         if price > 0:
-            shares_to_buy = int(buying_power / price)
+            shares_to_buy = calculate_entry_shares(
+                total_equity=cp_status['total_equity'],
+                available_buying_power=buying_power,
+                price=price,
+                max_positions=merged_config["max_positions"],
+            )
             if shares_to_buy > 0:
                 action_items.append({
                     "type": ACTION_BUY,
