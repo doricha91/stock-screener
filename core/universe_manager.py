@@ -95,3 +95,89 @@ def load_latest_universe_snapshot() -> dict[str, object]:
         return json.loads(latest_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _normalize_snapshot_date(date_str: str) -> str:
+    clean_date = str(date_str).replace("-", "").strip()
+    if len(clean_date) != 8 or not clean_date.isdigit():
+        raise ValueError(f"Invalid snapshot date: {date_str}")
+    return pd.to_datetime(clean_date, format="%Y%m%d").strftime("%Y-%m-%d")
+
+
+def _snapshot_quarter(date_value: pd.Timestamp) -> str:
+    quarter = ((date_value.month - 1) // 3) + 1
+    return f"{date_value.year}Q{quarter}"
+
+
+def _parse_snapshot_date_from_path(path: Path) -> pd.Timestamp | None:
+    stem = path.stem
+    prefix = "universe_snapshot_"
+    if not stem.startswith(prefix):
+        return None
+    raw = stem[len(prefix):]
+    if len(raw) != 8 or not raw.isdigit():
+        return None
+    return pd.to_datetime(raw, format="%Y%m%d")
+
+
+def load_universe_snapshot_as_of_quarter(
+    plan_date: str,
+    snapshots_dir: Path | None = None,
+) -> dict[str, object]:
+    normalized_plan_date = _normalize_snapshot_date(plan_date)
+    plan_ts = pd.Timestamp(normalized_plan_date)
+    target_dir = Path(snapshots_dir) if snapshots_dir is not None else (OUTPUTS / "universe")
+
+    metadata = {
+        "policy": "quarterly_as_of",
+        "snapshot_path": None,
+        "snapshot_date": None,
+        "snapshot_quarter": None,
+        "fallback_used": False,
+        "warning": None,
+    }
+    if not target_dir.exists():
+        metadata["fallback_used"] = True
+        metadata["warning"] = "Universe snapshot directory does not exist."
+        return {"snapshot": {}, "metadata": metadata}
+
+    snapshot_paths = sorted(target_dir.glob("universe_snapshot_*.json"))
+    eligible: list[tuple[pd.Timestamp, Path]] = []
+    for path in snapshot_paths:
+        snapshot_ts = _parse_snapshot_date_from_path(path)
+        if snapshot_ts is None or snapshot_ts > plan_ts:
+            continue
+        eligible.append((snapshot_ts, path))
+
+    if not eligible:
+        metadata["fallback_used"] = True
+        metadata["warning"] = "No universe snapshot exists on or before plan_date."
+        return {"snapshot": {}, "metadata": metadata}
+
+    plan_quarter = _snapshot_quarter(plan_ts)
+    same_quarter = [(ts, path) for ts, path in eligible if _snapshot_quarter(ts) == plan_quarter]
+    if same_quarter:
+        chosen_ts, chosen_path = same_quarter[-1]
+    else:
+        chosen_ts, chosen_path = eligible[-1]
+        metadata["fallback_used"] = True
+        metadata["warning"] = (
+            f"No universe snapshot found in {plan_quarter} on or before {normalized_plan_date}; "
+            f"using latest prior snapshot from {_snapshot_quarter(chosen_ts)}."
+        )
+
+    try:
+        payload = json.loads(chosen_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+        metadata["fallback_used"] = True
+        metadata["warning"] = f"Failed to read universe snapshot: {chosen_path}"
+
+    metadata.update(
+        {
+            "snapshot_path": str(chosen_path),
+            "snapshot_date": chosen_ts.strftime("%Y-%m-%d"),
+            "snapshot_quarter": _snapshot_quarter(chosen_ts),
+        }
+    )
+    return {"snapshot": payload, "metadata": metadata}

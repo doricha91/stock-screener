@@ -9,17 +9,28 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.execution_logger import parse_journal_from_markdown, map_journal_to_trades
+from core.paper_account_snapshot import (
+    build_paper_account_snapshot_row,
+    save_paper_account_snapshot,
+)
+from core.paper_market_valuation import value_paper_account_state
+from core.paper_position_snapshot import (
+    build_paper_position_snapshot_rows,
+    save_paper_position_snapshot,
+)
 from core.paper_account_state import PaperAccountState, build_paper_state_from_trades
 from core.paper_current_state_storage import save_paper_current_state
 from core.paper_execution_log import append_paper_execution_log
 from core.paper_safety import assert_paper_path
-from core.paper_trade_preview import build_paper_trade_previews
+from core.paper_trade_preview import build_paper_trade_previews, can_resolve_paper_actual_fill
 from core.paths import (
-    FRONT_TEST_DIR,
     PAPER_TEST_DIR,
+    market_db_path,
     paper_account_snapshot_path,
     paper_current_state_snapshot_path,
+    paper_daily_action_plan_path,
     paper_execution_log_path,
+    paper_position_snapshot_path,
 )
 
 
@@ -30,16 +41,17 @@ def _normalize_date(date_str: str) -> str:
     return clean_date
 
 
-def build_paper_eod_paths(date_str: str) -> dict[str, Path]:
+def build_paper_eod_paths(date_str: str, plan_path: str | Path | None = None) -> dict[str, Path]:
     clean_date = _normalize_date(date_str)
-    input_report = FRONT_TEST_DIR / f"daily_action_plan_{clean_date}.md"
+    input_report = Path(plan_path) if plan_path is not None else paper_daily_action_plan_path(clean_date)
     outputs = {
         "input_report": input_report,
         "paper_state": paper_current_state_snapshot_path(clean_date),
         "paper_execution_log": paper_execution_log_path(),
         "paper_account_snapshot": paper_account_snapshot_path(),
+        "paper_position_snapshot": paper_position_snapshot_path(),
     }
-    for key in ("paper_state", "paper_execution_log", "paper_account_snapshot"):
+    for key in ("paper_state", "paper_execution_log", "paper_account_snapshot", "paper_position_snapshot"):
         assert_paper_path(outputs[key], PAPER_TEST_DIR)
     return outputs
 
@@ -95,7 +107,7 @@ def parse_journal_preview_from_markdown(report_path: Path) -> list[dict[str, Any
 
         row["status"] = (
             "READY_FOR_PAPER_TRADE"
-            if row["act_shares"] and row["act_price"] and row["reason"]
+            if row["reason"] and can_resolve_paper_actual_fill(row)
             else "PENDING_ACTUAL_FILL"
         )
         rows.append(row)
@@ -134,8 +146,13 @@ def build_paper_account_preview_from_log(
     )
 
 
-def run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool = False, commit: bool = False) -> int:
-    paths = build_paper_eod_paths(date_str)
+def run_paper_eod_dry_run(
+    date_str: str,
+    allow_empty_journal: bool = False,
+    commit: bool = False,
+    plan_path: str | Path | None = None,
+) -> int:
+    paths = build_paper_eod_paths(date_str, plan_path=plan_path)
     report_exists = paths["input_report"].exists()
     parser_mode = "not_run"
     journal_rows: list[dict[str, Any]] = []
@@ -147,9 +164,17 @@ def run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool = False, comm
     parser_error: str | None = None
     account_preview_error: str | None = None
     paper_state_save_error: str | None = None
+    snapshot_save_error: str | None = None
+    position_snapshot_save_error: str | None = None
     paper_log_exists = paths["paper_execution_log"].exists()
     paper_account_state: PaperAccountState | None = None
     paper_state_save_result: dict[str, Any] | None = None
+    snapshot_row: dict[str, Any] | None = None
+    snapshot_save_result: dict[str, Any] | None = None
+    position_snapshot_rows: list[dict[str, Any]] | None = None
+    position_snapshot_save_result: dict[str, Any] | None = None
+    market_valuation = None
+    market_valuation_error: str | None = None
 
     if report_exists:
         try:
@@ -208,6 +233,72 @@ def run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool = False, comm
         except Exception as exc:
             paper_state_save_error = str(exc)
 
+    if account_preview_error is None and paper_account_state is not None:
+        try:
+            market_valuation = value_paper_account_state(
+                paper_account_state,
+                date_str,
+                Path(market_db_path()),
+            )
+        except Exception as exc:
+            market_valuation_error = str(exc)
+
+    if account_preview_error is None and paper_account_state is not None:
+        try:
+            snapshot_row = build_paper_account_snapshot_row(
+                paper_account_state,
+                date_str,
+                initial_cash=100000.0,
+                source_execution_log=str(paths["paper_execution_log"]),
+                source_current_state=str(paths["paper_state"]),
+                market_valuation=market_valuation,
+                market_valuation_error=market_valuation_error,
+            )
+        except Exception as exc:
+            snapshot_save_error = str(exc)
+
+    if market_valuation is not None and paper_account_state is not None:
+        try:
+            position_snapshot_rows = build_paper_position_snapshot_rows(
+                paper_account_state,
+                market_valuation,
+                date_str,
+            )
+        except Exception as exc:
+            position_snapshot_save_error = str(exc)
+
+    if (
+        commit
+        and account_preview_error is None
+        and paper_state_save_error is None
+        and snapshot_save_error is None
+        and snapshot_row is not None
+    ):
+        try:
+            snapshot_save_result = save_paper_account_snapshot(
+                snapshot_row,
+                paths["paper_account_snapshot"],
+                PAPER_TEST_DIR / "archive",
+            )
+        except Exception as exc:
+            snapshot_save_error = str(exc)
+
+    if (
+        commit
+        and position_snapshot_save_error is None
+        and market_valuation is not None
+        and position_snapshot_rows is not None
+    ):
+        try:
+            position_snapshot_save_result = save_paper_position_snapshot(
+                position_snapshot_rows,
+                date_str,
+                paths["paper_position_snapshot"],
+                PAPER_TEST_DIR / "archive",
+            )
+        except Exception as exc:
+            position_snapshot_save_error = str(exc)
+
     mode_label = "COMMIT MODE" if commit else "SAFE DRY RUN"
     print(f"PAPER EOD UPDATE - {mode_label}")
     print("Input report:")
@@ -217,6 +308,7 @@ def run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool = False, comm
     print(f"  {paths['paper_state']}")
     print(f"  {paths['paper_execution_log']}")
     print(f"  {paths['paper_account_snapshot']}")
+    print(f"  {paths['paper_position_snapshot']}")
     print()
     if report_exists and parser_mode in {"strict", "fallback_preview"}:
         summary = _preview_summary(journal_rows)
@@ -341,11 +433,92 @@ def run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool = False, comm
             + ", ".join(sorted(paper_state_save_result["payload"].keys()))
         )
     print()
+    print("Paper account snapshot:")
+    print(f"  path: {paths['paper_account_snapshot']}")
+    print(f"  write_performed: {commit and snapshot_save_result is not None}")
+    if snapshot_save_error is not None:
+        print("  failed")
+        print(f"  {snapshot_save_error}")
+    elif snapshot_row is None:
+        print("  unavailable")
+    else:
+        print(
+            f"  snapshot_date: {snapshot_row['snapshot_date']} "
+            f"cash={float(snapshot_row['cash']):.2f} "
+            f"positions_cost_value={float(snapshot_row['positions_cost_value']):.2f} "
+            f"total_equity_cost_basis={float(snapshot_row['total_equity_cost_basis']):.2f}"
+        )
+        print(
+            f"  cash_ratio_cost_basis={float(snapshot_row['cash_ratio_cost_basis']):.6f} "
+            f"position_count={snapshot_row['position_count']} "
+            f"symbols={snapshot_row['symbols'] or '-'}"
+        )
+        if not commit:
+            print("  dry-run mode: no paper_account_snapshot file written")
+        elif snapshot_save_result is not None:
+            backup_path = snapshot_save_result.get("backup_path")
+            print("  saved")
+            if backup_path is not None:
+                print(f"  backup_path: {backup_path}")
+            print(f"  row_count: {snapshot_save_result['row_count']}")
+            print(f"  replaced_same_date: {snapshot_save_result['replaced']}")
+        print(f"  market_valuation_status: {snapshot_row['market_valuation_status']}")
+        if snapshot_row["market_valuation_status"] == "success":
+            print(
+                f"  positions_market_value={float(snapshot_row['positions_market_value']):.2f} "
+                f"total_equity_market_value={float(snapshot_row['total_equity_market_value']):.2f} "
+                f"unrealized_pnl={float(snapshot_row['unrealized_pnl']):.2f}"
+            )
+            print(
+                f"  cash_ratio_market_value={float(snapshot_row['cash_ratio_market_value']):.6f} "
+                f"valuation_price_date={snapshot_row['valuation_price_date']} "
+                f"max_price_staleness_days={snapshot_row['max_price_staleness_days']}"
+            )
+        elif snapshot_row["market_valuation_status"] == "failed":
+            print(f"  market_valuation_error: {snapshot_row['market_valuation_error']}")
+    print()
+    print("Paper position snapshot:")
+    print(f"  path: {paths['paper_position_snapshot']}")
+    print(f"  write_performed: {commit and position_snapshot_save_result is not None}")
+    if market_valuation is None:
+        if market_valuation_error:
+            print("  skipped")
+            print(f"  market_valuation_error: {market_valuation_error}")
+        else:
+            print("  unavailable")
+    elif position_snapshot_save_error is not None:
+        print("  failed")
+        print(f"  {position_snapshot_save_error}")
+    elif position_snapshot_rows is None:
+        print("  unavailable")
+    else:
+        print(f"  row_count_preview: {len(position_snapshot_rows)}")
+        if position_snapshot_rows:
+            symbols_preview = "|".join(row["symbol"] for row in position_snapshot_rows)
+            print(f"  symbols: {symbols_preview}")
+        else:
+            print("  symbols: -")
+        if not commit:
+            print("  dry-run mode: no paper_position_snapshot file written")
+        elif position_snapshot_save_result is not None:
+            backup_path = position_snapshot_save_result.get("backup_path")
+            print("  saved")
+            if backup_path is not None:
+                print(f"  backup_path: {backup_path}")
+            print(f"  row_count: {position_snapshot_save_result['row_count']}")
+            print(f"  replaced_same_date: {position_snapshot_save_result['replaced']}")
+        elif market_valuation_error:
+            print("  skipped due to market valuation failure")
+    print()
     print("Status:")
     if report_exists:
         print("  input report found")
     else:
-        print("  WARNING: input report not found")
+        print("  ERROR: input report not found")
+        print("  expected official paper daily plan path")
+        print("  Run:")
+        print(f"    python scripts/run_paper_daily_plan.py --date {paths['input_report'].stem.replace('daily_action_plan_', '')}")
+        return 1
     if parser_mode == "strict":
         print("  read-only parser OK (strict parser)")
     elif parser_mode == "fallback_preview":
@@ -363,11 +536,25 @@ def run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool = False, comm
     if paper_state_save_error is not None:
         print("  ERROR: paper current state save failed")
         return 1
+    if snapshot_save_error is not None:
+        print("  ERROR: paper account snapshot save failed")
+        return 1
     if commit and rows_to_append:
         print("  paper execution log append committed")
     if commit and paper_state_save_result is not None:
         print("  paper_current_state write committed")
-    if not (commit and (rows_to_append or paper_state_save_result is not None)):
+    if commit and snapshot_save_result is not None:
+        print("  paper_account_snapshot write committed")
+    if commit and position_snapshot_save_result is not None:
+        print("  paper_position_snapshot write committed")
+    if not (
+        commit and (
+            rows_to_append
+            or paper_state_save_result is not None
+            or snapshot_save_result is not None
+            or position_snapshot_save_result is not None
+        )
+    ):
         print("  no paper files were written")
     print("  no live/front-test files will be written")
     print("  paper account preview OK")
@@ -375,12 +562,29 @@ def run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool = False, comm
         print("  paper_current_state saved")
     else:
         print("  paper_current_state not written")
+    if commit and snapshot_save_result is not None:
+        print("  paper_account_snapshot saved")
+    else:
+        print("  paper_account_snapshot not written")
+    if commit and position_snapshot_save_result is not None:
+        print("  paper_position_snapshot saved")
+    elif market_valuation_error:
+        print("  paper_position_snapshot skipped")
+    else:
+        print("  paper_position_snapshot not written")
+    if snapshot_row is not None and snapshot_row["market_valuation_status"] == "failed":
+        print("  WARNING: market valuation failed, but cost-basis snapshot was preserved")
+        print("  WARNING: paper_position_snapshot was skipped")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Paper EOD update dry-run")
     parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+    parser.add_argument(
+        "--plan-path",
+        help="Optional override path to the paper daily action plan markdown.",
+    )
     parser.add_argument(
         "--allow-empty-journal",
         action="store_true",
@@ -396,6 +600,7 @@ def main() -> int:
         args.date,
         allow_empty_journal=args.allow_empty_journal,
         commit=args.commit,
+        plan_path=args.plan_path,
     )
 
 

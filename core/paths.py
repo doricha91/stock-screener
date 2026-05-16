@@ -41,9 +41,19 @@ def current_state_snapshot_path(date_str: str) -> Path:
     return FRONT_TEST_DIR / f"current_state_{clean_date}.json"
 
 
+def front_daily_action_plan_path(date_str: str) -> Path:
+    clean_date = date_str.replace("-", "")
+    return FRONT_TEST_DIR / f"daily_action_plan_{clean_date}.md"
+
+
 def paper_current_state_snapshot_path(date_str: str) -> Path:
     clean_date = date_str.replace("-", "")
     return PAPER_TEST_DIR / f"paper_current_state_{clean_date}.json"
+
+
+def paper_daily_action_plan_path(date_str: str) -> Path:
+    clean_date = date_str.replace("-", "")
+    return PAPER_TEST_DIR / f"daily_action_plan_{clean_date}.md"
 
 
 def paper_execution_log_path() -> Path:
@@ -54,6 +64,64 @@ def paper_account_snapshot_path() -> Path:
     return PAPER_TEST_DIR / "paper_account_snapshot.csv"
 
 
+def paper_position_snapshot_path() -> Path:
+    return PAPER_TEST_DIR / "paper_position_snapshot.csv"
+
+
 def paper_performance_report_path(date_str: str) -> Path:
     clean_date = date_str.replace("-", "")
     return PAPER_TEST_DIR / f"paper_performance_report_{clean_date}.md"
+
+
+def paper_reports_dir() -> Path:
+    path = PAPER_TEST_DIR / "reports"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def paper_performance_summary_path() -> Path:
+    return paper_reports_dir() / "paper_performance_summary.md"
+
+
+def paper_config_snapshots_dir() -> Path:
+    path = PAPER_TEST_DIR / "config_snapshots"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def paper_config_snapshot_path(date_str: str) -> Path:
+    clean_date = date_str.replace("-", "")
+    return paper_config_snapshots_dir() / f"paper_config_snapshot_{clean_date}.json"
+
+
+def paper_config_snapshot_archive_dir() -> Path:
+    path = PAPER_TEST_DIR / "archive" / "config_snapshots"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def paper_replay_diff_dir() -> Path:
+    path = PAPER_TEST_DIR / "replay_diff"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def paper_regenerated_daily_action_plan_path(date_str: str) -> Path:
+    clean_date = date_str.replace("-", "")
+    return paper_replay_diff_dir() / f"regenerated_daily_action_plan_{clean_date}.md"
+
+
+def paper_daily_plan_diff_report_path(date_str: str) -> Path:
+    clean_date = date_str.replace("-", "")
+    return paper_replay_diff_dir() / f"daily_plan_diff_{clean_date}.md"
+
+
+def paper_replay_diff_config_snapshot_path(date_str: str) -> Path:
+    clean_date = date_str.replace("-", "")
+    return paper_replay_diff_dir() / f"regenerated_paper_config_snapshot_{clean_date}.json"
+
+
+def paper_replay_diff_config_snapshot_archive_dir() -> Path:
+    path = paper_replay_diff_dir() / "archive" / "config_snapshots"
+    path.mkdir(parents=True, exist_ok=True)
+    return path

@@ -20,12 +20,13 @@ from core.target_portfolio_state import (
     TargetPortfolioState,
     RebalanceDecision
 )
-from core.paths import FRONT_TEST_DIR, market_db_path
+from core.paths import front_daily_action_plan_path, market_db_path
 from core.backtest_engine import evaluate_switching_opportunity
 from core.config_factory import make_config, get_regime_config
 from core.decision_core import compute_candidate_score
+from core.paper_config_snapshot import save_paper_config_snapshot
 from core.position_sizing import calculate_entry_shares
-from core.universe_manager import load_latest_universe_snapshot
+from core.universe_manager import load_universe_snapshot_as_of_quarter
 
 ACTION_BUY = "BUY"
 ACTION_SELL = "SELL"
@@ -562,7 +563,162 @@ def check_trailing_stop_manual(
 
 from screener import data_manager, indicator, strategy
 
-def generate_daily_plan(date_str: str = None) -> str:
+
+def resolve_daily_plan_output_path(
+    plan_date: str,
+    output_path: str | Path | None = None,
+) -> Path:
+    if output_path is None:
+        return front_daily_action_plan_path(plan_date)
+    return Path(output_path)
+
+
+def is_buy_signal_candidate(candidate: Dict[str, Any], score_threshold: float) -> bool:
+    """Match the backtest buy_signal gate: score >= threshold and rs_val > 0."""
+    score = candidate.get("score")
+    rs_val = candidate.get("rs_val")
+
+    try:
+        score = float(score)
+        rs_val = float(rs_val)
+    except (TypeError, ValueError):
+        return False
+
+    if pd.isna(score) or pd.isna(rs_val):
+        return False
+
+    return bool(score >= float(score_threshold) and rs_val > 0)
+
+
+def filter_switch_candidates_for_daily_plan(
+    df_candidates: pd.DataFrame,
+    score_threshold: float,
+) -> pd.DataFrame:
+    """Restrict switching candidates to backtest-like buy_signal candidates only."""
+    if df_candidates.empty:
+        return df_candidates.copy()
+
+    switch_candidates = df_candidates.copy()
+    if "rs_val" not in switch_candidates.columns:
+        switch_candidates["rs_val"] = 0.0
+
+    mask = switch_candidates.apply(
+        lambda row: is_buy_signal_candidate(row, score_threshold),
+        axis=1,
+    )
+    return switch_candidates.loc[mask].copy()
+
+
+def build_switch_action_items(
+    switch_pairs: List[Dict[str, Any]],
+    current_state: CurrentPortfolioState,
+    current_prices: Dict[str, float],
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+    """Build switch SELL/BUY actions and track symbols already consumed for the day."""
+    action_items: list[dict[str, Any]] = []
+    processed_sell_symbols: set[str] = set()
+    planned_buy_symbols: set[str] = set()
+
+    for pair in switch_pairs:
+        s_sell = pair["sell_symbol"]
+        s_buy = pair["buy_symbol"]
+        b_row = pair["buy_row"]
+
+        shares_to_sell = current_state.shares[s_sell]
+        sell_price = current_prices.get(s_sell, 0)
+        action_items.append({
+            "type": ACTION_SELL,
+            "symbol": s_sell,
+            "shares": shares_to_sell,
+            "price": sell_price,
+            "reason": f"SWITCH_OUT (to {s_buy}, Score Gap: {pair['score_gap']:.1f})"
+        })
+
+        if s_buy in planned_buy_symbols:
+            processed_sell_symbols.add(s_sell)
+            continue
+
+        price_buy = b_row["close"]
+        shares_to_buy = int((shares_to_sell * sell_price) / price_buy)
+        if shares_to_buy > 0:
+            action_items.append({
+                "type": ACTION_BUY,
+                "symbol": s_buy,
+                "shares": shares_to_buy,
+                "price": price_buy,
+                "reason": f"SWITCH_IN (from {s_sell})"
+            })
+            planned_buy_symbols.add(s_buy)
+
+        processed_sell_symbols.add(s_sell)
+
+    return action_items, processed_sell_symbols, planned_buy_symbols
+
+
+def build_strategy_entry_action_items(
+    rebalance_symbol_diff_added: List[str],
+    current_state: CurrentPortfolioState,
+    formatted_candidates: List[Dict[str, Any]],
+    cp_status: Dict[str, Any],
+    target_cash_ratio: float,
+    max_positions: int,
+    planned_buy_symbols: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build non-switch BUY actions while preventing same-day duplicate BUY symbols."""
+    existing_buy_symbols = set(planned_buy_symbols or set())
+    action_items: list[dict[str, Any]] = []
+
+    buying_power = calculate_available_buying_power(
+        current_state.absolute_cash,
+        cp_status["total_equity"],
+        target_cash_ratio,
+        buffer_ratio=0.02,
+    )
+
+    for symbol in rebalance_symbol_diff_added:
+        if symbol in current_state.current_symbols or symbol in existing_buy_symbols:
+            continue
+
+        price = 0
+        for candidate in formatted_candidates:
+            if candidate["symbol"] == symbol:
+                price = candidate["price"]
+                break
+
+        if price <= 0:
+            continue
+
+        shares_to_buy = calculate_entry_shares(
+            total_equity=cp_status["total_equity"],
+            available_buying_power=buying_power,
+            price=price,
+            max_positions=max_positions,
+        )
+        if shares_to_buy <= 0:
+            continue
+
+        action_items.append({
+            "type": ACTION_BUY,
+            "symbol": symbol,
+            "shares": shares_to_buy,
+            "price": price,
+            "reason": "STRATEGY_ENTRY"
+        })
+        existing_buy_symbols.add(symbol)
+        buying_power -= (shares_to_buy * price)
+
+    return action_items
+
+
+def generate_daily_plan(
+    date_str: str = None,
+    current_state: CurrentPortfolioState | None = None,
+    output_path: str | Path | None = None,
+    market_state_write_log: bool = True,
+    config_snapshot_path: str | Path | None = None,
+    config_snapshot_archive_dir: str | Path | None = None,
+    config_snapshot_source: str = "daily_plan_generator",
+) -> str:
     """
     일일 판단 산출물(Action Plan)을 생성하고 파일로 저장합니다.
     """
@@ -575,14 +731,18 @@ def generate_daily_plan(date_str: str = None) -> str:
     print(f"[START] Generating Daily Action Plan for {plan_date}...")
 
     # 1. 현재 상태 로드 (FT3)
-    try:
-        current_state = load_current_state()
-    except Exception as e:
-        print(f"[ERROR] Failed to load current state: {e}")
-        return ""
+    if current_state is None:
+        try:
+            current_state = load_current_state()
+        except Exception as e:
+            print(f"[ERROR] Failed to load current state: {e}")
+            return ""
 
     # 2. 시장 국면 판단
-    m_state = market_analyzer.get_market_state(target_date=plan_date)
+    m_state = market_analyzer.get_market_state(
+        target_date=plan_date,
+        write_log=market_state_write_log,
+    )
     data_date = m_state["date"]
     regime = m_state["regime"]
     print(f"[INFO] plan_date={plan_date}, data_date={data_date}")
@@ -597,7 +757,9 @@ def generate_daily_plan(date_str: str = None) -> str:
         end_date=data_date,
         start_date=bench_start,
     )
-    universe_snapshot = load_latest_universe_snapshot()
+    universe_selection = load_universe_snapshot_as_of_quarter(plan_date)
+    universe_snapshot = universe_selection.get("snapshot", {})
+    universe_metadata = universe_selection.get("metadata", {})
     removed_universe_symbols = {
         str(symbol).strip().upper()
         for symbol in universe_snapshot.get("removed", [])
@@ -607,7 +769,7 @@ def generate_daily_plan(date_str: str = None) -> str:
     stale_holdings_alert: List[str] = []
     
     # 3. 신규 매수 후보 스크리닝 (Raw Signals)
-    df_candidates = build_screener_results(market_state=m_state)
+    df_candidates = build_screener_results(market_state=m_state, end_date=plan_date)
     if not df_candidates.empty and removed_universe_symbols:
         symbol_col = "Symbol" if "Symbol" in df_candidates.columns else "symbol" if "symbol" in df_candidates.columns else None
         if symbol_col:
@@ -702,7 +864,7 @@ def generate_daily_plan(date_str: str = None) -> str:
     formatted_candidates = []
     for c in candidate_rows:
         latest_price_date = c.get('Date', c.get('date'))
-        stale_flag, stale_days = is_stale_candidate(latest_price_date, data_date, stale_candidate_max_days)
+        stale_flag, stale_days = is_stale_candidate(latest_price_date, plan_date, stale_candidate_max_days)
         if stale_flag:
             stale_exclusions.append({
                 'symbol': c['symbol'],
@@ -717,7 +879,7 @@ def generate_daily_plan(date_str: str = None) -> str:
             'rs_val': c.get('rs_val', 0.0),
             'rs_calc_success': c.get('rs_calc_success', True),
             'latest_price_date': latest_price_date,
-            'entry_signal': True,
+            'entry_signal': is_buy_signal_candidate(c, score_threshold),
             'price': c['close']
         })
     print(
@@ -730,7 +892,7 @@ def generate_daily_plan(date_str: str = None) -> str:
     candidate_diagnostics, candidate_diag_summary = build_candidate_filter_diagnostics(
         formatted_candidates,
         score_threshold,
-        data_date,
+        plan_date,
     )
     print(
         "Candidate filter summary: "
@@ -826,11 +988,8 @@ def generate_daily_plan(date_str: str = None) -> str:
         current_pos_scores.sort(key=lambda x: x['score'])
 
         # 2. 교체 기회 평가
-        # candidates 데이터프레임 형식 맞추기 (score, rs_val 등 필요)
-        c_df = df_candidates.copy()
-        # rs_val이 없을 경우를 대비해 0.0 기본값
-        if 'rs_val' not in c_df.columns:
-            c_df['rs_val'] = 0.0
+        # backtest parity: switch-in candidates must satisfy buy_signal-like gate
+        c_df = filter_switch_candidates_for_daily_plan(df_candidates, score_threshold)
 
         if current_pos_scores:
             switch_pairs = evaluate_switching_opportunity(c_df, current_pos_scores, merged_config)
@@ -841,41 +1000,22 @@ def generate_daily_plan(date_str: str = None) -> str:
     action_items = []
     rebalance_review_items = []
     warning_items = []
+    if universe_metadata.get("warning"):
+        warning_items.append({
+            "type": "UNIVERSE_SNAPSHOT_WARNING",
+            "note": universe_metadata["warning"],
+        })
     holding_sell_diagnostics: List[Dict[str, Any]] = []
     processed_symbols = set()
     stop_alerts = [] # 트레일링 스탑 감시 목록
     
     # [MFU 5] 5-0. 교체 매매 액션 추가 (최우선 순위 - 슬롯 확보용)
-    for pair in switch_pairs:
-        s_sell = pair['sell_symbol']
-        s_buy = pair['buy_symbol']
-        b_row = pair['buy_row']
-        shares_to_sell = current_state.shares[s_sell]
-        
-        # 1. 매도 지시
-        action_items.append({
-            "type": ACTION_SELL,
-            "symbol": s_sell,
-            "shares": shares_to_sell,
-            "price": current_prices.get(s_sell, 0),
-            "reason": f"SWITCH_OUT (to {s_buy}, Score Gap: {pair['score_gap']:.1f})"
-        })
-        
-        # 2. 매수 지시 (매도 후 확보될 가상 현금 고려 - 실전에서는 주의 요망)
-        # 매수 수량 계산: (기존 가치 + 가용 현금 일부) 기반이나, 여기서는 안전하게 기존 슬롯 대체로 계산
-        price_buy = b_row['close']
-        shares_to_buy = int((shares_to_sell * current_prices.get(s_sell, 0)) / price_buy)
-        
-        if shares_to_buy > 0:
-            action_items.append({
-                "type": ACTION_BUY,
-                "symbol": s_buy,
-                "shares": shares_to_buy,
-                "price": price_buy,
-                "reason": f"SWITCH_IN (from {s_sell})"
-            })
-            
-        processed_symbols.add(s_sell)
+    switch_action_items, processed_symbols, switch_buy_symbols = build_switch_action_items(
+        switch_pairs,
+        current_state,
+        current_prices,
+    )
+    action_items.extend(switch_action_items)
 
     for symbol in current_state.current_symbols:
         if symbol in processed_symbols:
@@ -982,32 +1122,17 @@ def generate_daily_plan(date_str: str = None) -> str:
             "note": "매수 후보가 있으나 현재 가용 Buying Power가 부족하거나 0입니다.",
         })
     
-    # 매수 종목도 이미 매도된 종목의 현금을 고려하지 않는 보수적 집행 (실전 안정성)
-    for symbol in rebalance.symbol_diff_added:
-        if symbol in current_state.current_symbols: continue # 이미 보유 중이면 추가 매수 로직은 추후 확장
-        
-        price = 0
-        for c in formatted_candidates:
-            if c['symbol'] == symbol:
-                price = c['price']
-                break
-        
-        if price > 0:
-            shares_to_buy = calculate_entry_shares(
-                total_equity=cp_status['total_equity'],
-                available_buying_power=buying_power,
-                price=price,
-                max_positions=merged_config["max_positions"],
-            )
-            if shares_to_buy > 0:
-                action_items.append({
-                    "type": ACTION_BUY,
-                    "symbol": symbol,
-                    "shares": shares_to_buy,
-                    "price": price,
-                    "reason": "STRATEGY_ENTRY"
-                })
-                buying_power -= (shares_to_buy * price)
+    action_items.extend(
+        build_strategy_entry_action_items(
+            rebalance.symbol_diff_added,
+            current_state,
+            formatted_candidates,
+            cp_status,
+            target_state.target_cash_ratio,
+            merged_config["max_positions"],
+            planned_buy_symbols=switch_buy_symbols,
+        )
+    )
 
     for symbol in sorted(set(stale_holdings_alert)):
         warning_items.append({
@@ -1043,7 +1168,7 @@ def generate_daily_plan(date_str: str = None) -> str:
             incomplete_holding_diag += 1
 
     # 6. 마크다운 리포트 생성
-    report_path = FRONT_TEST_DIR / f"daily_action_plan_{plan_date.replace('-', '')}.md"
+    report_path = resolve_daily_plan_output_path(plan_date, output_path)
     
     # 기록용 사전 기입 데이터 준비 (MFU-FT2 긴급 수정 반영)
     journal_rows = []
@@ -1097,6 +1222,18 @@ def generate_daily_plan(date_str: str = None) -> str:
     
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_content)
+
+    if config_snapshot_path is not None and config_snapshot_archive_dir is not None:
+        save_paper_config_snapshot(
+            plan_date=plan_date,
+            market_state=m_state,
+            final_config=merged_config,
+            output_path=Path(config_snapshot_path),
+            archive_dir=Path(config_snapshot_archive_dir),
+            source=config_snapshot_source,
+            market_state_write_log=market_state_write_log,
+            universe_metadata=universe_metadata,
+        )
         
     print(f"[OK] Action Plan saved to: {report_path}")
     return str(report_path)

@@ -21,6 +21,79 @@ class PaperTradePreview:
     rec_price: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class ResolvedPaperFill:
+    shares: int
+    price: float
+    source: str
+    reason: str
+
+
+BLANK_ACTUAL_VALUES = {"", "[]", "[ ]", "[  ]", "n/a", "nan", "none", "null"}
+PAPER_VIRTUAL_FILL_REASON = "Act fields blank; used Rec_Shares/Rec_Price as paper fill"
+
+
+def is_blank_actual_value(value) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip()
+    if not text:
+        return True
+    normalized = text.lower().replace("\u00a0", " ")
+    normalized = " ".join(normalized.split())
+    return normalized in BLANK_ACTUAL_VALUES
+
+
+def _parse_positive_int(value, field_name: str) -> int:
+    cleaned = clean_numeric(str(value))
+    if not cleaned:
+        raise ValueError(f"{field_name} is blank")
+    parsed = int(float(cleaned))
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    return parsed
+
+
+def _parse_positive_float(value, field_name: str) -> float:
+    cleaned = clean_numeric(str(value))
+    if not cleaned:
+        raise ValueError(f"{field_name} is blank")
+    parsed = float(cleaned)
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    return parsed
+
+
+def resolve_paper_actual_fill(row: dict) -> ResolvedPaperFill:
+    act_shares_raw = row.get("act_shares", "")
+    act_price_raw = row.get("act_price", "")
+    rec_shares_raw = row.get("rec_shares", "")
+    rec_price_raw = row.get("rec_price", "")
+
+    act_shares_blank = is_blank_actual_value(act_shares_raw)
+    act_price_blank = is_blank_actual_value(act_price_raw)
+    shares_source = rec_shares_raw if act_shares_blank else act_shares_raw
+    price_source = rec_price_raw if act_price_blank else act_price_raw
+
+    shares_abs = _parse_positive_int(shares_source, "shares")
+    price = _parse_positive_float(price_source, "price")
+    used_fallback = act_shares_blank or act_price_blank
+    return ResolvedPaperFill(
+        shares=shares_abs,
+        price=price,
+        source="paper_virtual_fill" if used_fallback else "journal_actual_fill",
+        reason=PAPER_VIRTUAL_FILL_REASON if used_fallback else str(row.get("reason", "")).strip(),
+    )
+
+
+def can_resolve_paper_actual_fill(row: dict) -> bool:
+    try:
+        resolve_paper_actual_fill(row)
+        return True
+    except Exception:
+        return False
+
+
 def build_paper_trade_previews(
     journal_rows: list[dict],
 ) -> tuple[list[PaperTradePreview], list[str]]:
@@ -46,17 +119,12 @@ def build_paper_trade_previews(
             warnings.append(f"Skipping {symbol}: reason={reason}")
             continue
 
-        act_shares = str(row.get("act_shares", "")).strip()
-        act_price = str(row.get("act_price", "")).strip()
-        if not act_shares or not act_price or not reason:
+        if not reason:
             warnings.append(f"Skipping {symbol}: missing actual fill fields")
             continue
 
         try:
-            shares_abs = int(clean_numeric(act_shares))
-            price = float(clean_numeric(act_price))
-            if shares_abs <= 0 or price <= 0:
-                raise ValueError("shares and price must be > 0")
+            resolved_fill = resolve_paper_actual_fill(row)
         except Exception as exc:
             warnings.append(f"Skipping {symbol}: invalid numeric fields ({exc})")
             continue
@@ -77,8 +145,8 @@ def build_paper_trade_previews(
         except Exception:
             warnings.append(f"{symbol}: rec_price parse failed")
 
-        shares = shares_abs if side == "BUY" else -shares_abs
-        gross_amount = shares * price
+        shares = resolved_fill.shares if side == "BUY" else -resolved_fill.shares
+        gross_amount = shares * resolved_fill.price
 
         previews.append(
             PaperTradePreview(
@@ -87,11 +155,11 @@ def build_paper_trade_previews(
                 symbol=symbol,
                 side=side,
                 shares=shares,
-                price=price,
+                price=resolved_fill.price,
                 gross_amount=gross_amount,
-                source="journal_actual_fill",
+                source=resolved_fill.source,
                 status="READY_FOR_PAPER_TRADE",
-                reason=reason,
+                reason=resolved_fill.reason,
                 notes=str(row.get("notes", "")).strip(),
                 rec_shares=rec_shares_val,
                 rec_price=rec_price_val,

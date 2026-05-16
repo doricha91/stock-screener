@@ -48,9 +48,10 @@ def evaluate_switching_opportunity(
     # [안정성] 후보 데이터프레임 복사본 사용
     sorted_candidates = candidates.copy().sort_values(by=['score', 'rs_val'], ascending=False)
     
-    for symbol, c_row in sorted_candidates.iterrows():
+    for _, c_row in sorted_candidates.iterrows():
         if not temp_holdings or len(switch_pairs) >= max_switches:
             break
+        buy_symbol = extract_candidate_symbol(c_row)
             
         # 가장 점수가 낮은 보유 종목과 비교
         worst_h = temp_holdings[0]
@@ -65,7 +66,7 @@ def evaluate_switching_opportunity(
         if score_gap > premium and can_switch_by_profit:
             switch_pairs.append({
                 'sell_symbol': worst_h['symbol'],
-                'buy_symbol': symbol,
+                'buy_symbol': buy_symbol,
                 'buy_row': c_row,
                 'worst_h': worst_h,
                 'score_gap': score_gap
@@ -73,6 +74,21 @@ def evaluate_switching_opportunity(
             temp_holdings.pop(0) # 매도 예정이므로 목록에서 제거
             
     return switch_pairs
+
+
+def extract_candidate_symbol(row: pd.Series | Dict[str, Any]) -> str:
+    """Extract a real ticker from a candidate row, never from DataFrame index."""
+    for key in ("symbol", "ticker", "Symbol", "Ticker"):
+        value = row.get(key) if hasattr(row, "get") else None
+        if value is None:
+            continue
+        symbol = str(value).strip()
+        if not symbol:
+            continue
+        if symbol.isdigit():
+            raise ValueError(f"invalid candidate symbol (numeric-only): {symbol}")
+        return symbol
+    raise ValueError("candidate row missing valid symbol/ticker column")
 
 
 def calculate_relative_strength(stock_df, spy_df, lookback=120):

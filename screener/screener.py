@@ -77,6 +77,7 @@ def build_screener_results(
     tickers: list[str] | None = None,
     market_state: dict | None = None,
     start_date: str = DEFAULT_SCREEN_START_DATE,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     state = _resolve_market_state(market_state)
     regime = state["regime"]
@@ -102,9 +103,15 @@ def build_screener_results(
     print("\n[Step 3] Screening...")
     for symbol in tqdm(tickers):
         try:
-            df = data_manager.get_price_data(symbol, start_date=start_date)
+            df = data_manager.get_price_data(symbol, start_date=start_date, end_date=end_date)
             if df is None or len(df) < 200:
                 continue
+
+            if end_date is not None:
+                end_ts = pd.to_datetime(end_date)
+                df = df[df.index <= end_ts]
+                if df.empty or len(df) < 200:
+                    continue
 
             df = _prepare_data_for_ensemble(df)
             if df is None:
@@ -207,6 +214,7 @@ def run_screener(
     tickers: list[str] | None = None,
     market_state: dict | None = None,
     start_date: str = DEFAULT_SCREEN_START_DATE,
+    end_date: str | None = None,
     save: bool = True,
     db_path: str | None = None,
     csv_output_path: str | Path | None = None,
@@ -215,6 +223,7 @@ def run_screener(
         tickers=tickers,
         market_state=market_state,
         start_date=start_date,
+        end_date=end_date,
     )
 
     if save and not df_result.empty:
