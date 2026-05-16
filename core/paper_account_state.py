@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,8 @@ class PaperAccountState:
     currency: str
     positions: dict[str, PaperPosition]
     applied_trade_ids: set[str]
+    realized_pnl: float = 0.0
+    realized_pnl_by_symbol: dict[str, float] = field(default_factory=dict)
 
 
 def create_initial_paper_state(
@@ -28,6 +30,8 @@ def create_initial_paper_state(
         currency=currency,
         positions={},
         applied_trade_ids=set(),
+        realized_pnl=0.0,
+        realized_pnl_by_symbol={},
     )
 
 
@@ -72,6 +76,8 @@ def apply_paper_trade(
     new_cash = float(state.cash)
     new_positions = dict(state.positions)
     new_applied_trade_ids = set(state.applied_trade_ids)
+    new_realized_pnl = float(state.realized_pnl)
+    new_realized_pnl_by_symbol = dict(state.realized_pnl_by_symbol)
 
     if side == "BUY":
         cost = shares * price
@@ -102,6 +108,11 @@ def apply_paper_trade(
         if existing is None or existing.shares < sell_quantity:
             raise ValueError("cannot SELL more shares than held")
 
+        realized_pnl_delta = (price - existing.avg_price) * sell_quantity
+        new_realized_pnl += realized_pnl_delta
+        new_realized_pnl_by_symbol[symbol] = (
+            new_realized_pnl_by_symbol.get(symbol, 0.0) + realized_pnl_delta
+        )
         new_cash += sell_quantity * price
         remaining_shares = existing.shares - sell_quantity
         if remaining_shares == 0:
@@ -120,6 +131,8 @@ def apply_paper_trade(
         currency=state.currency,
         positions=new_positions,
         applied_trade_ids=new_applied_trade_ids,
+        realized_pnl=new_realized_pnl,
+        realized_pnl_by_symbol=new_realized_pnl_by_symbol,
     )
 
 
