@@ -79,6 +79,12 @@ def paper_reports_dir() -> Path:
     return path
 
 
+def paper_reviews_dir() -> Path:
+    path = PAPER_TEST_DIR / "reviews"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def paper_performance_summary_path() -> Path:
     return paper_reports_dir() / "paper_performance_summary.md"
 
