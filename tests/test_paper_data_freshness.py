@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from core.paper_data_freshness import run_paper_data_freshness_check
+
+
+def _create_base_db(
+    db_path: Path,
+    *,
+    daily_price_rows: list[tuple[str, str]] | None = None,
+    market_index_rows: list[tuple[str, str]] | None = None,
+    daily_indicator_rows: list[tuple[str, str]] | None = None,
+    ticker_rows: list[tuple[str, str | None]] | None = None,
+    include_tables: tuple[str, ...] = ("daily_price", "market_index", "daily_indicators", "tickers"),
+) -> None:
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    if "daily_price" in include_tables:
+        cur.execute("CREATE TABLE daily_price (symbol TEXT, date TEXT)")
+    if "market_index" in include_tables:
+        cur.execute("CREATE TABLE market_index (symbol TEXT, date TEXT)")
+    if "daily_indicators" in include_tables:
+        cur.execute("CREATE TABLE daily_indicators (symbol TEXT, date TEXT)")
+    if "tickers" in include_tables:
+        cur.execute("CREATE TABLE tickers (symbol TEXT, listing_board TEXT)")
+
+    for symbol, date in daily_price_rows or []:
+        cur.execute("INSERT INTO daily_price (symbol, date) VALUES (?, ?)", (symbol, date))
+    for symbol, date in market_index_rows or []:
+        cur.execute("INSERT INTO market_index (symbol, date) VALUES (?, ?)", (symbol, date))
+    for symbol, date in daily_indicator_rows or []:
+        cur.execute("INSERT INTO daily_indicators (symbol, date) VALUES (?, ?)", (symbol, date))
+    for symbol, listing_board in ticker_rows or []:
+        cur.execute("INSERT INTO tickers (symbol, listing_board) VALUES (?, ?)", (symbol, listing_board))
+
+    conn.commit()
+    conn.close()
+
+
+def test_db_missing_fails(tmp_path):
+    summary = run_paper_data_freshness_check(
+        date_str="20260513",
+        db_path=tmp_path / "missing.db",
+        universe_root=tmp_path / "universe",
+    )
+    assert summary["result"] == "FAIL"
+    assert summary["error_count"] >= 1
+
+
+def test_required_table_missing_fails(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(db_path, include_tables=("daily_price", "market_index", "tickers"))
+    summary = run_paper_data_freshness_check(
+        date_str="20260513",
+        db_path=db_path,
+        universe_root=tmp_path / "universe",
+    )
+    assert summary["result"] == "FAIL"
+    assert any(item["check_name"] == "daily_indicators_table_exists" for item in summary["checks"])
+
+
+def test_daily_price_empty_fails(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        market_index_rows=[("SPY", "2026-05-13"), ("QQQ", "2026-05-13"), ("^VIX", "2026-05-13")],
+        daily_indicator_rows=[("AAPL", "2026-05-13")],
+        ticker_rows=[("AAPL", "NASDAQ100")],
+    )
+    summary = run_paper_data_freshness_check(date_str="20260513", db_path=db_path, universe_root=tmp_path / "universe")
+    assert summary["result"] == "FAIL"
+    assert any(item["check_name"] == "daily_price_data" and item["severity"] == "error" for item in summary["checks"])
+
+
+def test_spy_missing_fails(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", "2026-05-13")],
+        market_index_rows=[("QQQ", "2026-05-13"), ("^VIX", "2026-05-13")],
+        daily_indicator_rows=[("AAPL", "2026-05-13")],
+        ticker_rows=[("AAPL", "NASDAQ100")] * 60,
+    )
+    summary = run_paper_data_freshness_check(date_str="20260513", db_path=db_path, universe_root=tmp_path / "universe")
+    assert summary["result"] == "FAIL"
+    assert any(item["symbol"] == "SPY" and item["severity"] == "error" for item in summary["checks"])
+
+
+def test_daily_indicators_stale_warns(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", "2026-05-13")],
+        market_index_rows=[("SPY", "2026-05-13"), ("QQQ", "2026-05-13"), ("^VIX", "2026-05-13")],
+        daily_indicator_rows=[("AAPL", "2026-05-12")],
+        ticker_rows=[(f"T{i}", "NASDAQ100") for i in range(60)],
+    )
+    summary = run_paper_data_freshness_check(date_str="20260513", db_path=db_path, universe_root=tmp_path / "universe")
+    assert summary["result"] == "PASS_WITH_WARNINGS"
+    assert any(
+        item["check_name"] == "daily_indicators_freshness" and item["severity"] == "warning"
+        for item in summary["checks"]
+    )
+
+
+def test_strict_escalates_stale_warning_to_error(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", "2026-05-13")],
+        market_index_rows=[("SPY", "2026-05-12"), ("QQQ", "2026-05-13"), ("^VIX", "2026-05-13")],
+        daily_indicator_rows=[("AAPL", "2026-05-12")],
+        ticker_rows=[(f"T{i}", "NASDAQ100") for i in range(60)],
+    )
+    summary = run_paper_data_freshness_check(
+        date_str="20260513",
+        strict=True,
+        db_path=db_path,
+        universe_root=tmp_path / "universe",
+    )
+    assert summary["result"] == "FAIL"
+    assert any(item["severity"] == "error" and item["check_name"] in {"market_index_spy_freshness", "daily_indicators_freshness"} for item in summary["checks"])
+
+
+def test_tickers_zero_fails(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", "2026-05-13")],
+        market_index_rows=[("SPY", "2026-05-13"), ("QQQ", "2026-05-13"), ("^VIX", "2026-05-13")],
+        daily_indicator_rows=[("AAPL", "2026-05-13")],
+        ticker_rows=[],
+    )
+    summary = run_paper_data_freshness_check(date_str="20260513", db_path=db_path, universe_root=tmp_path / "universe")
+    assert summary["result"] == "FAIL"
+    assert any(item["check_name"] == "tickers_row_count" and item["severity"] == "error" for item in summary["checks"])
+
+
+def test_universe_snapshot_missing_warns(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", "2026-05-13")],
+        market_index_rows=[("SPY", "2026-05-13"), ("QQQ", "2026-05-13"), ("^VIX", "2026-05-13")],
+        daily_indicator_rows=[("AAPL", "2026-05-13")],
+        ticker_rows=[(f"T{i}", "NASDAQ100") for i in range(60)],
+    )
+    summary = run_paper_data_freshness_check(date_str="20260513", db_path=db_path, universe_root=tmp_path / "universe")
+    assert any(item["check_name"] == "universe_snapshot" and item["severity"] == "warning" for item in summary["checks"])
+
+
+def test_warning_only_returns_pass_with_warnings(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", "2026-05-13")],
+        market_index_rows=[("SPY", "2026-05-13"), ("QQQ", "2026-05-13"), ("^VIX", "2026-05-13")],
+        daily_indicator_rows=[("AAPL", "2026-05-13")],
+        ticker_rows=[(f"T{i}", "NASDAQ100") for i in range(60)],
+    )
+    summary = run_paper_data_freshness_check(date_str="20260513", db_path=db_path, universe_root=tmp_path / "universe")
+    assert summary["result"] == "PASS_WITH_WARNINGS"
+    assert summary["error_count"] == 0
+    assert summary["warning_count"] >= 1
+
+
+def test_error_returns_fail(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", "2026-05-12")],
+        market_index_rows=[("SPY", "2026-05-12"), ("QQQ", "2026-05-12"), ("^VIX", "2026-05-12")],
+        daily_indicator_rows=[("AAPL", "2026-05-12")],
+        ticker_rows=[],
+    )
+    summary = run_paper_data_freshness_check(
+        date_str="20260513",
+        strict=True,
+        db_path=db_path,
+        universe_root=tmp_path / "universe",
+    )
+    assert summary["result"] == "FAIL"
+    assert summary["error_count"] > 0
+
+
+def test_data_freshness_does_not_include_writer_calls():
+    helper_text = Path("core/paper_data_freshness.py").read_text(encoding="utf-8")
+    assert "update_market_indices" not in helper_text
+    assert "update_tickers_info" not in helper_text
+    assert "update_stock_data" not in helper_text
+    assert "update_technical_indicators" not in helper_text

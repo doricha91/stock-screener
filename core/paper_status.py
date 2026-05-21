@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import csv
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from core.paths import PAPER_TEST_DIR, paper_account_snapshot_path, paper_execution_log_path, paper_position_snapshot_path
+
+
+WORKFLOW_NO_PLAN = "NO_PLAN"
+WORKFLOW_PLAN_READY = "PLAN_READY"
+WORKFLOW_COMMITTED = "COMMITTED"
+WORKFLOW_REVIEW_READY = "REVIEW_READY"
+WORKFLOW_UNKNOWN = "UNKNOWN_OR_INCOMPLETE"
+
+
+@dataclass(frozen=True)
+class PaperStatusPaths:
+    paper_root: Path
+    reports_dir: Path
+    reviews_dir: Path
+    account_snapshot_csv: Path
+    position_snapshot_csv: Path
+    execution_log_csv: Path
+
+
+def build_paper_status_paths(paper_root: Path | None = None) -> PaperStatusPaths:
+    root = Path(paper_root) if paper_root is not None else PAPER_TEST_DIR
+    return PaperStatusPaths(
+        paper_root=root,
+        reports_dir=root / "reports",
+        reviews_dir=root / "reviews",
+        account_snapshot_csv=root / paper_account_snapshot_path().name,
+        position_snapshot_csv=root / paper_position_snapshot_path().name,
+        execution_log_csv=root / paper_execution_log_path().name,
+    )
+
+
+def _normalize_date(date_str: str) -> str:
+    clean = str(date_str).replace("-", "").strip()
+    if len(clean) != 8 or not clean.isdigit():
+        raise ValueError(f"Invalid date format: {date_str}")
+    return f"{clean[:4]}-{clean[4:6]}-{clean[6:]}"
+
+
+def _compact_date(date_str: str) -> str:
+    return _normalize_date(date_str).replace("-", "")
+
+
+def _latest_date_from_filenames(directory: Path, pattern: str) -> str | None:
+    if not directory.exists():
+        return None
+    regex = re.compile(pattern)
+    found: list[str] = []
+    for path in directory.iterdir():
+        match = regex.fullmatch(path.name)
+        if match:
+            found.append(match.group(1))
+    if not found:
+        return None
+    latest = max(found)
+    return f"{latest[:4]}-{latest[4:6]}-{latest[6:]}"
+
+
+def _safe_mtime(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows: list[dict[str, str]] = []
+        for row in reader:
+            normalized: dict[str, str] = {}
+            for key, value in row.items():
+                normalized_key = (key or "").replace("\ufeff", "").strip()
+                normalized[normalized_key] = value or ""
+            rows.append(normalized)
+        return rows
+
+
+def _read_latest_account_snapshot(path: Path) -> dict[str, Any]:
+    rows = _read_csv_rows(path)
+    if not rows:
+        return {"exists": False, "latest_snapshot_date": None, "row": None, "error": None}
+    if "snapshot_date" not in rows[0]:
+        return {"exists": True, "latest_snapshot_date": None, "row": None, "error": "snapshot_date column missing"}
+    sorted_rows = sorted(rows, key=lambda row: row.get("snapshot_date", ""))
+    latest = sorted_rows[-1]
+    return {
+        "exists": True,
+        "latest_snapshot_date": latest.get("snapshot_date"),
+        "row": latest,
+        "error": None,
+    }
+
+
+def _read_position_snapshot(path: Path) -> dict[str, Any]:
+    rows = _read_csv_rows(path)
+    if not rows:
+        return {"exists": False, "latest_snapshot_date": None, "rows": [], "error": None}
+    if "snapshot_date" not in rows[0]:
+        return {"exists": True, "latest_snapshot_date": None, "rows": [], "error": "snapshot_date column missing"}
+    latest_date = max((row.get("snapshot_date", "") for row in rows), default=None)
+    return {
+        "exists": True,
+        "latest_snapshot_date": latest_date,
+        "rows": rows,
+        "error": None,
+    }
+
+
+def _read_execution_log(path: Path) -> dict[str, Any]:
+    rows = _read_csv_rows(path)
+    if not rows:
+        return {"exists": False, "row_count": 0, "latest_trade_date": None, "rows": [], "error": None}
+    if "date" not in rows[0]:
+        return {"exists": True, "row_count": len(rows), "latest_trade_date": None, "rows": rows, "error": "date column missing"}
+    latest_date = max((row.get("date", "") for row in rows), default=None)
+    return {
+        "exists": True,
+        "row_count": len(rows),
+        "latest_trade_date": latest_date,
+        "rows": rows,
+        "error": None,
+    }
+
+
+def _parse_validation_result(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"exists": False, "validation_result": None}
+    content = path.read_text(encoding="utf-8")
+    match = re.search(r"Validation result:\s*(PASS|FAIL)", content)
+    return {
+        "exists": True,
+        "validation_result": match.group(1) if match else None,
+    }
+
+
+def _resolve_target_date(date_str: str | None, paths: PaperStatusPaths) -> str | None:
+    if date_str:
+        return _normalize_date(date_str)
+    account_latest = _read_latest_account_snapshot(paths.account_snapshot_csv).get("latest_snapshot_date")
+    position_latest = _read_position_snapshot(paths.position_snapshot_csv).get("latest_snapshot_date")
+    current_state_latest = _latest_date_from_filenames(paths.paper_root, r"paper_current_state_(\d{8})\.json")
+    plan_latest = _latest_date_from_filenames(paths.paper_root, r"daily_action_plan_(\d{8})\.md")
+    candidates = [value for value in [account_latest, position_latest, current_state_latest, plan_latest] if value]
+    return max(candidates) if candidates else None
+
+
+def _bool_to_label(value: bool) -> str:
+    return "exists" if value else "missing"
+
+
+def _detect_workflow_status(status: dict[str, Any]) -> str:
+    if not status["date"]:
+        return WORKFLOW_UNKNOWN
+    if not status["plan_exists"]:
+        return WORKFLOW_NO_PLAN
+    if not status["same_date_snapshot_exists"]:
+        return WORKFLOW_PLAN_READY
+    if status["reports_ready"] and status["review_template_exists"] and status["review_validation_result"] == "PASS":
+        return WORKFLOW_REVIEW_READY
+    if status["current_state_exists"] and status["account_snapshot_exists"] and status["position_snapshot_exists"]:
+        return WORKFLOW_COMMITTED
+    return WORKFLOW_UNKNOWN
+
+
+def _next_recommended_command(workflow_status: str, date_str: str | None) -> str:
+    if workflow_status == WORKFLOW_NO_PLAN:
+        return f"paper.py preview --date {date_str.replace('-', '')}" if date_str else "paper.py preview --date YYYYMMDD"
+    if workflow_status == WORKFLOW_PLAN_READY:
+        return f"paper.py commit --date {date_str.replace('-', '')}" if date_str else "paper.py commit --date YYYYMMDD"
+    if workflow_status == WORKFLOW_COMMITTED:
+        return "paper.py review"
+    if workflow_status == WORKFLOW_REVIEW_READY:
+        return "no immediate action"
+    return "inspect status details manually"
+
+
+def run_paper_status(date_str: str | None = None, *, paper_root: Path | None = None) -> dict[str, Any]:
+    paths = build_paper_status_paths(paper_root)
+    target_date = _resolve_target_date(date_str, paths)
+    compact_date = target_date.replace("-", "") if target_date else None
+
+    plan_path = paths.paper_root / f"daily_action_plan_{compact_date}.md" if compact_date else None
+    current_state_path = paths.paper_root / f"paper_current_state_{compact_date}.json" if compact_date else None
+    daily_review_summary_path = paths.reports_dir / "paper_daily_review_summary.md"
+    performance_summary_path = paths.reports_dir / "paper_performance_summary.md"
+    review_template_path = paths.reviews_dir / "paper_manual_review_log_template.csv"
+    review_validation_path = paths.reviews_dir / "paper_manual_review_log_validation_report.md"
+    review_log_path = paths.reviews_dir / "paper_manual_review_log.csv"
+
+    account = _read_latest_account_snapshot(paths.account_snapshot_csv)
+    positions = _read_position_snapshot(paths.position_snapshot_csv)
+    execution = _read_execution_log(paths.execution_log_csv)
+    review_validation = _parse_validation_result(review_validation_path)
+
+    account_row = account.get("row") or {}
+    position_rows = positions.get("rows") or []
+    execution_rows = execution.get("rows") or []
+    position_rows_for_date = [row for row in position_rows if row.get("snapshot_date") == target_date]
+    execution_rows_for_date = [row for row in execution_rows if row.get("date") == target_date]
+    review_template_rows = _read_csv_rows(review_template_path) if review_template_path.exists() else []
+    review_log_rows = _read_csv_rows(review_log_path) if review_log_path.exists() else []
+
+    current_state_exists = bool(current_state_path and current_state_path.exists())
+    account_snapshot_exists = bool(target_date and account_row.get("snapshot_date") == target_date)
+    position_snapshot_exists = bool(position_rows_for_date)
+    plan_exists = bool(plan_path and plan_path.exists())
+    same_date_snapshot_exists = current_state_exists or account_snapshot_exists or position_snapshot_exists
+    reports_ready = daily_review_summary_path.exists() and performance_summary_path.exists()
+
+    status = {
+        "date": target_date,
+        "workflow_status": WORKFLOW_UNKNOWN,
+        "latest_plan_date": _latest_date_from_filenames(paths.paper_root, r"daily_action_plan_(\d{8})\.md"),
+        "latest_current_state_date": _latest_date_from_filenames(paths.paper_root, r"paper_current_state_(\d{8})\.json"),
+        "latest_account_snapshot_date": account.get("latest_snapshot_date"),
+        "latest_position_snapshot_date": positions.get("latest_snapshot_date"),
+        "latest_execution_trade_date": execution.get("latest_trade_date"),
+        "daily_action_plan": str(plan_path) if plan_path else None,
+        "daily_action_plan_exists": plan_exists,
+        "plan_exists": plan_exists,
+        "current_state_exists": current_state_exists,
+        "account_snapshot_exists": account_snapshot_exists,
+        "position_snapshot_exists": position_snapshot_exists,
+        "same_date_snapshot_exists": same_date_snapshot_exists,
+        "execution_log_row_count": execution.get("row_count", 0),
+        "execution_log_rows_for_date": len(execution_rows_for_date),
+        "account_snapshot_cash": account_row.get("cash"),
+        "account_snapshot_total_equity_market_value": account_row.get("total_equity_market_value"),
+        "account_snapshot_unrealized_pnl": account_row.get("unrealized_pnl"),
+        "account_snapshot_position_count": account_row.get("position_count"),
+        "account_snapshot_symbols": account_row.get("symbols"),
+        "position_snapshot_row_count_for_date": len(position_rows_for_date),
+        "position_snapshot_symbols_for_date": "|".join(sorted({row.get("symbol", "") for row in position_rows_for_date if row.get("symbol")})),
+        "reports_exists": reports_ready,
+        "paper_daily_review_summary_exists": daily_review_summary_path.exists(),
+        "paper_performance_summary_exists": performance_summary_path.exists(),
+        "paper_daily_review_summary_mtime": _safe_mtime(daily_review_summary_path),
+        "paper_performance_summary_mtime": _safe_mtime(performance_summary_path),
+        "review_template_exists": review_template_path.exists(),
+        "review_template_row_count": len(review_template_rows),
+        "review_validation_exists": review_validation["exists"],
+        "review_validation_result": review_validation["validation_result"],
+        "manual_review_log_exists": review_log_path.exists(),
+        "manual_review_log_row_count": len(review_log_rows),
+        "errors": [item for item in [account.get("error"), positions.get("error"), execution.get("error")] if item],
+        "reports_ready": reports_ready,
+        "paths": {
+            "paper_root": str(paths.paper_root),
+            "reports_dir": str(paths.reports_dir),
+            "reviews_dir": str(paths.reviews_dir),
+        },
+    }
+    status["workflow_status"] = _detect_workflow_status(status)
+    status["next_recommended_command"] = _next_recommended_command(status["workflow_status"], target_date)
+    return status
+
+
+def format_paper_status(status: dict[str, Any], *, verbose: bool = False) -> str:
+    lines = [
+        "PAPER STATUS",
+        f"  date: {status['date'] or '-'}",
+        f"  workflow_status: {status['workflow_status']}",
+        f"  latest_snapshot_date: {status['latest_account_snapshot_date'] or status['latest_current_state_date'] or '-'}",
+        f"  daily_action_plan: {_bool_to_label(status['daily_action_plan_exists'])}",
+        f"  current_state: {_bool_to_label(status['current_state_exists'])}",
+        f"  account_snapshot: {_bool_to_label(status['account_snapshot_exists'])}",
+        f"  position_snapshot: {_bool_to_label(status['position_snapshot_exists'])}",
+        f"  execution_log_rows_for_date: {status['execution_log_rows_for_date']}",
+        f"  reports: {_bool_to_label(status['reports_exists'])}",
+        f"  review_template: {_bool_to_label(status['review_template_exists'])}",
+        f"  review_validation: {status['review_validation_result'] or ('missing' if not status['review_validation_exists'] else 'unknown')}",
+        f"  same_date_snapshot_exists: {str(status['same_date_snapshot_exists']).lower()}",
+        f"  next_recommended_command: {status['next_recommended_command']}",
+    ]
+    if verbose:
+        lines.extend(
+            [
+                f"  latest_plan_date: {status['latest_plan_date'] or '-'}",
+                f"  latest_current_state_date: {status['latest_current_state_date'] or '-'}",
+                f"  latest_position_snapshot_date: {status['latest_position_snapshot_date'] or '-'}",
+                f"  latest_execution_trade_date: {status['latest_execution_trade_date'] or '-'}",
+                f"  review_template_row_count: {status['review_template_row_count']}",
+                f"  manual_review_log_row_count: {status['manual_review_log_row_count']}",
+            ]
+        )
+        if status["errors"]:
+            lines.append("  errors:")
+            lines.extend([f"    - {error}" for error in status["errors"]])
+    return "\n".join(lines)
+
+
+def paper_status_to_json(status: dict[str, Any]) -> str:
+    return json.dumps(status, ensure_ascii=False, indent=2)
