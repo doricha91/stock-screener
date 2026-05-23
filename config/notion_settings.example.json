@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "token_env": "NOTION_TOKEN",
+  "data_sources": {
+    "smoke_test": "",
+    "weekly_reports": "",
+    "benchmark_reports": "",
+    "account_snapshots": ""
+  }
+}

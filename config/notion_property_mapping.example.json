@@ -1,0 +1,91 @@
+{
+  "smoke_test": {
+    "external_key": "External Key",
+    "name": "Name",
+    "status": "Status",
+    "smoke_date": "Smoke Date",
+    "value": "Value",
+    "note": "Note"
+  },
+  "weekly_reports": {
+    "name": "Name",
+    "external_key": "External Key",
+    "period.actual_start": "Period Start",
+    "period.actual_end": "Period End",
+    "latest_snapshot_date": "Latest Snapshot Date",
+    "overall_status": "Overall Status",
+    "period.coverage_status": "Coverage Status",
+    "period.snapshot_count": "Snapshot Count",
+    "account_summary.end_equity_market_value": "End Equity",
+    "account_summary.equity_change_pct": "Equity Change %",
+    "account_summary.end_cash_ratio_market_value": "Cash Ratio",
+    "trade_summary.trade_count": "Trade Count",
+    "operation_gaps.count": "Gap Count",
+    "operation_gaps.high_count": "High Gap Count",
+    "markdown_path": "Markdown Path",
+    "json_path": "JSON Path",
+    "schema_version": "Schema Version",
+    "synced_at": "Synced At",
+    "sync_status": "Sync Status"
+  },
+  "benchmark_reports": {
+    "name": "Name",
+    "external_key": "External Key",
+    "latest_snapshot_date": "Latest Snapshot Date",
+    "run_mode": "Run Mode",
+    "official_run": "Official Run",
+    "availability_status": "Availability Status",
+    "summary.paper.paper_return": "Paper Return",
+    "summary.benchmarks.SPY.benchmark_return": "SPY Return",
+    "summary.benchmarks.QQQ.benchmark_return": "QQQ Return",
+    "summary.benchmarks.CASH.benchmark_return": "CASH Return",
+    "summary.benchmarks.SPY.excess_return": "Excess vs SPY",
+    "summary.benchmarks.QQQ.excess_return": "Excess vs QQQ",
+    "summary.benchmarks.CASH.excess_return": "Excess vs CASH",
+    "summary.paper.paper_max_drawdown": "Paper MDD",
+    "summary.benchmarks.SPY.benchmark_max_drawdown": "SPY MDD",
+    "summary.benchmarks.QQQ.benchmark_max_drawdown": "QQQ MDD",
+    "markdown_path": "Markdown Path",
+    "json_path": "JSON Path",
+    "schema_version": "Schema Version",
+    "synced_at": "Synced At",
+    "sync_status": "Sync Status"
+  },
+  "daily_plans": {
+    "plan_date": "Plan Date",
+    "regime": "Regime",
+    "confirmed_trade_count": "Confirmed Trade Count",
+    "review_item_count": "Review Item Count",
+    "warning_count": "Warning Count"
+  },
+  "account_snapshots": {
+    "name": "Name",
+    "external_key": "External Key",
+    "snapshot_date": "Snapshot Date",
+    "initial_cash": "Initial Cash",
+    "cash": "Cash",
+    "total_equity_market_value": "Total Equity Market Value",
+    "total_equity_cost_basis": "Total Equity Cost Basis",
+    "unrealized_pnl": "Unrealized PnL",
+    "cash_ratio_market_value": "Cash Ratio Market Value",
+    "cash_ratio_cost_basis": "Cash Ratio Cost Basis",
+    "position_count": "Position Count",
+    "symbols": "Symbols",
+    "market_valuation_status": "Valuation Status",
+    "valuation_price_date": "Valuation Price Date",
+    "synced_at": "Synced At",
+    "sync_status": "Sync Status"
+  },
+  "daily_review_summaries": {
+    "latest_snapshot_date": "Latest Snapshot Date"
+  },
+  "performance_summaries": {
+    "latest_snapshot_date": "Latest Snapshot Date"
+  },
+  "manual_reviews": {
+    "review_date": "Review Date",
+    "symbol": "Symbol",
+    "status": "Status",
+    "note": "Note"
+  }
+}

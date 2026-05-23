@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any
+
+import requests
+
+NOTION_VERSION = "2026-03-11"
+NOTION_BASE_URL = "https://api.notion.com/v1"
+
+
+class NotionAPIError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None, response_body: str | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
+
+
+class NotionDuplicateExternalKeyError(RuntimeError):
+    pass
+
+
+@dataclass
+class NotionUpsertResult:
+    action: str
+    page_id: str
+    payload: dict[str, Any]
+
+
+class NotionClient:
+    def __init__(
+        self,
+        token: str,
+        *,
+        notion_version: str = NOTION_VERSION,
+        base_url: str = NOTION_BASE_URL,
+        timeout: int = 30,
+        session: requests.Session | None = None,
+    ) -> None:
+        self._token = token
+        self.notion_version = notion_version
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.session = session or requests.Session()
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._token}",
+            "Notion-Version": self.notion_version,
+            "Content-Type": "application/json",
+        }
+
+    def _request_json(self, method: str, path: str, *, json_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        response = self.session.request(
+            method,
+            f"{self.base_url}{path}",
+            headers=self._headers(),
+            timeout=self.timeout,
+            json=json_payload,
+        )
+        if response.status_code >= 400:
+            body = response.text
+            raise NotionAPIError(
+                f"Notion API request failed: {method} {path} -> HTTP {response.status_code}",
+                status_code=response.status_code,
+                response_body=body,
+            )
+        if not response.text:
+            return {}
+        return response.json()
+
+    def get_bot_user(self) -> dict[str, Any]:
+        return self._request_json("GET", "/users/me")
+
+    def retrieve_data_source(self, data_source_id: str) -> dict[str, Any]:
+        return self._request_json("GET", f"/data_sources/{data_source_id}")
+
+    def query_by_external_key(
+        self,
+        data_source_id: str,
+        external_key: str,
+        external_key_property: str,
+    ) -> list[dict[str, Any]]:
+        payload = {
+            "filter": {
+                "property": external_key_property,
+                "rich_text": {
+                    "equals": external_key,
+                },
+            },
+            "page_size": 10,
+        }
+        result = self._request_json(
+            "POST",
+            f"/data_sources/{data_source_id}/query",
+            json_payload=payload,
+        )
+        return result.get("results", [])
+
+    def create_page(
+        self,
+        data_source_id: str,
+        properties: dict[str, Any],
+        *,
+        children: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "parent": {
+                "type": "data_source_id",
+                "data_source_id": data_source_id,
+            },
+            "properties": properties,
+        }
+        if children:
+            payload["children"] = children
+        return self._request_json("POST", "/pages", json_payload=payload)
+
+    def update_page(self, page_id: str, properties: dict[str, Any]) -> dict[str, Any]:
+        return self._request_json(
+            "PATCH",
+            f"/pages/{page_id}",
+            json_payload={"properties": properties},
+        )
+
+    def upsert_page_by_external_key(
+        self,
+        *,
+        data_source_id: str,
+        external_key: str,
+        external_key_property: str,
+        properties: dict[str, Any],
+        children: list[dict[str, Any]] | None = None,
+    ) -> NotionUpsertResult:
+        existing = self.query_by_external_key(
+            data_source_id,
+            external_key,
+            external_key_property,
+        )
+        if len(existing) >= 2:
+            raise NotionDuplicateExternalKeyError(
+                f"Multiple Notion pages found for external key '{external_key}'."
+            )
+        if len(existing) == 1:
+            page_id = existing[0]["id"]
+            payload = self.update_page(page_id, properties)
+            return NotionUpsertResult(action="updated", page_id=page_id, payload=payload)
+        payload = self.create_page(
+            data_source_id,
+            properties,
+            children=children,
+        )
+        return NotionUpsertResult(action="created", page_id=payload["id"], payload=payload)
+
+
+def notion_title(value: str) -> dict[str, Any]:
+    return {
+        "title": [
+            {
+                "text": {
+                    "content": value,
+                }
+            }
+        ]
+    }
+
+
+def notion_rich_text(value: str) -> dict[str, Any]:
+    return {
+        "rich_text": [
+            {
+                "text": {
+                    "content": value,
+                }
+            }
+        ]
+    }
+
+
+def notion_select(value: str) -> dict[str, Any]:
+    return {"select": {"name": value}}
+
+
+def notion_date(value: str) -> dict[str, Any]:
+    return {"date": {"start": value}}
+
+
+def notion_number(value: float | int) -> dict[str, Any]:
+    return {"number": value}
