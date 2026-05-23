@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 from typing import Sequence
@@ -22,6 +23,8 @@ from core.paper_data_freshness import (  # noqa: E402
 )
 from core.paper_commit_guard import check_same_date_commit_guard  # noqa: E402
 from core.paper_status import format_paper_status, paper_status_to_json, run_paper_status  # noqa: E402
+from core.paper_weekly_status import generate_paper_weekly_status  # noqa: E402
+from core.paper_benchmark_comparison import generate_paper_benchmark_comparison  # noqa: E402
 from core.paper_prepare_data import (  # noqa: E402
     format_paper_prepare_data_summary,
     run_paper_prepare_data,
@@ -269,6 +272,43 @@ def handle_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_weekly_status(args: argparse.Namespace) -> int:
+    result = generate_paper_weekly_status(
+        days=args.days,
+        start=args.start,
+        end=args.end,
+    )
+    summary = result["summary"]
+    print("PAPER WEEKLY STATUS")
+    print(f"  markdown_path: {result['markdown_path']}")
+    print(f"  json_path: {result['json_path']}")
+    print(f"  schema_version: {summary['schema_version']}")
+    print(f"  period_start: {summary['period']['actual_start']}")
+    print(f"  period_end: {summary['period']['actual_end']}")
+    print(f"  snapshot_count: {summary['period']['snapshot_count']}")
+    print(f"  coverage_status: {summary['period']['coverage_status']}")
+    print(f"  overall_status: {summary['overall_status']}")
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def handle_benchmark(args: argparse.Namespace) -> int:
+    result = generate_paper_benchmark_comparison()
+    summary = result["summary"]
+    print("PAPER BENCHMARK COMPARISON")
+    print(f"  markdown_path: {result['markdown_path']}")
+    print(f"  json_path: {result['json_path']}")
+    print(f"  schema_version: {summary['schema_version']}")
+    print(f"  run_mode: {summary['run_mode']}")
+    print(f"  official_run: {summary['official_run']}")
+    print(f"  latest_snapshot_date: {summary['latest_snapshot_date']}")
+    print(f"  availability_status: {summary['availability_status']}")
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def handle_plan(args: argparse.Namespace) -> int:
     summary = run_preflight(
         stage="plan",
@@ -474,6 +514,23 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output")
     status_parser.add_argument("--verbose", action="store_true", help="Print extra status details")
     status_parser.set_defaults(handler=handle_status)
+
+    weekly_status_parser = subparsers.add_parser(
+        "weekly-status",
+        help="Generate snapshot-based weekly paper status markdown/json summary",
+    )
+    weekly_status_parser.add_argument("--days", type=int, default=5, help="Use the latest N snapshot_date rows")
+    weekly_status_parser.add_argument("--start", help="Inclusive snapshot_date start (YYYYMMDD or YYYY-MM-DD)")
+    weekly_status_parser.add_argument("--end", help="Inclusive snapshot_date end (YYYYMMDD or YYYY-MM-DD)")
+    weekly_status_parser.add_argument("--json", action="store_true", help="Print JSON summary to stdout after writing files")
+    weekly_status_parser.set_defaults(handler=handle_weekly_status)
+
+    benchmark_parser = subparsers.add_parser(
+        "benchmark",
+        help="Generate exploratory paper benchmark comparison markdown/json report",
+    )
+    benchmark_parser.add_argument("--json", action="store_true", help="Print JSON summary to stdout after writing files")
+    benchmark_parser.set_defaults(handler=handle_benchmark)
 
     preview_parser = subparsers.add_parser(
         "preview",

@@ -18,6 +18,8 @@ def test_help_shows_subcommands(capsys):
     assert "commit" in output
     assert "data-freshness" in output
     assert "status" in output
+    assert "weekly-status" in output
+    assert "benchmark" in output
     assert "preflight" in output
     assert "plan" in output
     assert "eod" in output
@@ -292,6 +294,126 @@ def test_status_does_not_call_writers(monkeypatch):
     monkeypatch.setattr(paper, "run_report_chain", lambda: called.__setitem__("reports", True) or [])
     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", lambda: called.__setitem__("review_append", True) or {})
     exit_code = paper.main(["status"])
+    assert exit_code == 0
+    assert called == {"prepare": False, "plan": False, "eod": False, "reports": False, "review_append": False}
+
+
+def test_weekly_status_calls_generator(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_generate_paper_weekly_status(*, days: int, start: str | None, end: str | None) -> dict:
+        captured.update({"days": days, "start": start, "end": end})
+        return {
+            "markdown_path": "outputs/paper_test/reports/paper_weekly_status_summary.md",
+            "json_path": "outputs/paper_test/reports/paper_weekly_status_summary.json",
+            "summary": {
+                "schema_version": "paper_weekly_status.v1",
+                "period": {"actual_start": "2026-05-15", "actual_end": "2026-05-20", "snapshot_count": 2, "coverage_status": "FULL"},
+                "overall_status": "PASS",
+            },
+        }
+
+    monkeypatch.setattr(paper, "generate_paper_weekly_status", fake_generate_paper_weekly_status)
+    exit_code = paper.main(["weekly-status", "--days", "2"])
+    assert exit_code == 0
+    assert captured == {"days": 2, "start": None, "end": None}
+
+
+def test_weekly_status_does_not_call_writers(monkeypatch):
+    called = {"prepare": False, "plan": False, "eod": False, "reports": False, "review_append": False}
+
+    monkeypatch.setattr(
+        paper,
+        "generate_paper_weekly_status",
+        lambda **kwargs: {
+            "markdown_path": "outputs/paper_test/reports/paper_weekly_status_summary.md",
+            "json_path": "outputs/paper_test/reports/paper_weekly_status_summary.json",
+            "summary": {
+                "schema_version": "paper_weekly_status.v1",
+                "period": {"actual_start": "2026-05-15", "actual_end": "2026-05-20", "snapshot_count": 2, "coverage_status": "FULL"},
+                "overall_status": "PASS_WITH_WARNINGS",
+            },
+        },
+    )
+    monkeypatch.setattr(paper, "run_paper_prepare_data", lambda *args, **kwargs: called.__setitem__("prepare", True) or {})
+    monkeypatch.setattr(paper, "run_paper_daily_plan", lambda *args, **kwargs: called.__setitem__("plan", True) or "")
+    monkeypatch.setattr(paper, "run_paper_eod_dry_run", lambda *args, **kwargs: called.__setitem__("eod", True) or 0)
+    monkeypatch.setattr(paper, "run_report_chain", lambda: called.__setitem__("reports", True) or [])
+    monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", lambda: called.__setitem__("review_append", True) or {})
+    exit_code = paper.main(["weekly-status"])
+    assert exit_code == 0
+    assert called == {"prepare": False, "plan": False, "eod": False, "reports": False, "review_append": False}
+
+
+def test_benchmark_calls_generator(monkeypatch):
+    called = {"benchmark": False}
+
+    def fake_generate_paper_benchmark_comparison() -> dict:
+        called["benchmark"] = True
+        return {
+            "markdown_path": "outputs/paper_test/reports/paper_benchmark_comparison.md",
+            "json_path": "outputs/paper_test/reports/paper_benchmark_comparison.json",
+            "summary": {
+                "schema_version": "paper_benchmark_comparison.v1",
+                "run_mode": "exploratory",
+                "official_run": False,
+                "latest_snapshot_date": "2026-05-20",
+                "availability_status": "AVAILABLE",
+            },
+        }
+
+    monkeypatch.setattr(paper, "generate_paper_benchmark_comparison", fake_generate_paper_benchmark_comparison)
+    exit_code = paper.main(["benchmark"])
+    assert exit_code == 0
+    assert called["benchmark"] is True
+
+
+def test_benchmark_json_prints_payload(monkeypatch, capsys):
+    monkeypatch.setattr(
+        paper,
+        "generate_paper_benchmark_comparison",
+        lambda: {
+            "markdown_path": "outputs/paper_test/reports/paper_benchmark_comparison.md",
+            "json_path": "outputs/paper_test/reports/paper_benchmark_comparison.json",
+            "summary": {
+                "schema_version": "paper_benchmark_comparison.v1",
+                "run_mode": "exploratory",
+                "official_run": False,
+                "latest_snapshot_date": "2026-05-20",
+                "availability_status": "AVAILABLE",
+            },
+        },
+    )
+    exit_code = paper.main(["benchmark", "--json"])
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert '"schema_version": "paper_benchmark_comparison.v1"' in output
+
+
+def test_benchmark_does_not_call_writers(monkeypatch):
+    called = {"prepare": False, "plan": False, "eod": False, "reports": False, "review_append": False}
+
+    monkeypatch.setattr(
+        paper,
+        "generate_paper_benchmark_comparison",
+        lambda: {
+            "markdown_path": "outputs/paper_test/reports/paper_benchmark_comparison.md",
+            "json_path": "outputs/paper_test/reports/paper_benchmark_comparison.json",
+            "summary": {
+                "schema_version": "paper_benchmark_comparison.v1",
+                "run_mode": "exploratory",
+                "official_run": False,
+                "latest_snapshot_date": "2026-05-20",
+                "availability_status": "AVAILABLE",
+            },
+        },
+    )
+    monkeypatch.setattr(paper, "run_paper_prepare_data", lambda *args, **kwargs: called.__setitem__("prepare", True) or {})
+    monkeypatch.setattr(paper, "run_paper_daily_plan", lambda *args, **kwargs: called.__setitem__("plan", True) or "")
+    monkeypatch.setattr(paper, "run_paper_eod_dry_run", lambda *args, **kwargs: called.__setitem__("eod", True) or 0)
+    monkeypatch.setattr(paper, "run_report_chain", lambda: called.__setitem__("reports", True) or [])
+    monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", lambda: called.__setitem__("review_append", True) or {})
+    exit_code = paper.main(["benchmark"])
     assert exit_code == 0
     assert called == {"prepare": False, "plan": False, "eod": False, "reports": False, "review_append": False}
 
@@ -986,7 +1108,7 @@ def test_eod_rejects_both_modes():
 def test_missing_future_commands_from_help(capsys):
     paper.main([])
     output = capsys.readouterr().out
-    assert "{prepare-data,prepare,data-freshness,status,preview,commit,preflight,plan,eod,reports,review,review-template,review-validate,review-append}" in output
+    assert "{prepare-data,prepare,data-freshness,status,weekly-status,benchmark,preview,commit,preflight,plan,eod,reports,review,review-template,review-validate,review-append}" in output
     assert "run-all" not in output
     assert "prepare-data" in output
     assert "data-freshness" in output
