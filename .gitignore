@@ -3,9 +3,11 @@
 # Python cache
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Environment variables
 .env
+.env.*
 
 # data base
 .db
@@ -16,3 +18,7 @@ __pycache__/
 
 .idea/
 outputs/
+
+config/notion_settings.json
+config/notion_property_mapping.json
+outputs/dev_backups/
