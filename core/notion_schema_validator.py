@@ -5,7 +5,7 @@ from typing import Any
 
 from core.notion_client import NotionClient
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
-from core.notion_settings import NotionSettings, get_notion_data_source_id
+from core.notion_settings import NotionSettings, NotionSettingsError, get_notion_data_source_id
 
 
 PASS = "PASS"
@@ -43,6 +43,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
     weekly = get_mapping_section(mapping_root, "weekly_reports")
     benchmark = get_mapping_section(mapping_root, "benchmark_reports")
     account = get_mapping_section(mapping_root, "account_snapshots")
+    daily_plan = get_mapping_section(mapping_root, "daily_plans")
     return {
         "weekly_reports": [
             _expected(weekly, "name", "title"),
@@ -105,6 +106,20 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(account, "valuation_price_date", "date"),
             _expected(account, "synced_at", "rich_text"),
             _expected(account, "sync_status", "select", select_options=("SYNCED",), check_options=True),
+        ],
+        "daily_plans": [
+            _expected(daily_plan, "name", "title"),
+            _expected(daily_plan, "external_key", "rich_text"),
+            _expected(daily_plan, "plan_date", "date"),
+            _expected(daily_plan, "regime", "select", select_options=("BULL", "BEAR", "PANIC"), check_options=False),
+            _expected(daily_plan, "confirmed_trade_count", "number"),
+            _expected(daily_plan, "review_item_count", "number"),
+            _expected(daily_plan, "warning_count", "number"),
+            _expected(daily_plan, "markdown_path", "rich_text"),
+            _expected(daily_plan, "json_path", "rich_text"),
+            _expected(daily_plan, "schema_version", "rich_text"),
+            _expected(daily_plan, "synced_at", "rich_text"),
+            _expected(daily_plan, "sync_status", "select", select_options=("SYNCED",), check_options=True),
         ],
     }
 
@@ -185,15 +200,38 @@ def validate_selected_data_sources(
         "weekly_reports": "NOTION_WEEKLY_REPORTS_DATA_SOURCE_ID",
         "benchmark_reports": "NOTION_BENCHMARK_REPORTS_DATA_SOURCE_ID",
         "account_snapshots": "NOTION_ACCOUNT_SNAPSHOTS_DATA_SOURCE_ID",
+        "daily_plans": "NOTION_DAILY_PLANS_DATA_SOURCE_ID",
     }
     results: list[DataSourceValidationResult] = []
     for target in targets:
-        data_source_id = get_notion_data_source_id(
-            settings,
-            target,
-            env=env,
-            env_override=env_override_map[target],
-        )
+        try:
+            data_source_id = get_notion_data_source_id(
+                settings,
+                target,
+                env=env,
+                env_override=env_override_map[target],
+            )
+        except NotionSettingsError as exc:
+            if target != "daily_plans":
+                raise
+            expected_schema = build_expected_schema(mapping_root)
+            results.append(
+                DataSourceValidationResult(
+                    target=target,
+                    data_source_id="",
+                    status=WARNING,
+                    issues=[
+                        ValidationIssue(
+                            severity=WARNING,
+                            property_name=None,
+                            code="missing_data_source_id",
+                            message=f"{exc} Skipping read-only schema validation for daily_plans.",
+                        )
+                    ],
+                    checked_property_count=len(expected_schema[target]),
+                )
+            )
+            continue
         actual_schema = client.get_data_source_schema(data_source_id)
         results.append(
             validate_data_source_schema(

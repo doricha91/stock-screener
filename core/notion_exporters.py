@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,11 @@ from core.notion_client import (
 )
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
-from core.paths import paper_account_snapshot_path, paper_reports_dir
+from core.paths import (
+    paper_account_snapshot_path,
+    paper_daily_action_plan_path,
+    paper_reports_dir,
+)
 
 
 class NotionExportError(RuntimeError):
@@ -90,6 +95,10 @@ def build_account_snapshot_external_key(row: dict[str, str]) -> str:
     return f"account_snapshot:{row.get('snapshot_date')}"
 
 
+def build_daily_plan_external_key(plan_date: str) -> str:
+    return f"daily_plan:{plan_date}"
+
+
 def _paragraph_block(text: str) -> dict[str, Any]:
     return {
         "object": "block",
@@ -134,6 +143,19 @@ def _build_account_snapshot_children(row: dict[str, str]) -> list[dict[str, Any]
         f"Symbols: {row.get('symbols') or '-'}",
         f"Valuation status: {row.get('market_valuation_status') or '-'}",
         f"Valuation price date: {row.get('valuation_price_date') or '-'}",
+    ]
+    return [_paragraph_block("\n".join(lines))]
+
+
+def _build_daily_plan_children(summary: dict[str, Any], markdown_path: Path, json_path: Path) -> list[dict[str, Any]]:
+    lines = [
+        f"Daily plan date: {summary['plan_date']}",
+        f"Regime: {summary['regime']}",
+        f"Confirmed trades: {summary['confirmed_trade_count']}",
+        f"Review items: {summary['review_item_count']}",
+        f"Warnings: {summary['warning_count']}",
+        f"Markdown path: {_relative_to_project(markdown_path)}",
+        f"JSON path: {_relative_to_project(json_path)}",
     ]
     return [_paragraph_block("\n".join(lines))]
 
@@ -302,6 +324,137 @@ def build_account_snapshot_properties(
         resolve_notion_property_name(mapping, "sync_status"): notion_select("SYNCED"),
     }
     return properties
+
+
+def build_daily_plan_properties(
+    summary: dict[str, Any],
+    mapping: dict[str, str],
+    *,
+    markdown_path: Path,
+    json_path: Path,
+    synced_at: str,
+) -> dict[str, Any]:
+    properties = {
+        resolve_notion_property_name(mapping, "name"): notion_title(
+            f"Daily Plan {summary['plan_date']}"
+        ),
+        resolve_notion_property_name(mapping, "external_key"): notion_rich_text(
+            build_daily_plan_external_key(summary["plan_date"])
+        ),
+        resolve_notion_property_name(mapping, "plan_date"): notion_date(summary["plan_date"]),
+        resolve_notion_property_name(mapping, "regime"): notion_select(summary["regime"]),
+        resolve_notion_property_name(mapping, "confirmed_trade_count"): notion_number(
+            summary["confirmed_trade_count"]
+        ),
+        resolve_notion_property_name(mapping, "review_item_count"): notion_number(
+            summary["review_item_count"]
+        ),
+        resolve_notion_property_name(mapping, "warning_count"): notion_number(
+            summary["warning_count"]
+        ),
+        resolve_notion_property_name(mapping, "markdown_path"): notion_rich_text(_relative_to_project(markdown_path)),
+        resolve_notion_property_name(mapping, "json_path"): notion_rich_text(_relative_to_project(json_path)),
+        resolve_notion_property_name(mapping, "schema_version"): notion_rich_text(
+            str(summary.get("schema_version", ""))
+        ),
+        resolve_notion_property_name(mapping, "synced_at"): notion_rich_text(synced_at),
+        resolve_notion_property_name(mapping, "sync_status"): notion_select("SYNCED"),
+    }
+    return properties
+
+
+def _extract_plan_section(markdown: str, heading_prefix: str, next_heading_prefixes: tuple[str, ...]) -> str:
+    lines = markdown.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith(heading_prefix):
+            start = index + 1
+            break
+    if start is None:
+        raise NotionExportError(f"Missing daily plan section: {heading_prefix}")
+
+    end = len(lines)
+    for index in range(start, len(lines)):
+        line = lines[index]
+        if any(line.startswith(prefix) for prefix in next_heading_prefixes):
+            end = index
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
+def _count_markdown_table_rows(section: str) -> int:
+    rows = [line.strip() for line in section.splitlines() if line.strip().startswith("|")]
+    if len(rows) < 3:
+        return 0
+
+    data_rows = rows[2:]
+    count = 0
+    for row in data_rows:
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        if not cells:
+            continue
+        if all(cell in {"", "-", "[ ]"} for cell in cells):
+            continue
+        count += 1
+    return count
+
+
+def summarize_daily_plan_artifacts(
+    *,
+    markdown_path: Path,
+    config_snapshot_path: Path,
+) -> dict[str, Any]:
+    summary = _read_json(config_snapshot_path)
+    plan_date = str(summary.get("plan_date") or "").strip()
+    if not plan_date:
+        raise NotionExportError(f"Missing plan_date in config snapshot: {config_snapshot_path}")
+
+    regime = (
+        str((summary.get("market_state") or {}).get("regime") or "").strip()
+        or str((summary.get("market_status_summary") or {}).get("regime") or "").strip()
+    )
+    if not regime:
+        raise NotionExportError(f"Missing regime in config snapshot: {config_snapshot_path}")
+
+    if not markdown_path.exists():
+        raise NotionExportError(f"Missing source file: {markdown_path}")
+    markdown = markdown_path.read_text(encoding="utf-8")
+
+    confirmed_section = _extract_plan_section(markdown, "## 4. ", ("## 4-0. ",))
+    review_section = _extract_plan_section(markdown, "## 4-0. ", ("## 4-0-1. ",))
+    warning_section = _extract_plan_section(markdown, "## 4-0-1. ", ("## 4-1. ",))
+
+    return {
+        "schema_version": f"paper_daily_plan.v{summary.get('schema_version', 1)}",
+        "plan_date": plan_date,
+        "regime": regime.upper(),
+        "confirmed_trade_count": _count_markdown_table_rows(confirmed_section),
+        "review_item_count": _count_markdown_table_rows(review_section),
+        "warning_count": _count_markdown_table_rows(warning_section),
+    }
+
+
+def _latest_paper_daily_plan_artifacts(root: Path) -> tuple[Path, Path]:
+    pattern = re.compile(r"daily_action_plan_(\d{8})\.md$")
+    candidates: list[tuple[str, Path, Path]] = []
+    for markdown_path in root.glob("daily_action_plan_*.md"):
+        match = pattern.match(markdown_path.name)
+        if not match:
+            continue
+        compact_date = match.group(1)
+        config_snapshot_path = root / "config_snapshots" / f"paper_config_snapshot_{compact_date}.json"
+        if not config_snapshot_path.exists():
+            continue
+        candidates.append((compact_date, markdown_path, config_snapshot_path))
+
+    if not candidates:
+        raise NotionExportError(
+            "No daily plan artifacts found. Expected daily_action_plan_YYYYMMDD.md with matching "
+            "config_snapshots/paper_config_snapshot_YYYYMMDD.json under outputs/paper_test."
+        )
+
+    _, markdown_path, config_snapshot_path = max(candidates, key=lambda item: item[0])
+    return markdown_path, config_snapshot_path
 
 
 def _upsert_or_dry_run(
@@ -474,6 +627,49 @@ def export_latest_account_snapshot_to_notion(
     )
 
 
+def export_daily_plan_to_notion(
+    *,
+    client: NotionClient | None,
+    settings: NotionSettings,
+    mapping_root: dict[str, dict[str, str]],
+    paper_root: Path | None = None,
+    dry_run: bool = False,
+) -> ExportResult:
+    root = Path(paper_root) if paper_root is not None else paper_daily_action_plan_path("1970-01-01").parent
+    markdown_path, config_snapshot_path = _latest_paper_daily_plan_artifacts(root)
+    summary = summarize_daily_plan_artifacts(
+        markdown_path=markdown_path,
+        config_snapshot_path=config_snapshot_path,
+    )
+    mapping = get_mapping_section(mapping_root, "daily_plans")
+    synced_at = datetime.now(timezone.utc).isoformat()
+    external_key = build_daily_plan_external_key(summary["plan_date"])
+    properties = build_daily_plan_properties(
+        summary,
+        mapping,
+        markdown_path=markdown_path,
+        json_path=config_snapshot_path,
+        synced_at=synced_at,
+    )
+    data_source_id = None if dry_run else get_notion_data_source_id(
+        settings,
+        "daily_plans",
+        env_override="NOTION_DAILY_PLANS_DATA_SOURCE_ID",
+    )
+    return _upsert_or_dry_run(
+        client=client,
+        data_source_id=data_source_id,
+        external_key=external_key,
+        external_key_property_name=resolve_notion_property_name(mapping, "external_key"),
+        properties=properties,
+        children=_build_daily_plan_children(summary, markdown_path, config_snapshot_path),
+        target="daily_plans",
+        source_path=config_snapshot_path,
+        data_source_key="daily_plans",
+        dry_run=dry_run,
+    )
+
+
 def export_selected_paper_reports_to_notion(
     *,
     client: NotionClient | None,
@@ -482,10 +678,11 @@ def export_selected_paper_reports_to_notion(
     export_weekly: bool = False,
     export_benchmark: bool = False,
     export_account_snapshot: bool = False,
+    export_daily_plan: bool = False,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> list[ExportResult]:
-    if not any([export_weekly, export_benchmark, export_account_snapshot]):
+    if not any([export_weekly, export_benchmark, export_account_snapshot, export_daily_plan]):
         raise NotionExportError("No export targets selected.")
 
     results: list[ExportResult] = []
@@ -512,6 +709,16 @@ def export_selected_paper_reports_to_notion(
     if export_account_snapshot:
         results.append(
             export_latest_account_snapshot_to_notion(
+                client=client,
+                settings=settings,
+                mapping_root=mapping_root,
+                paper_root=paper_root,
+                dry_run=dry_run,
+            )
+        )
+    if export_daily_plan:
+        results.append(
+            export_daily_plan_to_notion(
                 client=client,
                 settings=settings,
                 mapping_root=mapping_root,

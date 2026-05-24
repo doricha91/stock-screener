@@ -9,12 +9,16 @@ from core.notion_exporters import (
     NotionExportError,
     build_account_snapshot_external_key,
     build_benchmark_report_external_key,
+    build_daily_plan_external_key,
     build_weekly_report_external_key,
     build_account_snapshot_properties,
     build_benchmark_report_properties,
+    build_daily_plan_properties,
     build_weekly_report_properties,
+    export_daily_plan_to_notion,
     export_latest_account_snapshot_to_notion,
     export_selected_paper_reports_to_notion,
+    summarize_daily_plan_artifacts,
     export_weekly_report_to_notion,
 )
 from core.notion_settings import NotionSettings
@@ -102,6 +106,50 @@ def _seed_account(root: Path) -> None:
     )
 
 
+def _seed_daily_plan(root: Path) -> None:
+    _write(
+        root / "daily_action_plan_20260520.md",
+        "\n".join(
+            [
+                "# Daily Action Plan [2026-05-20]",
+                "",
+                "## 4. Confirmed Trades",
+                "| Type | Symbol | Shares | Ref Price | Reason |",
+                "| :--- | :--- | :--- | :--- | :--- |",
+                "| BUY | **ABC** | 10 | $12.34 | ENTRY_SIGNAL |",
+                "| SELL | **XYZ** | 5 | $20.00 | EXIT_SIGNAL |",
+                "",
+                "## 4-0. Review Items",
+                "| Symbol | Shares | Ref Price | Reason | Note |",
+                "| :--- | ---: | ---: | :--- | :--- |",
+                "| **BRK-B** | 20 | $480.90 | REVIEW_EXIT | manual check |",
+                "",
+                "## 4-0-1. Warnings",
+                "| Symbol | Severity | Reason | Note |",
+                "| :--- | :--- | :--- | :--- |",
+                "| GEN | HIGH | WARNING_HIGHEST_PRICE_INCONSISTENT | highest mismatch |",
+                "| - | MEDIUM | WARNING_LOW_BUYING_POWER | low buying power |",
+                "",
+                "## 4-1. Candidate Diagnostics",
+                "| Symbol | Latest Date | Stale Days | Score | RS | Entry | Result | Reason |",
+                "| :--- | :--- | :---: | ---: | ---: | :---: | :--- | :--- |",
+                "| AMT | 2026-05-20 | 0 | 2.00 | -0.05 | N | fail | entry_signal_false |",
+            ]
+        ),
+    )
+    _write(
+        root / "config_snapshots" / "paper_config_snapshot_20260520.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "plan_date": "2026-05-20",
+                "market_state": {"regime": "BULL"},
+                "market_status_summary": {"regime": "BULL"},
+            }
+        ),
+    )
+
+
 def _mapping() -> dict[str, dict[str, str]]:
     return {
         "weekly_reports": {
@@ -166,6 +214,20 @@ def _mapping() -> dict[str, dict[str, str]]:
             "synced_at": "Synced At",
             "sync_status": "Sync Status",
         },
+        "daily_plans": {
+            "name": "Name",
+            "external_key": "External Key",
+            "plan_date": "Plan Date",
+            "regime": "Regime",
+            "confirmed_trade_count": "Confirmed Trade Count",
+            "review_item_count": "Review Item Count",
+            "warning_count": "Warning Count",
+            "markdown_path": "Markdown Path",
+            "json_path": "JSON Path",
+            "schema_version": "Schema Version",
+            "synced_at": "Synced At",
+            "sync_status": "Sync Status",
+        },
     }
 
 
@@ -177,6 +239,7 @@ def _settings() -> NotionSettings:
             "weekly_reports": "db-weekly",
             "benchmark_reports": "db-benchmark",
             "account_snapshots": "db-account",
+            "daily_plans": "db-daily-plan",
         },
     )
 
@@ -208,6 +271,11 @@ def test_benchmark_external_key_is_generated():
 def test_account_snapshot_external_key_is_generated():
     key = build_account_snapshot_external_key({"snapshot_date": "2026-05-20"})
     assert key == "account_snapshot:2026-05-20"
+
+
+def test_daily_plan_external_key_is_generated():
+    key = build_daily_plan_external_key("2026-05-20")
+    assert key == "daily_plan:2026-05-20"
 
 
 def test_weekly_property_payload_is_built(tmp_path):
@@ -265,6 +333,39 @@ def test_account_snapshot_property_payload_is_built():
     assert props["Position Count"]["number"] == 3
 
 
+def test_daily_plan_summary_is_built_from_markdown_and_config_snapshot(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    summary = summarize_daily_plan_artifacts(
+        markdown_path=root / "daily_action_plan_20260520.md",
+        config_snapshot_path=root / "config_snapshots" / "paper_config_snapshot_20260520.json",
+    )
+    assert summary["plan_date"] == "2026-05-20"
+    assert summary["regime"] == "BULL"
+    assert summary["confirmed_trade_count"] == 2
+    assert summary["review_item_count"] == 1
+    assert summary["warning_count"] == 2
+
+
+def test_daily_plan_property_payload_is_built(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    summary = summarize_daily_plan_artifacts(
+        markdown_path=root / "daily_action_plan_20260520.md",
+        config_snapshot_path=root / "config_snapshots" / "paper_config_snapshot_20260520.json",
+    )
+    props = build_daily_plan_properties(
+        summary,
+        _mapping()["daily_plans"],
+        markdown_path=root / "daily_action_plan_20260520.md",
+        json_path=root / "config_snapshots" / "paper_config_snapshot_20260520.json",
+        synced_at="2026-05-23T00:00:00+00:00",
+    )
+    assert props["Name"]["title"][0]["text"]["content"] == "Daily Plan 2026-05-20"
+    assert props["Regime"]["select"]["name"] == "BULL"
+    assert props["Confirmed Trade Count"]["number"] == 2
+
+
 def test_missing_source_file_raises_error(tmp_path):
     with pytest.raises(NotionExportError):
         export_weekly_report_to_notion(
@@ -304,6 +405,22 @@ def test_dry_run_does_not_call_client(tmp_path):
     assert client.calls == []
 
 
+def test_daily_plan_dry_run_does_not_call_client(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    client = FakeClient()
+    result = export_daily_plan_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        paper_root=root,
+        dry_run=True,
+    )
+    assert result.action == "dry_run"
+    assert result.external_key == "daily_plan:2026-05-20"
+    assert client.calls == []
+
+
 def test_upsert_helper_is_called_in_export_path(tmp_path):
     root = tmp_path / "paper_test"
     _seed_weekly(root)
@@ -334,6 +451,36 @@ def test_account_snapshot_default_export_uses_latest_row(tmp_path):
     )
     assert result.external_key == "account_snapshot:2026-05-20"
     assert len(client.calls) == 1
+
+
+def test_daily_plan_export_uses_latest_artifacts(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    client = FakeClient()
+    result = export_daily_plan_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        paper_root=root,
+        dry_run=False,
+    )
+    assert result.external_key == "daily_plan:2026-05-20"
+    assert result.data_source_key == "daily_plans"
+    assert len(client.calls) == 1
+    assert client.calls[0]["data_source_id"] == "db-daily-plan"
+
+
+def test_daily_plan_export_requires_matching_artifacts(tmp_path):
+    root = tmp_path / "paper_test"
+    _write(root / "daily_action_plan_20260520.md", "# Daily Action Plan\n")
+    with pytest.raises(NotionExportError, match="No daily plan artifacts found"):
+        export_daily_plan_to_notion(
+            client=None,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            paper_root=root,
+            dry_run=True,
+        )
 
 
 def test_export_selected_requires_target():

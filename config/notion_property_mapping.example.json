@@ -52,11 +52,18 @@
     "sync_status": "Sync Status"
   },
   "daily_plans": {
+    "name": "Name",
+    "external_key": "External Key",
     "plan_date": "Plan Date",
     "regime": "Regime",
     "confirmed_trade_count": "Confirmed Trade Count",
     "review_item_count": "Review Item Count",
-    "warning_count": "Warning Count"
+    "warning_count": "Warning Count",
+    "markdown_path": "Markdown Path",
+    "json_path": "JSON Path",
+    "schema_version": "Schema Version",
+    "synced_at": "Synced At",
+    "sync_status": "Sync Status"
   },
   "account_snapshots": {
     "name": "Name",

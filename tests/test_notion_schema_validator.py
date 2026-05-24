@@ -74,6 +74,20 @@ def _mapping() -> dict[str, dict[str, str]]:
             "synced_at": "Synced At",
             "sync_status": "Sync Status",
         },
+        "daily_plans": {
+            "name": "Name",
+            "external_key": "External Key",
+            "plan_date": "Plan Date",
+            "regime": "Regime",
+            "confirmed_trade_count": "Confirmed Trade Count",
+            "review_item_count": "Review Item Count",
+            "warning_count": "Warning Count",
+            "markdown_path": "Markdown Path",
+            "json_path": "JSON Path",
+            "schema_version": "Schema Version",
+            "synced_at": "Synced At",
+            "sync_status": "Sync Status",
+        },
     }
 
 
@@ -114,9 +128,28 @@ def _weekly_schema(*, coverage_options=None, overall_options=None, sync_options=
     }
 
 
+def _daily_plan_schema(*, sync_options=None) -> dict:
+    return {
+        "properties": {
+            "Name": _property("Name", "title"),
+            "External Key": _property("External Key", "rich_text"),
+            "Plan Date": _property("Plan Date", "date"),
+            "Regime": _property("Regime", "select", options=["BULL", "BEAR", "PANIC"]),
+            "Confirmed Trade Count": _property("Confirmed Trade Count", "number"),
+            "Review Item Count": _property("Review Item Count", "number"),
+            "Warning Count": _property("Warning Count", "number"),
+            "Markdown Path": _property("Markdown Path", "rich_text"),
+            "JSON Path": _property("JSON Path", "rich_text"),
+            "Schema Version": _property("Schema Version", "rich_text"),
+            "Synced At": _property("Synced At", "rich_text"),
+            "Sync Status": _property("Sync Status", "select", options=sync_options or ["SYNCED"]),
+        }
+    }
+
+
 def test_expected_schema_is_built_for_all_targets():
     schema = build_expected_schema(_mapping())
-    assert set(schema.keys()) == {"weekly_reports", "benchmark_reports", "account_snapshots"}
+    assert set(schema.keys()) == {"weekly_reports", "benchmark_reports", "account_snapshots", "daily_plans"}
 
 
 def test_validate_schema_passes_when_all_required_properties_match():
@@ -180,3 +213,40 @@ def test_json_summary_structure_is_stable():
     assert payload["overall_status"] == PASS
     assert payload["results"][0]["target"] == "weekly_reports"
     assert "issues" in payload["results"][0]
+
+
+def test_daily_plan_schema_passes_when_required_properties_match():
+    result = validate_data_source_schema(
+        target="daily_plans",
+        data_source_id="ds-daily",
+        actual_schema=_daily_plan_schema(),
+        mapping_root=_mapping(),
+    )
+    assert result.status == PASS
+    assert result.issues == []
+
+
+def test_daily_plan_missing_property_is_fail():
+    schema = _daily_plan_schema()
+    schema["properties"].pop("JSON Path")
+    result = validate_data_source_schema(
+        target="daily_plans",
+        data_source_id="ds-daily",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == FAIL
+    assert any(issue.property_name == "JSON Path" for issue in result.issues)
+
+
+def test_daily_plan_type_mismatch_is_fail():
+    schema = _daily_plan_schema()
+    schema["properties"]["Regime"] = _property("Regime", "rich_text")
+    result = validate_data_source_schema(
+        target="daily_plans",
+        data_source_id="ds-daily",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == FAIL
+    assert any(issue.code == "type_mismatch" for issue in result.issues)
