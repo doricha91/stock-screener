@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import requests
 
 from core.notion_client import (
     NotionAPIError,
@@ -35,6 +36,11 @@ class FakeSession:
             }
         )
         return self.responses.pop(0)
+
+
+class RaisingSession:
+    def request(self, method, url, headers=None, timeout=None, json=None):
+        raise requests.ConnectionError("connection failed")
 
 
 def test_query_by_external_key_payload_is_correct():
@@ -107,3 +113,33 @@ def test_http_error_raises_clear_exception_without_token_leak():
     assert "HTTP 401" in message
     assert "secret-token" not in message
     assert exc_info.value.response_body == '{"message":"unauthorized"}'
+
+
+def test_retrieve_data_source_404_mentions_data_source_id_not_database_id():
+    session = FakeSession([FakeResponse(404, text='{"message":"object_not_found"}')])
+    client = NotionClient("secret-token", session=session)
+    with pytest.raises(NotionAPIError) as exc_info:
+        client.retrieve_data_source("ds_missing")
+    message = str(exc_info.value)
+    assert "data source not found" in message
+    assert "database id" in message
+    assert "secret-token" not in message
+
+
+def test_retrieve_data_source_403_mentions_access_denied():
+    session = FakeSession([FakeResponse(403, text='{"message":"restricted_resource"}')])
+    client = NotionClient("secret-token", session=session)
+    with pytest.raises(NotionAPIError) as exc_info:
+        client.get_data_source_schema("ds_forbidden")
+    message = str(exc_info.value)
+    assert "access denied" in message
+    assert "secret-token" not in message
+
+
+def test_transport_error_is_wrapped_without_token_leak():
+    client = NotionClient("secret-token", session=RaisingSession())
+    with pytest.raises(NotionAPIError) as exc_info:
+        client.get_bot_user()
+    message = str(exc_info.value)
+    assert "transport error" in message
+    assert "secret-token" not in message

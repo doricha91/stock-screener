@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+from requests import RequestException
 
 NOTION_VERSION = "2026-03-11"
 NOTION_BASE_URL = "https://api.notion.com/v1"
@@ -52,13 +53,18 @@ class NotionClient:
         }
 
     def _request_json(self, method: str, path: str, *, json_payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self.session.request(
-            method,
-            f"{self.base_url}{path}",
-            headers=self._headers(),
-            timeout=self.timeout,
-            json=json_payload,
-        )
+        try:
+            response = self.session.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=self._headers(),
+                timeout=self.timeout,
+                json=json_payload,
+            )
+        except RequestException as exc:
+            raise NotionAPIError(
+                f"Notion API request failed: {method} {path} -> transport error ({exc.__class__.__name__})"
+            ) from exc
         if response.status_code >= 400:
             body = response.text
             raise NotionAPIError(
@@ -74,7 +80,47 @@ class NotionClient:
         return self._request_json("GET", "/users/me")
 
     def retrieve_data_source(self, data_source_id: str) -> dict[str, Any]:
-        return self._request_json("GET", f"/data_sources/{data_source_id}")
+        try:
+            return self._request_json("GET", f"/data_sources/{data_source_id}")
+        except NotionAPIError as exc:
+            raise self._translate_data_source_error(data_source_id, exc) from exc
+
+    def get_data_source_schema(self, data_source_id: str) -> dict[str, Any]:
+        return self.retrieve_data_source(data_source_id)
+
+    def _translate_data_source_error(
+        self,
+        data_source_id: str,
+        exc: NotionAPIError,
+    ) -> NotionAPIError:
+        status_code = exc.status_code
+        body = exc.response_body or ""
+        if status_code is None:
+            message = (
+                f"Notion data source schema read failed for '{data_source_id}': "
+                "transport error while reaching the Notion API."
+            )
+        elif status_code == 403:
+            message = (
+                f"Notion data source schema read failed for '{data_source_id}': "
+                "access denied (HTTP 403). Check integration access and token scope."
+            )
+        elif status_code == 404:
+            message = (
+                f"Notion data source schema read failed for '{data_source_id}': "
+                "data source not found (HTTP 404). Check that you are using a data source id, not a database id."
+            )
+        elif status_code == 400:
+            message = (
+                f"Notion data source schema read failed for '{data_source_id}': "
+                "validation error (HTTP 400). Check the data source id format."
+            )
+        else:
+            message = (
+                f"Notion data source schema read failed for '{data_source_id}': "
+                f"HTTP {status_code if status_code is not None else 'unknown'}."
+            )
+        return NotionAPIError(message, status_code=status_code, response_body=body)
 
     def query_by_external_key(
         self,
