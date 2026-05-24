@@ -298,3 +298,89 @@ Notion UI에서 사람이 먼저 확인할 것:
 7. `Valuation Status`는 최소 `SUCCESS`, `FAILED`, `NOT_RUN`, `UNKNOWN`을 미리 만든다.
 8. `Availability Status`는 최소 `AVAILABLE`, `INSUFFICIENT_DATA`, `UNKNOWN`을 미리 만든다.
 
+## Closeout Addendum: UI Display Policy
+
+This addendum was added during PAPER14-3 closeout.
+
+이번 PAPER14-3-closeout은 Weekly / Benchmark / Account Snapshot Notion export 검증 결과와 Notion UI 표시 설정을 문서화하는 작업이며, page body 개선, 추가 export 구현, 실제 Notion write는 포함하지 않는다.
+
+### Common UI rules
+
+- Exporter sends ratio / return / MDD fields as raw decimal `Number` values.
+- In Notion UI, those `Number` properties should be displayed using the `Percent` format.
+- Example: `0.6044888 -> 60.44888%`
+- Money-like values should use Dollar or comma-grouped numeric display in Notion UI.
+- Count-like values should use integer numeric display in Notion UI.
+- `Synced At` is `Rich text`, not `Date`.
+- `Symbols` is plain text (`Rich text`), not `Multi-select`.
+
+## Weekly Reports: property meaning and UI display
+
+| Property | Meaning | Notion display |
+| --- | --- | --- |
+| Name | Report title | Title |
+| External Key | Upsert key | Rich text |
+| Period Start | Report coverage start | Date |
+| Period End | Report coverage end | Date |
+| Latest Snapshot Date | Latest snapshot included in the report | Date |
+| Coverage Status | Coverage state: `FULL`, `PARTIAL`, `EMPTY` | Select |
+| Overall Status | Validation summary: `PASS`, `PASS_WITH_WARNINGS`, `FAIL` | Select |
+| Snapshot Count | Number of snapshots in range | Integer number |
+| End Equity | Account equity at period end | Money display |
+| Equity Change % | Period equity delta as raw decimal | Percent display |
+| Cash Ratio | End cash ratio as raw decimal | Percent display |
+| Trade Count | Number of trades in range | Integer number |
+| Gap Count | Number of detected gaps | Integer number |
+| High Gap Count | Number of high-severity gaps | Integer number |
+| Markdown Path | Source markdown artifact path | Rich text |
+| JSON Path | Source JSON artifact path | Rich text |
+| Schema Version | Source schema version | Rich text |
+| Synced At | Export timestamp stored as text | Rich text |
+| Sync Status | Export sync state, currently `SYNCED` | Select |
+
+## Benchmark Reports: property meaning and UI display
+
+| Property | Meaning | Notion display |
+| --- | --- | --- |
+| Name | Benchmark report title | Title |
+| External Key | Upsert key | Rich text |
+| Latest Snapshot Date | Comparison date | Date |
+| Run Mode | Current run mode such as `EXPLORATORY` | Select |
+| Official Run | `TRUE` / `FALSE` select, not checkbox | Select |
+| Availability Status | `AVAILABLE` / `INSUFFICIENT_DATA` / `UNKNOWN` | Select |
+| Paper Return | Paper return as raw decimal | Percent display |
+| SPY Return | SPY return as raw decimal | Percent display |
+| QQQ Return | QQQ return as raw decimal | Percent display |
+| CASH Return | CASH return as raw decimal | Percent display |
+| Excess vs SPY | Paper excess return vs SPY | Percent display |
+| Excess vs QQQ | Paper excess return vs QQQ | Percent display |
+| Excess vs CASH | Paper excess return vs CASH | Percent display |
+| Paper MDD | Paper max drawdown as raw decimal | Percent display |
+| SPY MDD | SPY max drawdown as raw decimal | Percent display |
+| QQQ MDD | QQQ max drawdown as raw decimal | Percent display |
+| Markdown Path | Source markdown artifact path | Rich text |
+| JSON Path | Source JSON artifact path | Rich text |
+| Schema Version | Source schema version | Rich text |
+| Synced At | Export timestamp stored as text | Rich text |
+| Sync Status | Export sync state, currently `SYNCED` | Select |
+
+## Account Snapshots: property meaning and UI display
+
+| Property | Meaning | Notion display |
+| --- | --- | --- |
+| Name | Account snapshot title | Title |
+| External Key | Upsert key | Rich text |
+| Snapshot Date | Snapshot date | Date |
+| Initial Cash | Initial cash baseline | Money display |
+| Cash | Current cash | Money display |
+| Total Equity Market Value | Equity using market valuation | Money display |
+| Total Equity Cost Basis | Equity using cost basis | Money display |
+| Unrealized PnL | Unrealized PnL | Money display |
+| Cash Ratio Market Value | Cash ratio on market-value basis as raw decimal | Percent display |
+| Cash Ratio Cost Basis | Cash ratio on cost-basis basis as raw decimal | Percent display |
+| Position Count | Number of open positions | Integer number |
+| Symbols | Pipe-joined symbol text | Rich text |
+| Valuation Status | `SUCCESS`, `FAILED`, `NOT_RUN`, `UNKNOWN`, `PARTIAL` | Select |
+| Valuation Price Date | Date used for valuation pricing | Date |
+| Synced At | Export timestamp stored as text | Rich text |
+| Sync Status | Export sync state, currently `SYNCED` | Select |
