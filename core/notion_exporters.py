@@ -679,6 +679,7 @@ def _upsert_or_dry_run(
     source_path: Path,
     data_source_key: str,
     dry_run: bool,
+    refresh_children_on_update: bool = False,
 ) -> ExportResult:
     if dry_run:
         return ExportResult(
@@ -700,6 +701,7 @@ def _upsert_or_dry_run(
         external_key_property=external_key_property_name,
         properties=properties,
         children=children,
+        refresh_children_on_update=refresh_children_on_update,
     )
     return ExportResult(
         target=target,
@@ -753,6 +755,7 @@ def export_weekly_report_to_notion(
         source_path=json_path,
         data_source_key="weekly_reports",
         dry_run=dry_run,
+        refresh_children_on_update=False,
     )
 
 
@@ -797,6 +800,7 @@ def export_benchmark_report_to_notion(
         source_path=json_path,
         data_source_key="benchmark_reports",
         dry_run=dry_run,
+        refresh_children_on_update=False,
     )
 
 
@@ -834,6 +838,7 @@ def export_latest_account_snapshot_to_notion(
         source_path=csv_path,
         data_source_key="account_snapshots",
         dry_run=dry_run,
+        refresh_children_on_update=False,
     )
 
 
@@ -877,6 +882,7 @@ def export_daily_plan_to_notion(
         source_path=config_snapshot_path,
         data_source_key="daily_plans",
         dry_run=dry_run,
+        refresh_children_on_update=True,
     )
 
 

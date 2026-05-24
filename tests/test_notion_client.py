@@ -92,6 +92,86 @@ def test_upsert_updates_when_one_existing_row():
     assert session.calls[1]["url"].endswith("/pages/page-existing")
 
 
+def test_upsert_update_can_refresh_page_children():
+    session = FakeSession(
+        [
+            FakeResponse(200, {"results": [{"id": "page-existing"}]}),
+            FakeResponse(200, {"id": "page-existing"}),
+            FakeResponse(
+                200,
+                {
+                    "results": [{"id": "block-1"}, {"id": "block-2"}],
+                    "has_more": False,
+                    "next_cursor": None,
+                },
+            ),
+            FakeResponse(200, payload=None, text=""),
+            FakeResponse(200, payload=None, text=""),
+            FakeResponse(200, {"results": [{"id": "new-block"}]}),
+        ]
+    )
+    client = NotionClient("secret-token", session=session)
+    result = client.upsert_page_by_external_key(
+        data_source_id="ds1",
+        external_key="ext-1",
+        external_key_property="External Key",
+        properties={"Status": {"select": {"name": "UPDATED"}}},
+        children=[{"object": "block", "type": "paragraph", "paragraph": {"rich_text": []}}],
+        refresh_children_on_update=True,
+    )
+    assert result.action == "updated"
+    methods = [call["method"] for call in session.calls]
+    assert methods == ["POST", "PATCH", "GET", "DELETE", "DELETE", "PATCH"]
+    assert session.calls[-1]["url"].endswith("/blocks/page-existing/children")
+
+
+def test_upsert_update_without_refresh_keeps_existing_behavior():
+    session = FakeSession(
+        [
+            FakeResponse(200, {"results": [{"id": "page-existing"}]}),
+            FakeResponse(200, {"id": "page-existing"}),
+        ]
+    )
+    client = NotionClient("secret-token", session=session)
+    result = client.upsert_page_by_external_key(
+        data_source_id="ds1",
+        external_key="ext-1",
+        external_key_property="External Key",
+        properties={"Status": {"select": {"name": "UPDATED"}}},
+        children=[{"object": "block", "type": "paragraph", "paragraph": {"rich_text": []}}],
+    )
+    assert result.action == "updated"
+    assert [call["method"] for call in session.calls] == ["POST", "PATCH"]
+
+
+def test_replace_page_children_failure_bubbles_up():
+    session = FakeSession(
+        [
+            FakeResponse(200, {"results": [{"id": "page-existing"}]}),
+            FakeResponse(200, {"id": "page-existing"}),
+            FakeResponse(
+                200,
+                {
+                    "results": [{"id": "block-1"}],
+                    "has_more": False,
+                    "next_cursor": None,
+                },
+            ),
+            FakeResponse(500, text='{"message":"server_error"}'),
+        ]
+    )
+    client = NotionClient("secret-token", session=session)
+    with pytest.raises(NotionAPIError):
+        client.upsert_page_by_external_key(
+            data_source_id="ds1",
+            external_key="ext-1",
+            external_key_property="External Key",
+            properties={"Status": {"select": {"name": "UPDATED"}}},
+            children=[{"object": "block", "type": "paragraph", "paragraph": {"rich_text": []}}],
+            refresh_children_on_update=True,
+        )
+
+
 def test_upsert_errors_on_duplicate_external_key():
     session = FakeSession([FakeResponse(200, {"results": [{"id": "1"}, {"id": "2"}]})])
     client = NotionClient("secret-token", session=session)

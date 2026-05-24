@@ -440,6 +440,7 @@ def test_upsert_helper_is_called_in_export_path(tmp_path):
     assert len(client.calls) == 1
     assert client.calls[0]["data_source_id"] == "db-weekly"
     assert result.data_source_key == "weekly_reports"
+    assert client.calls[0]["refresh_children_on_update"] is False
 
 
 def test_account_snapshot_default_export_uses_latest_row(tmp_path):
@@ -472,6 +473,7 @@ def test_daily_plan_export_uses_latest_artifacts(tmp_path):
     assert result.data_source_key == "daily_plans"
     assert len(client.calls) == 1
     assert client.calls[0]["data_source_id"] == "db-daily-plan"
+    assert client.calls[0]["refresh_children_on_update"] is True
     children = client.calls[0]["children"]
     texts = [
         block[block["type"]]["rich_text"][0]["text"]["content"]
@@ -541,6 +543,21 @@ def test_daily_plan_export_falls_back_when_sections_are_missing(tmp_path):
     assert any("Section ## 4. could not be parsed." in text for text in texts)
     assert any("Section ## 4-0. could not be parsed." in text for text in texts)
     assert any("Section ## 4-0-1. could not be parsed." in text for text in texts)
+
+
+def test_daily_plan_dry_run_does_not_request_body_refresh(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    client = FakeClient()
+    result = export_daily_plan_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        paper_root=root,
+        dry_run=True,
+    )
+    assert result.action == "dry_run"
+    assert client.calls == []
 
 
 def test_export_selected_requires_target():

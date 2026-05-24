@@ -169,6 +169,43 @@ class NotionClient:
             json_payload={"properties": properties},
         )
 
+    def list_block_children(self, block_id: str) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            path = f"/blocks/{block_id}/children?page_size=100"
+            if cursor:
+                path = f"{path}&start_cursor={cursor}"
+            payload = self._request_json("GET", path)
+            results.extend(payload.get("results", []))
+            if not payload.get("has_more"):
+                return results
+            cursor = payload.get("next_cursor")
+            if not cursor:
+                return results
+
+    def delete_block(self, block_id: str) -> dict[str, Any]:
+        return self._request_json("DELETE", f"/blocks/{block_id}")
+
+    def append_block_children(self, block_id: str, children: list[dict[str, Any]]) -> dict[str, Any]:
+        if not children:
+            return {}
+        return self._request_json(
+            "PATCH",
+            f"/blocks/{block_id}/children",
+            json_payload={"children": children},
+        )
+
+    def replace_page_children(self, page_id: str, children: list[dict[str, Any]]) -> None:
+        existing_children = self.list_block_children(page_id)
+        for child in existing_children:
+            child_id = str(child.get("id") or "").strip()
+            if not child_id:
+                continue
+            self.delete_block(child_id)
+        if children:
+            self.append_block_children(page_id, children)
+
     def upsert_page_by_external_key(
         self,
         *,
@@ -177,6 +214,7 @@ class NotionClient:
         external_key_property: str,
         properties: dict[str, Any],
         children: list[dict[str, Any]] | None = None,
+        refresh_children_on_update: bool = False,
     ) -> NotionUpsertResult:
         existing = self.query_by_external_key(
             data_source_id,
@@ -190,6 +228,8 @@ class NotionClient:
         if len(existing) == 1:
             page_id = existing[0]["id"]
             payload = self.update_page(page_id, properties)
+            if refresh_children_on_update:
+                self.replace_page_children(page_id, children or [])
             return NotionUpsertResult(action="updated", page_id=page_id, payload=payload)
         payload = self.create_page(
             data_source_id,

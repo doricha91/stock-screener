@@ -223,3 +223,31 @@ Daily Plan page body는 아래 순서로 구성한다.
 
 - 현재 parser는 heading prefix와 Markdown table 구조가 유지된다는 전제에 기대고 있다.
 - 향후 Daily Plan Markdown 서식이 크게 바뀌면 parser와 테스트를 같이 갱신해야 한다.
+
+## 4B Revision: Update Path Body Refresh
+
+이번 PAPER14-4B_revision은 Daily Plan updated path에서 page body를 refresh하는 작업이며, Daily Review Summary, Performance Summary, Manual Review 입력 연동은 수행하지 않는다.
+
+정책:
+
+- Daily Plan page body는 exporter-managed 영역이다.
+- Daily Plan export를 다시 실행하면 최신 source markdown 기준으로 page body를 재생성한다.
+- 사용자는 Daily Plan page body에 수동 메모를 남기지 않는다.
+- 수동 메모는 후속 Daily Review / Manual Review 계층에서 다룬다.
+
+구현 정책:
+
+- create path에서는 기존처럼 properties + children을 함께 생성한다.
+- update path에서는 properties를 먼저 update한다.
+- Daily Plan에 한해서만 기존 page body children을 제거하고 최신 children을 다시 append한다.
+- Weekly / Benchmark / Account Snapshot update 경로는 기존 properties-only update를 유지한다.
+
+dry-run:
+
+- `--dry-run`에서는 실제 body refresh를 수행하지 않는다.
+- body refresh는 actual export update path에서만 실행된다.
+
+남은 리스크:
+
+- body refresh는 기존 children을 제거한 뒤 다시 append하는 방식이라, Daily Plan page body의 사용자 수동 메모는 보존되지 않는다.
+- 이 동작은 의도된 정책이며, 사용자 메모는 Review 계층으로 분리해야 한다.
