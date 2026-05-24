@@ -251,3 +251,96 @@ python scripts/paper.py eod --date YYYYMMDD --commit
 - `run-all` 또는 `daily` 형태의 자동 commit 체인
 
 문제 진단이 필요할 때만 개별 명령을 사용하고, 일상 운영은 shortcut 기준으로 유지한다.
+
+## 12. PAPER14 Notion Export SOP Addendum
+
+This addendum documents the PAPER14 Notion export step for paper operations.
+
+Notion export is added after the existing loop:
+
+`prepare -> preview -> commit -> review -> status -> notion export`
+
+### 12.1 Role of Notion
+
+Notion export does not replace the source artifacts produced by the paper workflow.
+
+- Notion export는 CSV/JSON/Markdown/SQLite 원천 데이터를 대체하지 않는다.
+- Notion은 검토와 표시를 위한 presentation/review layer다.
+- Source of truth remains local CSV / JSON / Markdown / SQLite outputs.
+- If Notion export fails, the paper ledger is not considered failed when the source artifacts were generated correctly.
+- Notion export failure should be logged separately and fixed before the next operational cycle.
+
+### 12.2 Execution order
+
+Run schema validation first, then dry-run, then actual export.
+
+```bash
+cd /d D:\python\StockScreener
+set PYTHONPATH=.
+
+python scripts\dev\validate_notion_schema.py --all --json
+
+python scripts\export_paper_to_notion.py --weekly --dry-run --json
+python scripts\export_paper_to_notion.py --benchmark --dry-run --json
+python scripts\export_paper_to_notion.py --account-snapshot --dry-run --json
+
+python scripts\export_paper_to_notion.py --weekly --json
+python scripts\export_paper_to_notion.py --benchmark --json
+python scripts\export_paper_to_notion.py --account-snapshot --json
+```
+
+Operational rules:
+
+- If schema validation returns any `FAIL`, do not run actual export.
+- If any dry-run fails, do not run actual export.
+- Run actual export per target, not with `--all`.
+- Execution order is fixed:
+  - `weekly`
+  - `benchmark`
+  - `account-snapshot`
+
+### 12.3 Success criteria
+
+- Schema validation result is `PASS` or `WARNING`
+- All three dry-run commands succeed
+- All three actual export commands succeed
+- No duplicate row is created for the same `External Key`
+- Major properties are visible in the Notion UI
+
+### 12.4 Failure handling
+
+Schema validation `FAIL`:
+
+- Fix the Notion DB property names, property types, or select configuration.
+- Do not run actual export.
+
+Dry-run failure:
+
+- Check the source JSON / CSV / Markdown paths and the Notion property mapping.
+- Do not run actual export.
+
+Actual export failure:
+
+- Check `NOTION_TOKEN`, data source id values, and integration permissions.
+- Do not modify source ledger files to compensate for the Notion failure.
+- Record the failure in the operation log or task report and retry after the cause is fixed.
+
+### 12.5 Security and configuration
+
+- `NOTION_TOKEN` must be managed only through `.env` or environment variables.
+- Real data source ids must be stored only in `config/notion_settings.json` or environment variables.
+- `config/notion_settings.json` should remain gitignored.
+- `config/notion_property_mapping.json` should remain gitignored.
+- Never expose tokens or real data source ids in logs or operational documents.
+
+### 12.6 Out of scope
+
+The following are not part of the current SOP step:
+
+- Daily Plan export
+- Daily Review Summary export
+- Performance Summary export
+- Manual Review input integration
+- Notion DB auto-creation
+- Notion schema migration
+- page body improvement
