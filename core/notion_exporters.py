@@ -114,6 +114,37 @@ def _paragraph_block(text: str) -> dict[str, Any]:
     }
 
 
+def _heading_block(text: str, *, level: int = 2) -> dict[str, Any]:
+    heading_type = "heading_2" if level == 2 else "heading_3"
+    return {
+        "object": "block",
+        "type": heading_type,
+        heading_type: {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {"content": text},
+                }
+            ]
+        },
+    }
+
+
+def _bulleted_list_item_block(text: str) -> dict[str, Any]:
+    return {
+        "object": "block",
+        "type": "bulleted_list_item",
+        "bulleted_list_item": {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {"content": text},
+                }
+            ]
+        },
+    }
+
+
 def _build_weekly_children(summary: dict[str, Any], markdown_path: Path, json_path: Path) -> list[dict[str, Any]]:
     period = summary["period"]
     lines = [
@@ -148,16 +179,76 @@ def _build_account_snapshot_children(row: dict[str, str]) -> list[dict[str, Any]
 
 
 def _build_daily_plan_children(summary: dict[str, Any], markdown_path: Path, json_path: Path) -> list[dict[str, Any]]:
-    lines = [
-        f"Daily plan date: {summary['plan_date']}",
-        f"Regime: {summary['regime']}",
-        f"Confirmed trades: {summary['confirmed_trade_count']}",
-        f"Review items: {summary['review_item_count']}",
-        f"Warnings: {summary['warning_count']}",
-        f"Markdown path: {_relative_to_project(markdown_path)}",
-        f"JSON path: {_relative_to_project(json_path)}",
+    children: list[dict[str, Any]] = [
+        _heading_block("오늘의 운영 요약"),
+        _bulleted_list_item_block(f"Plan Date: {summary['plan_date']}"),
+        _bulleted_list_item_block(f"Regime: {summary['regime']}"),
+        _bulleted_list_item_block(f"Confirmed Trades: {summary['confirmed_trade_count']}"),
+        _bulleted_list_item_block(f"Review Items: {summary['review_item_count']}"),
+        _bulleted_list_item_block(f"Warnings: {summary['warning_count']}"),
     ]
-    return [_paragraph_block("\n".join(lines))]
+
+    market_summary_lines = summary.get("market_summary_lines") or []
+    for line in market_summary_lines:
+        children.append(_bulleted_list_item_block(line))
+
+    children.extend(
+        _build_daily_plan_detail_blocks(
+            title="확정 거래",
+            items=summary.get("confirmed_trade_body_items") or [],
+            empty_message="No confirmed trades in source markdown.",
+            fallback_message=summary.get("confirmed_trade_fallback"),
+        )
+    )
+    children.extend(
+        _build_daily_plan_detail_blocks(
+            title="검토 필요 항목",
+            items=summary.get("review_item_body_items") or [],
+            empty_message="No review-only items in source markdown.",
+            fallback_message=summary.get("review_item_fallback"),
+        )
+    )
+    children.extend(
+        _build_daily_plan_detail_blocks(
+            title="경고",
+            items=summary.get("warning_body_items") or [],
+            empty_message="No warnings in source markdown.",
+            fallback_message=summary.get("warning_fallback"),
+        )
+    )
+
+    parse_warnings = summary.get("parsing_warnings") or []
+    if parse_warnings:
+        children.append(_heading_block("파싱 참고", level=3))
+        for warning in parse_warnings:
+            children.append(_bulleted_list_item_block(warning))
+
+    children.extend(
+        [
+            _heading_block("원천 파일"),
+            _bulleted_list_item_block(f"Markdown Path: {_relative_to_project(markdown_path)}"),
+            _bulleted_list_item_block(f"JSON Path: {_relative_to_project(json_path)}"),
+        ]
+    )
+    return children
+
+
+def _build_daily_plan_detail_blocks(
+    *,
+    title: str,
+    items: list[str],
+    empty_message: str,
+    fallback_message: str | None,
+) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = [_heading_block(title)]
+    if fallback_message:
+        blocks.append(_paragraph_block(fallback_message))
+    elif items:
+        for item in items:
+            blocks.append(_bulleted_list_item_block(item))
+    else:
+        blocks.append(_paragraph_block(empty_message))
+    return blocks
 
 
 def build_weekly_report_properties(
@@ -382,6 +473,17 @@ def _extract_plan_section(markdown: str, heading_prefix: str, next_heading_prefi
     return "\n".join(lines[start:end]).strip()
 
 
+def _extract_plan_section_optional(
+    markdown: str,
+    heading_prefix: str,
+    next_heading_prefixes: tuple[str, ...],
+) -> tuple[str | None, str | None]:
+    try:
+        return _extract_plan_section(markdown, heading_prefix, next_heading_prefixes), None
+    except NotionExportError:
+        return None, f"Section {heading_prefix.strip()} could not be parsed. See source markdown path."
+
+
 def _count_markdown_table_rows(section: str) -> int:
     rows = [line.strip() for line in section.splitlines() if line.strip().startswith("|")]
     if len(rows) < 3:
@@ -397,6 +499,67 @@ def _count_markdown_table_rows(section: str) -> int:
             continue
         count += 1
     return count
+
+
+def _strip_markdown_emphasis(text: str) -> str:
+    cleaned = text.replace("**", "").replace("`", "").strip()
+    return re.sub(r"\s+", " ", cleaned)
+
+
+def _parse_markdown_table_rows(section: str | None) -> list[dict[str, str]]:
+    if not section:
+        return []
+
+    rows = [line.strip() for line in section.splitlines() if line.strip().startswith("|")]
+    if len(rows) < 3:
+        return []
+
+    headers = [_strip_markdown_emphasis(cell) for cell in rows[0].strip("|").split("|")]
+    parsed: list[dict[str, str]] = []
+    for row in rows[2:]:
+        cells = [_strip_markdown_emphasis(cell) for cell in row.strip("|").split("|")]
+        if not cells:
+            continue
+        if all(cell in {"", "-", "[ ]"} for cell in cells):
+            continue
+        padded = cells + [""] * max(0, len(headers) - len(cells))
+        parsed.append({headers[index]: padded[index] for index in range(len(headers))})
+    return parsed
+
+
+def _format_confirmed_trade_items(rows: list[dict[str, str]]) -> list[str]:
+    items: list[str] = []
+    for row in rows:
+        trade_type = row.get("Type") or row.get("???") or "-"
+        symbol = row.get("Symbol") or row.get("종목") or "-"
+        shares = row.get("Shares") or row.get("수량") or "-"
+        price = row.get("Ref Price") or row.get("예상단가") or "-"
+        reason = row.get("Reason") or row.get("매매 사유") or "-"
+        items.append(f"{trade_type} {symbol} {shares} @ {price} - {reason}")
+    return items
+
+
+def _format_review_item_body_items(rows: list[dict[str, str]]) -> list[str]:
+    items: list[str] = []
+    for row in rows:
+        symbol = row.get("Symbol") or "-"
+        shares = row.get("Shares") or "-"
+        price = row.get("Ref Price") or "-"
+        reason = row.get("Reason") or "-"
+        note = row.get("Note") or "-"
+        items.append(f"{symbol} {shares} @ {price} - {reason} ({note})")
+    return items
+
+
+def _format_warning_body_items(rows: list[dict[str, str]]) -> list[str]:
+    items: list[str] = []
+    for row in rows:
+        symbol = row.get("Symbol") or "-"
+        severity = row.get("Severity") or "-"
+        reason = row.get("Reason") or "-"
+        note = row.get("Note") or "-"
+        items.append(f"{symbol} [{severity}] {reason} - {note}")
+    return items
 
 
 def summarize_daily_plan_artifacts(
@@ -420,17 +583,64 @@ def summarize_daily_plan_artifacts(
         raise NotionExportError(f"Missing source file: {markdown_path}")
     markdown = markdown_path.read_text(encoding="utf-8")
 
-    confirmed_section = _extract_plan_section(markdown, "## 4. ", ("## 4-0. ",))
-    review_section = _extract_plan_section(markdown, "## 4-0. ", ("## 4-0-1. ",))
-    warning_section = _extract_plan_section(markdown, "## 4-0-1. ", ("## 4-1. ",))
+    market_section, market_section_error = _extract_plan_section_optional(
+        markdown,
+        "## 1. ",
+        ("## 2. ",),
+    )
+    confirmed_section, confirmed_section_error = _extract_plan_section_optional(
+        markdown,
+        "## 4. ",
+        ("## 4-0. ",),
+    )
+    review_section, review_section_error = _extract_plan_section_optional(
+        markdown,
+        "## 4-0. ",
+        ("## 4-0-1. ",),
+    )
+    warning_section, warning_section_error = _extract_plan_section_optional(
+        markdown,
+        "## 4-0-1. ",
+        ("## 4-1. ",),
+    )
+
+    market_summary_lines = []
+    if market_section:
+        for line in market_section.splitlines():
+            cleaned = _strip_markdown_emphasis(line.lstrip("- ").strip())
+            if cleaned:
+                market_summary_lines.append(cleaned)
+
+    confirmed_rows = _parse_markdown_table_rows(confirmed_section)
+    review_rows = _parse_markdown_table_rows(review_section)
+    warning_rows = _parse_markdown_table_rows(warning_section)
+
+    parsing_warnings = [
+        warning
+        for warning in (
+            market_section_error,
+            confirmed_section_error,
+            review_section_error,
+            warning_section_error,
+        )
+        if warning
+    ]
 
     return {
         "schema_version": f"paper_daily_plan.v{summary.get('schema_version', 1)}",
         "plan_date": plan_date,
         "regime": regime.upper(),
-        "confirmed_trade_count": _count_markdown_table_rows(confirmed_section),
-        "review_item_count": _count_markdown_table_rows(review_section),
-        "warning_count": _count_markdown_table_rows(warning_section),
+        "confirmed_trade_count": _count_markdown_table_rows(confirmed_section or ""),
+        "review_item_count": _count_markdown_table_rows(review_section or ""),
+        "warning_count": _count_markdown_table_rows(warning_section or ""),
+        "market_summary_lines": market_summary_lines[:3],
+        "confirmed_trade_body_items": _format_confirmed_trade_items(confirmed_rows),
+        "review_item_body_items": _format_review_item_body_items(review_rows),
+        "warning_body_items": _format_warning_body_items(warning_rows),
+        "confirmed_trade_fallback": confirmed_section_error,
+        "review_item_fallback": review_section_error,
+        "warning_fallback": warning_section_error,
+        "parsing_warnings": parsing_warnings,
     }
 
 

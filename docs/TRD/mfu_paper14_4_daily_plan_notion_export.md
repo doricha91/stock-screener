@@ -144,3 +144,82 @@ python scripts\export_paper_to_notion.py --daily-plan --dry-run --json
 - Daily Plan count 3종은 현재 Markdown section/table 구조에 의존한다.
 - Daily Plan 전용 JSON artifact가 아직 없으므로, 향후 Markdown 포맷이 바뀌면 parser도 함께 조정해야 한다.
 - `daily_plans` data source id가 아직 설정되지 않은 환경에서는 actual schema read를 건너뛰고 warning으로 보고할 수 있다.
+
+## 4B Page Body Enrichment
+
+이번 PAPER14-4B는 Daily Plan page body enrichment 작업이며, Daily Review Summary, Performance Summary, Manual Review 입력 연동, 신규 DB 추가는 포함하지 않는다.
+
+원칙:
+
+- DB property는 필터/정렬용 요약만 유지한다.
+- 상세 운영 내용은 page body에 넣는다.
+- source of truth는 여전히 원천 Markdown / JSON이다.
+- Notion은 presentation / review layer다.
+
+### Page Body Structure
+
+Daily Plan page body는 아래 순서로 구성한다.
+
+- `오늘의 운영 요약`
+- `확정 거래`
+- `검토 필요 항목`
+- `경고`
+- `원천 파일`
+
+요약 섹션에는 아래를 포함한다.
+
+- `Plan Date`
+- `Regime`
+- `Confirmed Trades`
+- `Review Items`
+- `Warnings`
+- 가능하면 Markdown `## 1.` 시장 요약 섹션의 앞부분 1~3줄
+
+### Markdown Parsing Basis
+
+섹션 기준은 실제 source Markdown의 heading prefix를 따른다.
+
+- 시장 요약: `## 1.`
+- 확정 거래: `## 4.`
+- 검토 필요 항목: `## 4-0.`
+- 경고: `## 4-0-1.`
+
+테이블은 Notion native table로 변환하지 않고, bullet/plain text 중심으로 변환한다.
+
+표시 예:
+
+- 확정 거래: `BUY ABC 10 @ $12.34 - ENTRY_SIGNAL`
+- 검토 항목: `BRK-B 20 @ $480.90 - REVIEW_EXIT (manual check)`
+- 경고: `GEN [HIGH] WARNING_HIGHEST_PRICE_INCONSISTENT - highest mismatch`
+
+### Fallback Policy
+
+- 섹션 파싱 실패는 export 전체 실패로 취급하지 않는다.
+- 최소 summary와 source path는 항상 body에 남긴다.
+- 섹션을 찾지 못하면 fallback paragraph를 넣는다.
+
+예:
+
+- `Section ## 4. could not be parsed. See source markdown path.`
+
+### Why Properties Are Not Expanded
+
+이번 4B에서는 Daily Plans DB property를 늘리지 않는다.
+
+이유:
+
+- 종목별 상세 property는 필터/정렬보다 body reading 용도에 가깝다.
+- 상세 trade / warning을 property로 올리면 schema가 빠르게 비대해진다.
+- Trade Items / Warning Items 같은 별도 DB는 이번 범위가 아니다.
+
+### 4B Test Focus
+
+- 운영 요약 섹션이 body에 포함되는지
+- 확정 거래 / 검토 / 경고 섹션이 있으면 body에 포함되는지
+- 섹션이 없어도 fallback body로 export payload가 계속 생성되는지
+- source markdown/json path가 body 하단에 포함되는지
+
+### 4B Remaining Risks
+
+- 현재 parser는 heading prefix와 Markdown table 구조가 유지된다는 전제에 기대고 있다.
+- 향후 Daily Plan Markdown 서식이 크게 바뀌면 parser와 테스트를 같이 갱신해야 한다.

@@ -113,6 +113,10 @@ def _seed_daily_plan(root: Path) -> None:
             [
                 "# Daily Action Plan [2026-05-20]",
                 "",
+                "## 1. Market Summary",
+                "- Current Regime: `BULL`",
+                "- Target Cash Ratio: `5%`",
+                "",
                 "## 4. Confirmed Trades",
                 "| Type | Symbol | Shares | Ref Price | Reason |",
                 "| :--- | :--- | :--- | :--- | :--- |",
@@ -468,6 +472,21 @@ def test_daily_plan_export_uses_latest_artifacts(tmp_path):
     assert result.data_source_key == "daily_plans"
     assert len(client.calls) == 1
     assert client.calls[0]["data_source_id"] == "db-daily-plan"
+    children = client.calls[0]["children"]
+    texts = [
+        block[block["type"]]["rich_text"][0]["text"]["content"]
+        for block in children
+    ]
+    assert "오늘의 운영 요약" in texts
+    assert "확정 거래" in texts
+    assert "검토 필요 항목" in texts
+    assert "경고" in texts
+    assert "원천 파일" in texts
+    assert any("BUY ABC 10 @ $12.34 - ENTRY_SIGNAL" in text for text in texts)
+    assert any("BRK-B 20 @ $480.90 - REVIEW_EXIT" in text for text in texts)
+    assert any("GEN [HIGH] WARNING_HIGHEST_PRICE_INCONSISTENT" in text for text in texts)
+    assert any("Markdown Path: " in text for text in texts)
+    assert any("JSON Path: " in text for text in texts)
 
 
 def test_daily_plan_export_requires_matching_artifacts(tmp_path):
@@ -481,6 +500,47 @@ def test_daily_plan_export_requires_matching_artifacts(tmp_path):
             paper_root=root,
             dry_run=True,
         )
+
+
+def test_daily_plan_export_falls_back_when_sections_are_missing(tmp_path):
+    root = tmp_path / "paper_test"
+    _write(
+        root / "daily_action_plan_20260520.md",
+        "\n".join(
+            [
+                "# Daily Action Plan [2026-05-20]",
+                "",
+                "## 1. Market Summary",
+                "- Current Regime: `BULL`",
+            ]
+        ),
+    )
+    _write(
+        root / "config_snapshots" / "paper_config_snapshot_20260520.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "plan_date": "2026-05-20",
+                "market_state": {"regime": "BULL"},
+            }
+        ),
+    )
+    client = FakeClient()
+    result = export_daily_plan_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        paper_root=root,
+        dry_run=False,
+    )
+    assert result.action == "updated"
+    texts = [
+        block[block["type"]]["rich_text"][0]["text"]["content"]
+        for block in client.calls[0]["children"]
+    ]
+    assert any("Section ## 4. could not be parsed." in text for text in texts)
+    assert any("Section ## 4-0. could not be parsed." in text for text in texts)
+    assert any("Section ## 4-0-1. could not be parsed." in text for text in texts)
 
 
 def test_export_selected_requires_target():
