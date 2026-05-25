@@ -212,6 +212,17 @@ def test_http_error_raises_clear_exception_without_token_leak():
     assert exc_info.value.response_body == '{"message":"unauthorized"}'
 
 
+def test_update_page_sends_properties_payload():
+    session = FakeSession([FakeResponse(200, {"id": "page-1"})])
+    client = NotionClient("secret-token", session=session)
+    payload = {"Status": {"select": {"name": "IMPORTED"}}}
+    result = client.update_page("page-1", payload)
+    assert result["id"] == "page-1"
+    assert session.calls[0]["method"] == "PATCH"
+    assert session.calls[0]["url"].endswith("/pages/page-1")
+    assert session.calls[0]["json"] == {"properties": payload}
+
+
 def test_retrieve_data_source_404_mentions_data_source_id_not_database_id():
     session = FakeSession([FakeResponse(404, text='{"message":"object_not_found"}')])
     client = NotionClient("secret-token", session=session)
