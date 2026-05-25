@@ -106,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         "committed_row_count": result.committed_row_count,
         "committed_trade_ids": result.committed_trade_ids,
         "backups": result.backups,
+        "current_state_written": result.current_state_written,
         "account_snapshot_written": result.account_snapshot_written,
         "position_snapshot_written": result.position_snapshot_written,
     }

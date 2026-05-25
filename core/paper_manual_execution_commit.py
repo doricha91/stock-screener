@@ -20,6 +20,7 @@ from core.paper_account_snapshot import (
     save_paper_account_snapshot,
 )
 from core.paper_account_state import build_paper_state_from_trades
+from core.paper_current_state_storage import save_paper_current_state
 from core.paper_execution_log import append_paper_execution_log
 from core.paper_market_valuation import value_paper_account_state
 from core.paper_position_snapshot import (
@@ -32,6 +33,7 @@ from core.paths import (
     dev_backups_dir,
     market_db_path,
     paper_account_snapshot_path,
+    paper_current_state_snapshot_path,
     paper_execution_log_path,
     paper_position_snapshot_path,
     paper_reports_dir,
@@ -54,6 +56,7 @@ class ManualExecutionCommitResult:
     committed_row_count: int
     committed_trade_ids: list[str]
     backups: dict[str, str | None]
+    current_state_written: bool
     account_snapshot_written: bool
     position_snapshot_written: bool
 
@@ -97,38 +100,8 @@ def commit_manual_execution_preview(
     if len(rows_to_append) != len(previews):
         raise ManualExecutionCommitError("Commit blocked because pre-check row count does not match preview candidate count.")
 
-    existing_rows = _read_csv_rows(log_path)
-    combined_rows = existing_rows + rows_to_append
     initial_cash, currency = _load_initial_cash_and_currency()
-    state = build_paper_state_from_trades(
-        combined_rows,
-        initial_cash=initial_cash,
-        currency=currency,
-    )
-    try:
-        market_valuation = value_paper_account_state(
-            state,
-            execution_date,
-            Path(market_db_path()),
-        )
-    except Exception as exc:
-        raise ManualExecutionCommitError(
-            f"Commit blocked because market valuation failed for {execution_date}: {exc}"
-        ) from exc
-
-    account_snapshot_row = build_paper_account_snapshot_row(
-        state,
-        execution_date,
-        initial_cash=initial_cash,
-        source_execution_log=str(log_path),
-        source_current_state="",
-        market_valuation=market_valuation,
-    )
-    position_snapshot_rows = build_paper_position_snapshot_rows(
-        state,
-        market_valuation,
-        execution_date,
-    )
+    current_state_path = paper_current_state_snapshot_path(execution_date)
 
     backup_paths = _create_dev_backups(
         execution_date=execution_date,
@@ -136,6 +109,7 @@ def commit_manual_execution_preview(
             "paper_execution_log": log_path,
             "paper_account_snapshot": paper_account_snapshot_path(),
             "paper_position_snapshot": paper_position_snapshot_path(),
+            "paper_current_state": current_state_path,
         },
     )
 
@@ -149,6 +123,41 @@ def commit_manual_execution_preview(
         if len(committed_rows) != len(rows_to_append):
             raise ManualExecutionCommitError("Execution log append count did not match pre-check count.")
 
+        committed_state = build_paper_state_from_trades(
+            _read_csv_rows(log_path),
+            initial_cash=initial_cash,
+            currency=currency,
+        )
+        try:
+            market_valuation = value_paper_account_state(
+                committed_state,
+                execution_date,
+                Path(market_db_path()),
+            )
+        except Exception as exc:
+            raise ManualExecutionCommitError(
+                f"Commit blocked because market valuation failed for {execution_date}: {exc}"
+            ) from exc
+
+        account_snapshot_row = build_paper_account_snapshot_row(
+            committed_state,
+            execution_date,
+            initial_cash=initial_cash,
+            source_execution_log=str(log_path),
+            source_current_state=str(current_state_path),
+            market_valuation=market_valuation,
+        )
+        position_snapshot_rows = build_paper_position_snapshot_rows(
+            committed_state,
+            market_valuation,
+            execution_date,
+        )
+        save_paper_current_state(
+            committed_state,
+            execution_date,
+            current_state_path,
+            PAPER_TEST_DIR / "archive",
+        )
         save_paper_account_snapshot(
             account_snapshot_row,
             paper_account_snapshot_path(),
@@ -173,6 +182,7 @@ def commit_manual_execution_preview(
                 "paper_execution_log": log_path,
                 "paper_account_snapshot": paper_account_snapshot_path(),
                 "paper_position_snapshot": paper_position_snapshot_path(),
+                "paper_current_state": current_state_path,
             },
             backup_paths=backup_paths,
         )
@@ -188,6 +198,7 @@ def commit_manual_execution_preview(
         committed_row_count=len(rows_to_append),
         committed_trade_ids=[str(row.get("trade_id") or "") for row in rows_to_append],
         backups={key: (None if path is None else str(path)) for key, path in backup_paths.items()},
+        current_state_written=True,
         account_snapshot_written=True,
         position_snapshot_written=True,
     )

@@ -218,15 +218,22 @@ def commit_env(monkeypatch):
     exec_path = _unique_path("paper_execution_log_manual_commit", ".csv")
     account_path = _unique_path("paper_account_snapshot_manual_commit", ".csv")
     position_path = _unique_path("paper_position_snapshot_manual_commit", ".csv")
+    current_state_path = _unique_path("paper_current_state_manual_commit", ".json")
     reports_dir = _unique_path("reports_manual_commit", "")
     backup_dir = _unique_output_dir("dev_backups_manual_commit")
     preview_path = _unique_path("manual_execution_preview_manual_commit", ".json")
+    current_state_dates: list[str] = []
     reports_dir.mkdir(parents=True, exist_ok=True)
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(commit_module, "paper_execution_log_path", lambda: exec_path)
     monkeypatch.setattr(commit_module, "paper_account_snapshot_path", lambda: account_path)
     monkeypatch.setattr(commit_module, "paper_position_snapshot_path", lambda: position_path)
+    def _current_state_path(date: str) -> Path:
+        current_state_dates.append(date)
+        return current_state_path
+
+    monkeypatch.setattr(commit_module, "paper_current_state_snapshot_path", _current_state_path)
     monkeypatch.setattr(commit_module, "paper_reports_dir", lambda: reports_dir)
     monkeypatch.setattr(commit_module, "dev_backups_dir", lambda: backup_dir)
     monkeypatch.setattr(commit_module, "market_db_path", lambda: str(_unique_path("market_db_unused", ".db")))
@@ -241,12 +248,14 @@ def commit_env(monkeypatch):
             "exec_path": exec_path,
             "account_path": account_path,
             "position_path": position_path,
+            "current_state_path": current_state_path,
+            "current_state_dates": current_state_dates,
             "reports_dir": reports_dir,
             "backup_dir": backup_dir,
             "preview_path": preview_path,
         }
     finally:
-        for path in [preview_path, exec_path, account_path, position_path]:
+        for path in [preview_path, exec_path, account_path, position_path, current_state_path]:
             if path.exists():
                 path.unlink()
         for directory in [reports_dir, backup_dir]:
@@ -301,14 +310,19 @@ def test_warning_preview_commits_with_allow_warnings(commit_env):
         allow_warnings=True,
     )
     assert result.committed_row_count == 1
+    assert result.current_state_written is True
     with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert len(rows) == 1
     assert rows[0]["shares"] == "1"
+    current_state = json.loads(commit_env["current_state_path"].read_text(encoding="utf-8"))
+    assert current_state["absolute_cash"] == 900.0
+    assert commit_env["current_state_dates"] == ["2026-05-25"]
     sidecar = json.loads(Path(result.commit_json_path).read_text(encoding="utf-8"))
     assert sidecar["committed_rows"][0]["commission"] == 0.0
     assert sidecar["committed_rows"][0]["currency"] == "USD"
     assert sidecar["committed_rows"][0]["broker"] is None
+    assert "paper_current_state" in result.backups
 
 
 def test_sell_commits_negative_shares(commit_env):
@@ -333,6 +347,8 @@ def test_sell_commits_negative_shares(commit_env):
     assert rows[-1]["side"] == "SELL"
     assert rows[-1]["shares"] == "-2"
     assert result.position_snapshot_written is True
+    current_state = json.loads(commit_env["current_state_path"].read_text(encoding="utf-8"))
+    assert current_state["shares"]["AAPL"] == 3
 
 
 def test_duplicate_trade_id_blocks_commit(commit_env):
@@ -396,3 +412,70 @@ def test_commit_preserves_execution_log_schema(commit_env):
     with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         assert reader.fieldnames == PAPER_EXECUTION_LOG_COLUMNS
+
+
+def test_commit_succeeds_when_current_state_did_not_preexist(commit_env):
+    assert not commit_env["current_state_path"].exists()
+    payload = _preview_payload(
+        date="2026-05-25",
+        commit_allowed="true",
+        fail_count=0,
+        warning_count=0,
+        candidates=[_candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    result = commit_manual_execution_preview(
+        execution_date="2026-05-25",
+        preview_json_path=commit_env["preview_path"],
+    )
+    assert result.backups["paper_current_state"] is None
+    assert commit_env["current_state_path"].exists()
+
+
+def test_existing_current_state_is_backed_up(commit_env):
+    commit_env["current_state_path"].write_text(
+        json.dumps({"current_symbols": [], "current_cash_ratio": 1.0, "current_hedge_ratio": 0.0, "absolute_cash": 1000.0, "shares": {}, "avg_price": {}, "highest_prices": {}}),
+        encoding="utf-8",
+    )
+    payload = _preview_payload(
+        date="2026-05-25",
+        commit_allowed="true",
+        fail_count=0,
+        warning_count=0,
+        candidates=[_candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    result = commit_manual_execution_preview(
+        execution_date="2026-05-25",
+        preview_json_path=commit_env["preview_path"],
+    )
+    backup_path = result.backups["paper_current_state"]
+    assert backup_path is not None
+    assert Path(backup_path).exists()
+
+
+def test_current_state_save_failure_rolls_back(commit_env, monkeypatch):
+    payload = _preview_payload(
+        date="2026-05-25",
+        commit_allowed="true",
+        fail_count=0,
+        warning_count=0,
+        candidates=[_candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+
+    def _raise_current_state(*args, **kwargs):
+        raise RuntimeError("boom_current_state")
+
+    monkeypatch.setattr(commit_module, "save_paper_current_state", _raise_current_state)
+
+    with pytest.raises(ManualExecutionCommitError, match="boom_current_state"):
+        commit_manual_execution_preview(
+            execution_date="2026-05-25",
+            preview_json_path=commit_env["preview_path"],
+        )
+
+    with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows == []
+    assert not commit_env["current_state_path"].exists()

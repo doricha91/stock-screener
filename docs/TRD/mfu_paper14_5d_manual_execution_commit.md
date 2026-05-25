@@ -121,3 +121,18 @@ commit 후 다음을 갱신한다.
 - Daily Review Summary export
 - broker/API 연동
 - execution log schema 확장
+## 5D-2 Addendum: current_state refresh
+
+- `paper_current_state_YYYYMMDD.json` is included in the Manual Execution commit set.
+- This follows the 5D-1 recommendation to keep the manual commit semantics aligned with the official EOD commit flow.
+- `paper_current_state` is still a derived artifact from `paper_execution_log.csv`, not a source of truth.
+- Backup scope is expanded to four artifacts:
+  - `paper_execution_log.csv`
+  - `paper_account_snapshot.csv`
+  - `paper_position_snapshot.csv`
+  - `paper_current_state_YYYYMMDD.json`
+- The current state payload must be generated through the existing helper path:
+  - `build_paper_state_from_trades()`
+  - `save_paper_current_state()`
+- If current state save fails, the manual execution commit must fail clearly and restore prior files from backup.
+- Notion back-write remains out of scope and stays deferred to PAPER14-5E.
