@@ -144,6 +144,36 @@ class NotionClient:
         )
         return result.get("results", [])
 
+    def query_data_source(
+        self,
+        data_source_id: str,
+        *,
+        filter_payload: dict[str, Any] | None = None,
+        sorts: list[dict[str, Any]] | None = None,
+        page_size: int = 100,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        next_cursor: str | None = None
+        while True:
+            payload: dict[str, Any] = {"page_size": page_size}
+            if filter_payload:
+                payload["filter"] = filter_payload
+            if sorts:
+                payload["sorts"] = sorts
+            if next_cursor:
+                payload["start_cursor"] = next_cursor
+            response = self._request_json(
+                "POST",
+                f"/data_sources/{data_source_id}/query",
+                json_payload=payload,
+            )
+            results.extend(response.get("results", []))
+            if not response.get("has_more"):
+                return results
+            next_cursor = response.get("next_cursor")
+            if not next_cursor:
+                return results
+
     def create_page(
         self,
         data_source_id: str,

@@ -16,7 +16,7 @@ WARNING = "WARNING"
 @dataclass(frozen=True)
 class ExpectedProperty:
     source_key: str
-    notion_type: str
+    notion_type: str | tuple[str, ...]
     required: bool = True
     select_options: tuple[str, ...] = ()
     check_options: bool = False
@@ -40,12 +40,10 @@ class DataSourceValidationResult:
 
 
 def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, list[ExpectedProperty]]:
-    weekly = get_mapping_section(mapping_root, "weekly_reports")
-    benchmark = get_mapping_section(mapping_root, "benchmark_reports")
-    account = get_mapping_section(mapping_root, "account_snapshots")
-    daily_plan = get_mapping_section(mapping_root, "daily_plans")
-    return {
-        "weekly_reports": [
+    schemas: dict[str, list[ExpectedProperty]] = {}
+    if "weekly_reports" in mapping_root:
+        weekly = get_mapping_section(mapping_root, "weekly_reports")
+        schemas["weekly_reports"] = [
             _expected(weekly, "name", "title"),
             _expected(weekly, "external_key", "rich_text"),
             _expected(weekly, "period.actual_start", "date"),
@@ -65,8 +63,10 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(weekly, "schema_version", "rich_text"),
             _expected(weekly, "synced_at", "rich_text"),
             _expected(weekly, "sync_status", "select", select_options=("SYNCED",), check_options=True),
-        ],
-        "benchmark_reports": [
+        ]
+    if "benchmark_reports" in mapping_root:
+        benchmark = get_mapping_section(mapping_root, "benchmark_reports")
+        schemas["benchmark_reports"] = [
             _expected(benchmark, "name", "title"),
             _expected(benchmark, "external_key", "rich_text"),
             _expected(benchmark, "latest_snapshot_date", "date"),
@@ -88,8 +88,10 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(benchmark, "schema_version", "rich_text"),
             _expected(benchmark, "synced_at", "rich_text"),
             _expected(benchmark, "sync_status", "select", select_options=("SYNCED",), check_options=True),
-        ],
-        "account_snapshots": [
+        ]
+    if "account_snapshots" in mapping_root:
+        account = get_mapping_section(mapping_root, "account_snapshots")
+        schemas["account_snapshots"] = [
             _expected(account, "name", "title"),
             _expected(account, "external_key", "rich_text"),
             _expected(account, "snapshot_date", "date"),
@@ -106,8 +108,10 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(account, "valuation_price_date", "date"),
             _expected(account, "synced_at", "rich_text"),
             _expected(account, "sync_status", "select", select_options=("SYNCED",), check_options=True),
-        ],
-        "daily_plans": [
+        ]
+    if "daily_plans" in mapping_root:
+        daily_plan = get_mapping_section(mapping_root, "daily_plans")
+        schemas["daily_plans"] = [
             _expected(daily_plan, "name", "title"),
             _expected(daily_plan, "external_key", "rich_text"),
             _expected(daily_plan, "plan_date", "date"),
@@ -120,8 +124,51 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(daily_plan, "schema_version", "rich_text"),
             _expected(daily_plan, "synced_at", "rich_text"),
             _expected(daily_plan, "sync_status", "select", select_options=("SYNCED",), check_options=True),
-        ],
-    }
+        ]
+    if "manual_executions" in mapping_root:
+        manual_execution = get_mapping_section(mapping_root, "manual_executions")
+        schemas["manual_executions"] = [
+            _expected(manual_execution, "name", "title"),
+            _expected(manual_execution, "execution_date", "date"),
+            _expected(manual_execution, "symbol", "rich_text"),
+            _expected(manual_execution, "side", "select", select_options=("BUY", "SELL"), check_options=True),
+            _expected(manual_execution, "quantity", "number"),
+            _expected(manual_execution, "actual_price", "number"),
+            _expected(
+                manual_execution,
+                "status",
+                "select",
+                select_options=("DRAFT", "READY", "IMPORTED", "REJECTED"),
+                check_options=True,
+            ),
+            _expected(manual_execution, "external_key", "rich_text", required=False),
+            _expected(manual_execution, "plan_date", "date", required=False),
+            _expected(manual_execution, "commission", "number", required=False),
+            _expected(manual_execution, "currency", "select", required=False, select_options=("USD", "KRW"), check_options=True),
+            _expected(manual_execution, "broker", ("select", "rich_text"), required=False),
+            _expected(manual_execution, "note", "rich_text", required=False),
+            _expected(manual_execution, "linked_daily_plan_key", "rich_text", required=False),
+            _expected(
+                manual_execution,
+                "validation_status",
+                "select",
+                required=False,
+                select_options=("NOT_CHECKED", "PASS", "WARNING", "FAIL"),
+                check_options=True,
+            ),
+            _expected(manual_execution, "validation_message", "rich_text", required=False),
+            _expected(
+                manual_execution,
+                "import_status",
+                "select",
+                required=False,
+                select_options=("NOT_IMPORTED", "PREVIEWED", "COMMITTED", "SKIPPED"),
+                check_options=True,
+            ),
+            _expected(manual_execution, "imported_at", "rich_text", required=False),
+            _expected(manual_execution, "synced_at", "rich_text", required=False),
+        ]
+    return schemas
 
 
 def validate_data_source_schema(
@@ -142,27 +189,32 @@ def validate_data_source_schema(
         property_name = expected.source_key
         actual = actual_properties.get(property_name)
         if actual is None:
-            issues.append(
-                ValidationIssue(
-                    severity=FAIL,
-                    property_name=property_name,
-                    code="missing_property",
-                    message=f"{property_name} is missing.",
+            if expected.required:
+                issues.append(
+                    ValidationIssue(
+                        severity=FAIL,
+                        property_name=property_name,
+                        code="missing_property",
+                        message=f"{property_name} is missing.",
+                    )
                 )
-            )
             continue
         actual_type = str(actual.get("type") or "").strip()
-        if actual_type != expected.notion_type:
+        expected_types = _expected_types(expected.notion_type)
+        if actual_type not in expected_types:
             issues.append(
                 ValidationIssue(
                     severity=FAIL,
                     property_name=property_name,
                     code="type_mismatch",
-                    message=f"{property_name} expected {expected.notion_type}, got {actual_type or 'unknown'}.",
+                    message=(
+                        f"{property_name} expected {_format_expected_types(expected_types)}, "
+                        f"got {actual_type or 'unknown'}."
+                    ),
                 )
             )
             continue
-        if expected.notion_type == "select" and expected.check_options and expected.select_options:
+        if actual_type == "select" and expected.check_options and expected.select_options:
             available = _extract_select_options(actual)
             missing = [option for option in expected.select_options if option not in available]
             if missing:
@@ -201,6 +253,7 @@ def validate_selected_data_sources(
         "benchmark_reports": "NOTION_BENCHMARK_REPORTS_DATA_SOURCE_ID",
         "account_snapshots": "NOTION_ACCOUNT_SNAPSHOTS_DATA_SOURCE_ID",
         "daily_plans": "NOTION_DAILY_PLANS_DATA_SOURCE_ID",
+        "manual_executions": "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID",
     }
     results: list[DataSourceValidationResult] = []
     for target in targets:
@@ -212,7 +265,7 @@ def validate_selected_data_sources(
                 env_override=env_override_map[target],
             )
         except NotionSettingsError as exc:
-            if target != "daily_plans":
+            if target not in {"daily_plans", "manual_executions"}:
                 raise
             expected_schema = build_expected_schema(mapping_root)
             results.append(
@@ -225,7 +278,7 @@ def validate_selected_data_sources(
                             severity=WARNING,
                             property_name=None,
                             code="missing_data_source_id",
-                            message=f"{exc} Skipping read-only schema validation for daily_plans.",
+                            message=f"{exc} Skipping read-only schema validation for {target}.",
                         )
                     ],
                     checked_property_count=len(expected_schema[target]),
@@ -283,7 +336,7 @@ def validation_results_to_json(results: list[DataSourceValidationResult]) -> dic
 def _expected(
     mapping_section: dict[str, str],
     source_key: str,
-    notion_type: str,
+    notion_type: str | tuple[str, ...],
     *,
     required: bool = True,
     select_options: tuple[str, ...] = (),
@@ -338,3 +391,15 @@ def _derive_status(issues: list[ValidationIssue]) -> str:
     if WARNING in severities:
         return WARNING
     return PASS
+
+
+def _expected_types(value: str | tuple[str, ...]) -> tuple[str, ...]:
+    if isinstance(value, tuple):
+        return value
+    return (value,)
+
+
+def _format_expected_types(expected_types: tuple[str, ...]) -> str:
+    if len(expected_types) == 1:
+        return expected_types[0]
+    return " or ".join(expected_types)

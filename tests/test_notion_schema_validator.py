@@ -88,6 +88,27 @@ def _mapping() -> dict[str, dict[str, str]]:
             "synced_at": "Synced At",
             "sync_status": "Sync Status",
         },
+        "manual_executions": {
+            "name": "Name",
+            "execution_date": "Execution Date",
+            "symbol": "Symbol",
+            "side": "Side",
+            "quantity": "Quantity",
+            "actual_price": "Actual Price",
+            "status": "Status",
+            "external_key": "External Key",
+            "plan_date": "Plan Date",
+            "commission": "Commission",
+            "currency": "Currency",
+            "broker": "Broker",
+            "note": "Note",
+            "linked_daily_plan_key": "Linked Daily Plan Key",
+            "validation_status": "Validation Status",
+            "validation_message": "Validation Message",
+            "import_status": "Import Status",
+            "imported_at": "Imported At",
+            "synced_at": "Synced At",
+        },
     }
 
 
@@ -147,9 +168,42 @@ def _daily_plan_schema(*, sync_options=None) -> dict:
     }
 
 
+def _manual_execution_schema(*, broker_type="select", currency_options=None) -> dict:
+    broker_property = _property("Broker", broker_type)
+    return {
+        "properties": {
+            "Name": _property("Name", "title"),
+            "Execution Date": _property("Execution Date", "date"),
+            "Symbol": _property("Symbol", "rich_text"),
+            "Side": _property("Side", "select", options=["BUY", "SELL"]),
+            "Quantity": _property("Quantity", "number"),
+            "Actual Price": _property("Actual Price", "number"),
+            "Status": _property("Status", "select", options=["DRAFT", "READY", "IMPORTED", "REJECTED"]),
+            "External Key": _property("External Key", "rich_text"),
+            "Plan Date": _property("Plan Date", "date"),
+            "Commission": _property("Commission", "number"),
+            "Currency": _property("Currency", "select", options=currency_options or ["USD", "KRW"]),
+            "Broker": broker_property,
+            "Note": _property("Note", "rich_text"),
+            "Linked Daily Plan Key": _property("Linked Daily Plan Key", "rich_text"),
+            "Validation Status": _property("Validation Status", "select", options=["NOT_CHECKED", "PASS", "WARNING", "FAIL"]),
+            "Validation Message": _property("Validation Message", "rich_text"),
+            "Import Status": _property("Import Status", "select", options=["NOT_IMPORTED", "PREVIEWED", "COMMITTED", "SKIPPED"]),
+            "Imported At": _property("Imported At", "rich_text"),
+            "Synced At": _property("Synced At", "rich_text"),
+        }
+    }
+
+
 def test_expected_schema_is_built_for_all_targets():
     schema = build_expected_schema(_mapping())
-    assert set(schema.keys()) == {"weekly_reports", "benchmark_reports", "account_snapshots", "daily_plans"}
+    assert set(schema.keys()) == {
+        "weekly_reports",
+        "benchmark_reports",
+        "account_snapshots",
+        "daily_plans",
+        "manual_executions",
+    }
 
 
 def test_validate_schema_passes_when_all_required_properties_match():
@@ -250,3 +304,48 @@ def test_daily_plan_type_mismatch_is_fail():
     )
     assert result.status == FAIL
     assert any(issue.code == "type_mismatch" for issue in result.issues)
+
+
+def test_manual_execution_schema_passes_when_required_properties_match():
+    result = validate_data_source_schema(
+        target="manual_executions",
+        data_source_id="ds-manual",
+        actual_schema=_manual_execution_schema(),
+        mapping_root=_mapping(),
+    )
+    assert result.status == PASS
+    assert result.issues == []
+
+
+def test_manual_execution_optional_broker_accepts_rich_text():
+    result = validate_data_source_schema(
+        target="manual_executions",
+        data_source_id="ds-manual",
+        actual_schema=_manual_execution_schema(broker_type="rich_text"),
+        mapping_root=_mapping(),
+    )
+    assert result.status == PASS
+
+
+def test_manual_execution_required_property_missing_is_fail():
+    schema = _manual_execution_schema()
+    schema["properties"].pop("Actual Price")
+    result = validate_data_source_schema(
+        target="manual_executions",
+        data_source_id="ds-manual",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == FAIL
+    assert any(issue.property_name == "Actual Price" for issue in result.issues)
+
+
+def test_manual_execution_missing_select_options_is_warning():
+    result = validate_data_source_schema(
+        target="manual_executions",
+        data_source_id="ds-manual",
+        actual_schema=_manual_execution_schema(currency_options=["USD"]),
+        mapping_root=_mapping(),
+    )
+    assert result.status == WARNING
+    assert any(issue.code == "missing_select_options" for issue in result.issues)

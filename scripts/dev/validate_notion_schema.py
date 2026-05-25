@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark", action="store_true", help="Validate benchmark_reports")
     parser.add_argument("--account-snapshot", action="store_true", help="Validate account_snapshots")
     parser.add_argument("--daily-plan", action="store_true", help="Validate daily_plans")
+    parser.add_argument("--manual-executions", action="store_true", help="Validate manual_executions")
     parser.add_argument("--all", action="store_true", help="Validate all supported data sources")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary")
     return parser
@@ -51,8 +52,13 @@ def _resolve_targets(args: argparse.Namespace) -> list[str]:
         targets.append("account_snapshots")
     if args.daily_plan or args.all:
         targets.append("daily_plans")
+    if args.manual_executions or args.all:
+        targets.append("manual_executions")
     if not targets:
-        raise SystemExit("Select at least one target: --weekly, --benchmark, --account-snapshot, --daily-plan, or --all")
+        raise SystemExit(
+            "Select at least one target: --weekly, --benchmark, --account-snapshot, "
+            "--daily-plan, --manual-executions, or --all"
+        )
     return targets
 
 

@@ -94,5 +94,26 @@
     "symbol": "Symbol",
     "status": "Status",
     "note": "Note"
+  },
+  "manual_executions": {
+    "name": "Name",
+    "external_key": "External Key",
+    "execution_date": "Execution Date",
+    "plan_date": "Plan Date",
+    "symbol": "Symbol",
+    "side": "Side",
+    "quantity": "Quantity",
+    "actual_price": "Actual Price",
+    "commission": "Commission",
+    "currency": "Currency",
+    "broker": "Broker",
+    "status": "Status",
+    "linked_daily_plan_key": "Linked Daily Plan Key",
+    "note": "Note",
+    "validation_status": "Validation Status",
+    "validation_message": "Validation Message",
+    "import_status": "Import Status",
+    "imported_at": "Imported At",
+    "synced_at": "Synced At"
   }
 }

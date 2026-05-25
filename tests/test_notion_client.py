@@ -52,6 +52,23 @@ def test_query_by_external_key_payload_is_correct():
     assert payload["filter"]["rich_text"]["equals"] == "ext-1"
 
 
+def test_query_data_source_paginates_until_complete():
+    session = FakeSession(
+        [
+            FakeResponse(200, {"results": [{"id": "row-1"}], "has_more": True, "next_cursor": "cursor-2"}),
+            FakeResponse(200, {"results": [{"id": "row-2"}], "has_more": False, "next_cursor": None}),
+        ]
+    )
+    client = NotionClient("secret-token", session=session)
+    rows = client.query_data_source(
+        "ds1",
+        filter_payload={"property": "Status", "select": {"equals": "READY"}},
+    )
+    assert [row["id"] for row in rows] == ["row-1", "row-2"]
+    assert session.calls[0]["json"]["filter"]["property"] == "Status"
+    assert session.calls[1]["json"]["start_cursor"] == "cursor-2"
+
+
 def test_upsert_creates_when_no_existing_row():
     session = FakeSession(
         [
