@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from core.daily_review_summary_exporter import (
+    build_daily_review_summary,
+    build_daily_review_summary_external_key,
+)
 from core.notion_client import (
     NotionClient,
     notion_date,
@@ -233,6 +237,60 @@ def _build_daily_plan_children(summary: dict[str, Any], markdown_path: Path, jso
     return children
 
 
+def _build_daily_review_summary_children(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    children: list[dict[str, Any]] = [
+        _heading_block("오늘의 리뷰 요약"),
+        _bulleted_list_item_block(f"Review Date: {summary['review_date']}"),
+        _bulleted_list_item_block(f"Review Status: {summary['review_status']}"),
+        _bulleted_list_item_block(f"Committed Trades: {summary['committed_trade_count']}"),
+        _bulleted_list_item_block(f"Warnings: {summary['warning_count']}"),
+        _bulleted_list_item_block(
+            f"Cash Start / End / Impact: {summary['cash_start']:.2f} / {summary['cash_end']:.2f} / {summary['cash_impact']:.2f}"
+        ),
+        _heading_block("체결 요약"),
+    ]
+    trade_items = summary.get("committed_trade_items") or []
+    if trade_items:
+        for item in trade_items:
+            children.append(
+                _bulleted_list_item_block(
+                    f"{item['symbol']} {item['side']} {item['quantity']} @ {item['actual_price']} - {item['trade_id']}"
+                )
+            )
+    else:
+        children.append(_paragraph_block("No committed manual execution activity for the review date."))
+
+    children.append(_heading_block("포지션 변화"))
+    for line in summary.get("position_impact_lines") or ["No position impact summary available."]:
+        children.append(_bulleted_list_item_block(line))
+
+    children.append(_heading_block("경고 / 특이사항"))
+    warning_items = summary.get("warning_items") or []
+    if warning_items:
+        for warning in warning_items:
+            children.append(_bulleted_list_item_block(warning))
+    else:
+        children.append(_paragraph_block("OK"))
+
+    children.extend(
+        [
+            _heading_block("원천 파일"),
+            _bulleted_list_item_block(f"Commit Report Path: {summary.get('commit_report_path') or '-'}"),
+            _bulleted_list_item_block(f"Preview Report Path: {summary.get('preview_report_path') or '-'}"),
+            _bulleted_list_item_block(
+                f"Account Snapshot Path: {(summary.get('source_paths') or {}).get('account_snapshot_path') or '-'}"
+            ),
+            _bulleted_list_item_block(
+                f"Position Snapshot Path: {(summary.get('source_paths') or {}).get('position_snapshot_path') or '-'}"
+            ),
+            _bulleted_list_item_block(
+                f"Current State Path: {(summary.get('source_paths') or {}).get('current_state_path') or '-'}"
+            ),
+        ]
+    )
+    return children
+
+
 def _build_daily_plan_detail_blocks(
     *,
     title: str,
@@ -447,6 +505,49 @@ def build_daily_plan_properties(
         resolve_notion_property_name(mapping, "json_path"): notion_rich_text(_relative_to_project(json_path)),
         resolve_notion_property_name(mapping, "schema_version"): notion_rich_text(
             str(summary.get("schema_version", ""))
+        ),
+        resolve_notion_property_name(mapping, "synced_at"): notion_rich_text(synced_at),
+        resolve_notion_property_name(mapping, "sync_status"): notion_select("SYNCED"),
+    }
+    return properties
+
+
+def build_daily_review_summary_properties(
+    summary: dict[str, Any],
+    mapping: dict[str, str],
+    *,
+    synced_at: str,
+) -> dict[str, Any]:
+    properties = {
+        resolve_notion_property_name(mapping, "name"): notion_title(
+            f"Daily Review Summary {summary['review_date']}"
+        ),
+        resolve_notion_property_name(mapping, "external_key"): notion_rich_text(
+            build_daily_review_summary_external_key(summary["review_date"])
+        ),
+        resolve_notion_property_name(mapping, "review_date"): notion_date(summary["review_date"]),
+        resolve_notion_property_name(mapping, "review_status"): notion_select(summary["review_status"]),
+        resolve_notion_property_name(mapping, "availability_status"): notion_select(summary["availability_status"]),
+        resolve_notion_property_name(mapping, "committed_trade_count"): notion_number(summary["committed_trade_count"]),
+        resolve_notion_property_name(mapping, "warning_count"): notion_number(summary["warning_count"]),
+        resolve_notion_property_name(mapping, "fail_count"): notion_number(summary["fail_count"]),
+        resolve_notion_property_name(mapping, "cash_start"): notion_number(summary["cash_start"]),
+        resolve_notion_property_name(mapping, "cash_end"): notion_number(summary["cash_end"]),
+        resolve_notion_property_name(mapping, "cash_impact"): notion_number(summary["cash_impact"]),
+        resolve_notion_property_name(mapping, "position_impact_summary"): notion_rich_text(
+            summary["position_impact_summary"]
+        ),
+        resolve_notion_property_name(mapping, "commit_report_path"): notion_rich_text(
+            summary.get("commit_report_path") or ""
+        ),
+        resolve_notion_property_name(mapping, "preview_report_path"): notion_rich_text(
+            summary.get("preview_report_path") or ""
+        ),
+        resolve_notion_property_name(mapping, "latest_snapshot_date"): notion_date(
+            summary["latest_snapshot_date"]
+        ),
+        resolve_notion_property_name(mapping, "schema_version"): notion_rich_text(
+            summary["schema_version"]
         ),
         resolve_notion_property_name(mapping, "synced_at"): notion_rich_text(synced_at),
         resolve_notion_property_name(mapping, "sync_status"): notion_select("SYNCED"),
@@ -886,6 +987,42 @@ def export_daily_plan_to_notion(
     )
 
 
+def export_daily_review_summary_to_notion(
+    *,
+    client: NotionClient | None,
+    settings: NotionSettings,
+    mapping_root: dict[str, dict[str, str]],
+    review_date: str,
+    paper_root: Path | None = None,
+    dry_run: bool = False,
+) -> ExportResult:
+    root = Path(paper_root) if paper_root is not None else paper_reports_dir().parent
+    summary = build_daily_review_summary(review_date=review_date, paper_root=root)
+    mapping = get_mapping_section(mapping_root, "daily_review_summaries")
+    synced_at = datetime.now(timezone.utc).isoformat()
+    external_key = build_daily_review_summary_external_key(summary["review_date"])
+    properties = build_daily_review_summary_properties(summary, mapping, synced_at=synced_at)
+    data_source_id = None if dry_run else get_notion_data_source_id(
+        settings,
+        "daily_review_summaries",
+        env_override="NOTION_DAILY_REVIEW_SUMMARIES_DATA_SOURCE_ID",
+    )
+    source_path = root / "reports" / f"manual_execution_import_commit_{review_date.replace('-', '')}.json"
+    return _upsert_or_dry_run(
+        client=client,
+        data_source_id=data_source_id,
+        external_key=external_key,
+        external_key_property_name=resolve_notion_property_name(mapping, "external_key"),
+        properties=properties,
+        children=_build_daily_review_summary_children(summary),
+        target="daily_review_summaries",
+        source_path=source_path,
+        data_source_key="daily_review_summaries",
+        dry_run=dry_run,
+        refresh_children_on_update=False,
+    )
+
+
 def export_selected_paper_reports_to_notion(
     *,
     client: NotionClient | None,
@@ -895,10 +1032,12 @@ def export_selected_paper_reports_to_notion(
     export_benchmark: bool = False,
     export_account_snapshot: bool = False,
     export_daily_plan: bool = False,
+    export_daily_review_summary: bool = False,
+    review_date: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> list[ExportResult]:
-    if not any([export_weekly, export_benchmark, export_account_snapshot, export_daily_plan]):
+    if not any([export_weekly, export_benchmark, export_account_snapshot, export_daily_plan, export_daily_review_summary]):
         raise NotionExportError("No export targets selected.")
 
     results: list[ExportResult] = []
@@ -938,6 +1077,19 @@ def export_selected_paper_reports_to_notion(
                 client=client,
                 settings=settings,
                 mapping_root=mapping_root,
+                paper_root=paper_root,
+                dry_run=dry_run,
+            )
+        )
+    if export_daily_review_summary:
+        if not review_date:
+            raise NotionExportError("review_date is required for daily_review_summaries export.")
+        results.append(
+            export_daily_review_summary_to_notion(
+                client=client,
+                settings=settings,
+                mapping_root=mapping_root,
+                review_date=review_date,
                 paper_root=paper_root,
                 dry_run=dry_run,
             )

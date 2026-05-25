@@ -109,6 +109,26 @@ def _mapping() -> dict[str, dict[str, str]]:
             "imported_at": "Imported At",
             "synced_at": "Synced At",
         },
+        "daily_review_summaries": {
+            "name": "Name",
+            "external_key": "External Key",
+            "review_date": "Review Date",
+            "review_status": "Review Status",
+            "availability_status": "Availability Status",
+            "committed_trade_count": "Committed Trade Count",
+            "warning_count": "Warning Count",
+            "fail_count": "Fail Count",
+            "cash_start": "Cash Start",
+            "cash_end": "Cash End",
+            "cash_impact": "Cash Impact",
+            "position_impact_summary": "Position Impact Summary",
+            "commit_report_path": "Commit Report Path",
+            "preview_report_path": "Preview Report Path",
+            "latest_snapshot_date": "Latest Snapshot Date",
+            "schema_version": "Schema Version",
+            "synced_at": "Synced At",
+            "sync_status": "Sync Status",
+        },
     }
 
 
@@ -195,6 +215,31 @@ def _manual_execution_schema(*, broker_type="select", currency_options=None) -> 
     }
 
 
+def _daily_review_schema(*, review_options=None, availability_options=None, sync_options=None) -> dict:
+    return {
+        "properties": {
+            "Name": _property("Name", "title"),
+            "External Key": _property("External Key", "rich_text"),
+            "Review Date": _property("Review Date", "date"),
+            "Review Status": _property("Review Status", "select", options=review_options or ["PASS", "PASS_WITH_WARNINGS", "FAIL", "NO_ACTIVITY"]),
+            "Availability Status": _property("Availability Status", "select", options=availability_options or ["AVAILABLE", "NO_COMMIT_REPORT", "NO_MANUAL_EXECUTIONS", "PARTIAL", "UNKNOWN"]),
+            "Committed Trade Count": _property("Committed Trade Count", "number"),
+            "Warning Count": _property("Warning Count", "number"),
+            "Fail Count": _property("Fail Count", "number"),
+            "Cash Start": _property("Cash Start", "number"),
+            "Cash End": _property("Cash End", "number"),
+            "Cash Impact": _property("Cash Impact", "number"),
+            "Position Impact Summary": _property("Position Impact Summary", "rich_text"),
+            "Commit Report Path": _property("Commit Report Path", "rich_text"),
+            "Preview Report Path": _property("Preview Report Path", "rich_text"),
+            "Latest Snapshot Date": _property("Latest Snapshot Date", "date"),
+            "Schema Version": _property("Schema Version", "rich_text"),
+            "Synced At": _property("Synced At", "rich_text"),
+            "Sync Status": _property("Sync Status", "select", options=sync_options or ["SYNCED"]),
+        }
+    }
+
+
 def test_expected_schema_is_built_for_all_targets():
     schema = build_expected_schema(_mapping())
     assert set(schema.keys()) == {
@@ -203,6 +248,7 @@ def test_expected_schema_is_built_for_all_targets():
         "account_snapshots",
         "daily_plans",
         "manual_executions",
+        "daily_review_summaries",
     }
 
 
@@ -345,6 +391,41 @@ def test_manual_execution_missing_select_options_is_warning():
         target="manual_executions",
         data_source_id="ds-manual",
         actual_schema=_manual_execution_schema(currency_options=["USD"]),
+        mapping_root=_mapping(),
+    )
+    assert result.status == WARNING
+    assert any(issue.code == "missing_select_options" for issue in result.issues)
+
+
+def test_daily_review_schema_passes_when_required_properties_match():
+    result = validate_data_source_schema(
+        target="daily_review_summaries",
+        data_source_id="ds-review",
+        actual_schema=_daily_review_schema(),
+        mapping_root=_mapping(),
+    )
+    assert result.status == PASS
+    assert result.issues == []
+
+
+def test_daily_review_missing_property_is_fail():
+    schema = _daily_review_schema()
+    schema["properties"].pop("Cash Impact")
+    result = validate_data_source_schema(
+        target="daily_review_summaries",
+        data_source_id="ds-review",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == FAIL
+    assert any(issue.property_name == "Cash Impact" for issue in result.issues)
+
+
+def test_daily_review_missing_select_options_is_warning():
+    result = validate_data_source_schema(
+        target="daily_review_summaries",
+        data_source_id="ds-review",
+        actual_schema=_daily_review_schema(review_options=["PASS"], availability_options=["AVAILABLE"], sync_options=[]),
         mapping_root=_mapping(),
     )
     assert result.status == WARNING

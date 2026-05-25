@@ -168,6 +168,40 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(manual_execution, "imported_at", "rich_text", required=False),
             _expected(manual_execution, "synced_at", "rich_text", required=False),
         ]
+    if "daily_review_summaries" in mapping_root:
+        daily_review = get_mapping_section(mapping_root, "daily_review_summaries")
+        schemas["daily_review_summaries"] = [
+            _expected(daily_review, "name", "title"),
+            _expected(daily_review, "external_key", "rich_text"),
+            _expected(daily_review, "review_date", "date"),
+            _expected(
+                daily_review,
+                "review_status",
+                "select",
+                select_options=("PASS", "PASS_WITH_WARNINGS", "FAIL", "NO_ACTIVITY"),
+                check_options=True,
+            ),
+            _expected(
+                daily_review,
+                "availability_status",
+                "select",
+                select_options=("AVAILABLE", "NO_COMMIT_REPORT", "NO_MANUAL_EXECUTIONS", "PARTIAL", "UNKNOWN"),
+                check_options=True,
+            ),
+            _expected(daily_review, "committed_trade_count", "number"),
+            _expected(daily_review, "warning_count", "number"),
+            _expected(daily_review, "fail_count", "number"),
+            _expected(daily_review, "cash_start", "number"),
+            _expected(daily_review, "cash_end", "number"),
+            _expected(daily_review, "cash_impact", "number"),
+            _expected(daily_review, "position_impact_summary", "rich_text"),
+            _expected(daily_review, "commit_report_path", "rich_text"),
+            _expected(daily_review, "preview_report_path", "rich_text"),
+            _expected(daily_review, "latest_snapshot_date", "date"),
+            _expected(daily_review, "schema_version", "rich_text"),
+            _expected(daily_review, "synced_at", "rich_text"),
+            _expected(daily_review, "sync_status", "select", select_options=("SYNCED",), check_options=True),
+        ]
     return schemas
 
 
@@ -254,6 +288,7 @@ def validate_selected_data_sources(
         "account_snapshots": "NOTION_ACCOUNT_SNAPSHOTS_DATA_SOURCE_ID",
         "daily_plans": "NOTION_DAILY_PLANS_DATA_SOURCE_ID",
         "manual_executions": "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID",
+        "daily_review_summaries": "NOTION_DAILY_REVIEW_SUMMARIES_DATA_SOURCE_ID",
     }
     results: list[DataSourceValidationResult] = []
     for target in targets:
@@ -265,7 +300,7 @@ def validate_selected_data_sources(
                 env_override=env_override_map[target],
             )
         except NotionSettingsError as exc:
-            if target not in {"daily_plans", "manual_executions"}:
+            if target not in {"daily_plans", "manual_executions", "daily_review_summaries"}:
                 raise
             expected_schema = build_expected_schema(mapping_root)
             results.append(

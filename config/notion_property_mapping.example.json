@@ -84,7 +84,24 @@
     "sync_status": "Sync Status"
   },
   "daily_review_summaries": {
-    "latest_snapshot_date": "Latest Snapshot Date"
+    "name": "Name",
+    "external_key": "External Key",
+    "review_date": "Review Date",
+    "review_status": "Review Status",
+    "availability_status": "Availability Status",
+    "committed_trade_count": "Committed Trade Count",
+    "warning_count": "Warning Count",
+    "fail_count": "Fail Count",
+    "cash_start": "Cash Start",
+    "cash_end": "Cash End",
+    "cash_impact": "Cash Impact",
+    "position_impact_summary": "Position Impact Summary",
+    "commit_report_path": "Commit Report Path",
+    "preview_report_path": "Preview Report Path",
+    "latest_snapshot_date": "Latest Snapshot Date",
+    "schema_version": "Schema Version",
+    "synced_at": "Synced At",
+    "sync_status": "Sync Status"
   },
   "performance_summaries": {
     "latest_snapshot_date": "Latest Snapshot Date"

@@ -10,10 +10,12 @@ from core.notion_exporters import (
     build_account_snapshot_external_key,
     build_benchmark_report_external_key,
     build_daily_plan_external_key,
+    build_daily_review_summary_properties,
     build_weekly_report_external_key,
     build_account_snapshot_properties,
     build_benchmark_report_properties,
     build_daily_plan_properties,
+    export_daily_review_summary_to_notion,
     build_weekly_report_properties,
     export_daily_plan_to_notion,
     export_latest_account_snapshot_to_notion,
@@ -154,6 +156,68 @@ def _seed_daily_plan(root: Path) -> None:
     )
 
 
+def _seed_daily_review(root: Path) -> None:
+    _write(
+        root / "reports" / "manual_execution_import_commit_20260525.json",
+        json.dumps(
+            {
+                "execution_date": "2026-05-25",
+                "preview_json_path": str(root / "reports" / "manual_execution_import_preview_20260525.json"),
+                "committed_rows": [
+                    {
+                        "canonical_key": "manual_execution:2026-05-25:AAPL:BUY:01",
+                        "page_id": "page-aapl",
+                        "symbol": "AAPL",
+                        "side": "BUY",
+                        "quantity": 1,
+                        "actual_price": 100.0,
+                        "commission": 0.0,
+                        "currency": "USD",
+                        "broker": None,
+                        "validation_status": "WARNING",
+                        "validation_issues": [
+                            {
+                                "severity": "WARNING",
+                                "code": "missing_commission",
+                                "message": "Commission is blank; normalized to 0.",
+                            }
+                        ],
+                        "committed_trade_id": "trade-aapl",
+                    }
+                ],
+            }
+        ),
+    )
+    _write(
+        root / "reports" / "manual_execution_import_preview_20260525.json",
+        json.dumps(
+            {
+                "execution_date": "2026-05-25",
+                "candidate_count": 1,
+                "warning_count": 1,
+                "fail_count": 0,
+                "projected_cash_start": 60344.67,
+                "projected_cash_end": 60244.67,
+            }
+        ),
+    )
+    _write(
+        root / "paper_execution_log.csv",
+        "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n"
+        "trade-aapl,2026-05-25,MANUAL,AAPL,BUY,1,100.0,100.0,notion_manual_execution,READY_FOR_PAPER_TRADE,manual_execution_import,,1,100.0,2026-05-25T21:46:03\n",
+    )
+    _write(
+        root / "paper_account_snapshot.csv",
+        "snapshot_date,initial_cash,cash,total_equity_market_value,total_equity_cost_basis,unrealized_pnl,cash_ratio_market_value,cash_ratio_cost_basis,position_count,symbols,market_valuation_status,valuation_price_date\n"
+        "2026-05-25,100000,60244.67,100029.86,99387.46,642.40,0.6022669,0.6061597,4,AAPL|BRK-B|F|GEN,success,2026-05-20\n",
+    )
+    _write(
+        root / "paper_position_snapshot.csv",
+        "snapshot_date,symbol,shares,avg_price,cost_value,close_price,market_value,unrealized_pnl,unrealized_pnl_pct,realized_pnl,total_pnl,total_pnl_pct_on_current_cost,valuation_method,valuation_price_date,price_staleness_days,position_status,created_at\n"
+        "2026-05-25,AAPL,1,100.00,100.00,302.25,302.25,202.25,2.0225000,0.00,202.25,2.0225000,db_daily_price_close,2026-05-20,5,OPEN,2026-05-25T21:46:03\n",
+    )
+
+
 def _mapping() -> dict[str, dict[str, str]]:
     return {
         "weekly_reports": {
@@ -232,6 +296,26 @@ def _mapping() -> dict[str, dict[str, str]]:
             "synced_at": "Synced At",
             "sync_status": "Sync Status",
         },
+        "daily_review_summaries": {
+            "name": "Name",
+            "external_key": "External Key",
+            "review_date": "Review Date",
+            "review_status": "Review Status",
+            "availability_status": "Availability Status",
+            "committed_trade_count": "Committed Trade Count",
+            "warning_count": "Warning Count",
+            "fail_count": "Fail Count",
+            "cash_start": "Cash Start",
+            "cash_end": "Cash End",
+            "cash_impact": "Cash Impact",
+            "position_impact_summary": "Position Impact Summary",
+            "commit_report_path": "Commit Report Path",
+            "preview_report_path": "Preview Report Path",
+            "latest_snapshot_date": "Latest Snapshot Date",
+            "schema_version": "Schema Version",
+            "synced_at": "Synced At",
+            "sync_status": "Sync Status",
+        },
     }
 
 
@@ -244,6 +328,7 @@ def _settings() -> NotionSettings:
             "benchmark_reports": "db-benchmark",
             "account_snapshots": "db-account",
             "daily_plans": "db-daily-plan",
+            "daily_review_summaries": "db-daily-review",
         },
     )
 
@@ -370,6 +455,33 @@ def test_daily_plan_property_payload_is_built(tmp_path):
     assert props["Confirmed Trade Count"]["number"] == 2
 
 
+def test_daily_review_property_payload_is_built():
+    summary = {
+        "review_date": "2026-05-25",
+        "review_status": "PASS_WITH_WARNINGS",
+        "availability_status": "AVAILABLE",
+        "committed_trade_count": 1,
+        "warning_count": 1,
+        "fail_count": 0,
+        "cash_start": 60344.67,
+        "cash_end": 60244.67,
+        "cash_impact": -100.0,
+        "position_impact_summary": "AAPL:+1",
+        "commit_report_path": "outputs/paper_test/reports/manual_execution_import_commit_20260525.json",
+        "preview_report_path": "outputs/paper_test/reports/manual_execution_import_preview_20260525.json",
+        "latest_snapshot_date": "2026-05-25",
+        "schema_version": "daily_review_summary.v1",
+    }
+    props = build_daily_review_summary_properties(
+        summary,
+        _mapping()["daily_review_summaries"],
+        synced_at="2026-05-25T00:00:00+00:00",
+    )
+    assert props["Review Status"]["select"]["name"] == "PASS_WITH_WARNINGS"
+    assert props["Cash Impact"]["number"] == -100.0
+    assert props["Position Impact Summary"]["rich_text"][0]["text"]["content"] == "AAPL:+1"
+
+
 def test_missing_source_file_raises_error(tmp_path):
     with pytest.raises(NotionExportError):
         export_weekly_report_to_notion(
@@ -422,6 +534,23 @@ def test_daily_plan_dry_run_does_not_call_client(tmp_path):
     )
     assert result.action == "dry_run"
     assert result.external_key == "daily_plan:2026-05-20"
+    assert client.calls == []
+
+
+def test_daily_review_dry_run_does_not_call_client(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_review(root)
+    client = FakeClient()
+    result = export_daily_review_summary_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        review_date="2026-05-25",
+        paper_root=root,
+        dry_run=True,
+    )
+    assert result.action == "dry_run"
+    assert result.external_key == "daily_review_summary:2026-05-25"
     assert client.calls == []
 
 
@@ -545,6 +674,27 @@ def test_daily_plan_export_falls_back_when_sections_are_missing(tmp_path):
     assert any("Section ## 4-0-1. could not be parsed." in text for text in texts)
 
 
+def test_daily_review_export_uses_commit_report(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_review(root)
+    client = FakeClient()
+    result = export_daily_review_summary_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        review_date="2026-05-25",
+        paper_root=root,
+        dry_run=False,
+    )
+    assert result.external_key == "daily_review_summary:2026-05-25"
+    assert result.data_source_key == "daily_review_summaries"
+    assert client.calls[0]["data_source_id"] == "db-daily-review"
+    texts = [block[block["type"]]["rich_text"][0]["text"]["content"] for block in client.calls[0]["children"]]
+    assert "오늘의 리뷰 요약" in texts
+    assert any("AAPL BUY 1 @ 100.0 - trade-aapl" in text for text in texts)
+    assert any("AAPL: +1 shares" in text or "AAPL: +1 shares (ending 1)" in text for text in texts)
+
+
 def test_daily_plan_dry_run_does_not_request_body_refresh(tmp_path):
     root = tmp_path / "paper_test"
     _seed_daily_plan(root)
@@ -568,3 +718,19 @@ def test_export_selected_requires_target():
             mapping_root=_mapping(),
             dry_run=True,
         )
+
+
+def test_export_selected_supports_daily_review_summary(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_review(root)
+    results = export_selected_paper_reports_to_notion(
+        client=None,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        export_daily_review_summary=True,
+        review_date="2026-05-25",
+        paper_root=root,
+        dry_run=True,
+    )
+    assert len(results) == 1
+    assert results[0].target == "daily_review_summaries"

@@ -25,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark", action="store_true", help="Export benchmark report")
     parser.add_argument("--account-snapshot", action="store_true", help="Export latest account snapshot")
     parser.add_argument("--daily-plan", action="store_true", help="Export latest daily plan")
+    parser.add_argument("--daily-review-summary", action="store_true", help="Export daily review summary")
+    parser.add_argument("--date", help="Review date for --daily-review-summary in YYYY-MM-DD format")
     parser.add_argument("--all", action="store_true", help="Export all supported targets")
     parser.add_argument("--dry-run", action="store_true", help="Build payload summary without Notion write")
     parser.add_argument("--json", action="store_true", help="Print export summary JSON to stdout")
@@ -39,8 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     export_benchmark = args.benchmark or args.all
     export_account_snapshot = args.account_snapshot or args.all
     export_daily_plan = args.daily_plan
-    if not any([export_weekly, export_benchmark, export_account_snapshot, export_daily_plan]):
-        parser.error("Select at least one target: --weekly, --benchmark, --account-snapshot, --daily-plan, or --all")
+    export_daily_review_summary = args.daily_review_summary
+    if export_daily_review_summary and not args.date:
+        parser.error("--date is required for --daily-review-summary")
+    if not any([export_weekly, export_benchmark, export_account_snapshot, export_daily_plan, export_daily_review_summary]):
+        parser.error("Select at least one target: --weekly, --benchmark, --account-snapshot, --daily-plan, --daily-review-summary, or --all")
 
     settings = load_notion_settings(allow_missing=True)
     mapping = load_notion_property_mapping()
@@ -53,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         export_benchmark=export_benchmark,
         export_account_snapshot=export_account_snapshot,
         export_daily_plan=export_daily_plan,
+        export_daily_review_summary=export_daily_review_summary,
+        review_date=args.date,
         dry_run=args.dry_run,
     )
     summary = [
