@@ -1,426 +1,254 @@
 # Paper Daily Operation Guide
 
-## 1. 목적
+## 1. Purpose / Scope
 
-이 문서는 paper trading 운영자가 매일 어떤 명령을 어떤 순서로 실행해야 하는지 정리한다.  
-자동매매 실행 문서가 아니라 paper test 운영 절차 문서다.
+이번 MFU-PAPER14-DAILY-OPS-REFACTOR는 `paper_daily_ops.md`를 최신 PAPER14 Notion daily loop 기준으로 리팩토링하는 작업이며, Python 코드 수정, Notion actual write/export, Manual Execution commit, Manual Review append, paper trading ledger 수정은 수행하지 않는다.
 
-운영 표준은 `scripts/paper.py`의 shortcut command를 기준으로 한다.
+이 문서는 운영자가 매일 참고하는 canonical daily operation guide다.
 
-## 2. 기본 운영 루틴
+목적:
 
-기본 순서는 아래와 같다.
+- 최신 PAPER14 일일 운영 순서를 한 문서로 정리
+- source-of-truth 원칙을 운영 관점에서 명확히 고정
+- 스마트폰 가능 단계와 로컬 PC 필수 단계를 구분
+- `WARNING`, `FAIL`, `--allow-warnings`, sync retry 정책을 빠르게 확인 가능하게 정리
 
-1. `prepare`
-2. `preview`
-3. `commit`
-4. `review`
-5. `status`
+범위:
 
-예시:
+- daily paper trading operation
+- Notion 입력 / 검토 / sync 운영 순서
+- preview / commit / append / export 실행 원칙
 
-```bash
-python scripts/paper.py prepare --date 20260520
-python scripts/paper.py preview --date 20260520
-python scripts/paper.py commit --date 20260520
-python scripts/paper.py review
-python scripts/paper.py status --date 20260520
-```
+비범위:
 
-## 3. 각 명령의 의미
+- Python 코드 설명
+- DB schema 설명
+- Notion DB별 상세 속성 계약
 
-### `prepare`
+## 2. Source-of-Truth 원칙
 
-- `prepare-data + data-freshness`
-- `market_data.db` 입력 준비 후 freshness를 확인한다.
-- DB writer command다.
-- 기본적으로 아래를 수행한다.
-  - `market_index` 갱신
-  - `tickers` 갱신
-  - `daily_price` 갱신
-  - `daily_indicators` 갱신
+운영 기본 원칙:
 
-### `preview`
+- Notion = 입력 UI / 검토 UI / staging layer
+- CSV / JSON / Markdown / SQLite = source of truth
+- Python = validation / preview / commit / append / export 주체
 
-- `data-freshness + plan + eod dry-run`
-- `daily_action_plan` 생성과 EOD 반영 결과를 미리 본다.
-- `commit`은 하지 않는다.
-- 원장을 쓰지 않는 preview 단계다.
+해석:
 
-### `commit`
+- Notion에 값이 입력되어 있어도 preview / commit / append 전까지는 source-of-truth가 아니다.
+- source-of-truth commit이 끝난 뒤 Notion sync가 실패해도, 원장 성공 여부는 그대로 유지된다.
+- Notion은 운영 편의와 검토 속도를 높이기 위한 계층이지, 원장 자체가 아니다.
 
-- `eod --commit`
-- `paper_current_state`, `paper_account_snapshot`, `paper_position_snapshot`을 저장한다.
-- 같은 날짜 snapshot이 있으면 기본 차단된다.
-- 의도적으로 같은 날짜를 교체할 때만 `--replace`를 사용한다.
+## 3. Canonical Daily Loop
 
-### `review`
-
-- `reports + review-template + review-validate`
-- PAPER9 report와 PAPER10 review template/validation을 한 번에 재생성한다.
-- `review-append`는 실행하지 않는다.
-
-### `status`
-
-- 현재 운영 상태를 read-only로 요약한다.
-- 최신 상태 확인 또는 특정 날짜 상태 점검에 사용한다.
-
-## 4. 날짜 정책
-
-- `prepare`, `preview`, `commit`은 같은 날짜를 사용한다.
-- `--date`는 paper 운영 기준일, 즉 as-of date다.
-- 한국 시간의 오늘과 미국장 기준 거래일이 다를 수 있으므로 날짜를 명시한다.
-- `review`는 기본적으로 날짜 없이 최신 상태 기준으로 실행한다.
-
-예시:
-
-```bash
-python scripts/paper.py prepare --date 20260520
-python scripts/paper.py preview --date 20260520
-python scripts/paper.py commit --date 20260520
-```
-
-## 5. warning 처리 기준
-
-기본 정책:
-
-- `PASS` -> 계속 진행
-- `PASS_WITH_WARNINGS` -> 기본 중단
-- `FAIL` -> 중단
-
-warning 상태를 의도적으로 통과할 때만 `--allow-warnings`를 사용한다.
-
-쉽게 무시하면 안 되는 warning:
-
-- `daily_price latest date is older than target_date`
-- `SPY latest date is older than target_date`
-- `daily_indicators`가 `daily_price`보다 오래됨
-
-상대적으로 위험도가 낮은 optional warning:
-
-- `universe_snapshot_YYYYMMDD.json` 없음
-
-`universe`는 매일 갱신하지 않을 수 있다. 필요하면 아래처럼 실행한다.
-
-```bash
-python scripts/paper.py prepare --date 20260520 --universe
-```
-
-## 6. preview에서 확인할 것
-
-`preview` 후에는 아래를 확인한다.
-
-- `data-freshness` 결과가 `PASS`인지
-- `plan_date`와 `data_date`가 기대와 맞는지
-- `daily_action_plan` 저장 경로가 `outputs/paper_test` 하위인지
-- EOD dry-run 결과
-- `ready_for_paper_trade`
-- `rows_to_append`
-- `write_performed=False`
-- account preview 요약
-
-주의:
-
-- `preview`는 원장을 쓰지 않는다.
-- 확정 매매가 없어도, 그날 snapshot 저장이 필요하면 `commit`은 여전히 의미가 있다.
-
-## 7. commit에서 확인할 것
-
-`commit` 후에는 아래를 확인한다.
-
-- preflight `PASS`
-- `rows_appended`
-- `paper_current_state` 저장 여부
-- `paper_account_snapshot` 저장 여부
-- `paper_position_snapshot` 저장 여부
-- `outputs/front_test` 변경 없음
-
-같은 날짜 재실행 정책:
-
-- 기본 `commit`은 같은 날짜 snapshot이 있으면 차단된다.
-- 의도적으로 재실행할 때만 `--replace`를 사용한다.
-- `--replace` 사용 시 기존 EOD 로직이 backup을 만든 뒤 같은 날짜 snapshot을 교체할 수 있다.
-
-예시:
-
-```bash
-python scripts/paper.py commit --date 20260520 --replace
-```
-
-운영 표준에서는 `--replace`를 일상적으로 사용하지 않는다.
-
-## 8. review에서 확인할 것
-
-`review` 후에는 아래 파일을 확인한다.
-
-- `outputs/paper_test/reports/paper_daily_review_summary.md`
-- `outputs/paper_test/reviews/paper_manual_review_log_template.md`
-- `outputs/paper_test/reviews/paper_manual_review_log_validation_report.md`
-
-명시 사항:
-
-- `review`는 `review-append`를 실행하지 않는다.
-- `review-append`는 사람이 template에 답변을 작성한 뒤 별도로 실행한다.
-- 즉, `review`는 review material 생성과 validation까지만 담당한다.
-
-## 9. status 사용법
-
-예시:
-
-```bash
-python scripts/paper.py status
-python scripts/paper.py status --date 20260520
-python scripts/paper.py status --date 20260520 --verbose
-python scripts/paper.py status --json
-```
-
-`workflow_status` 의미:
-
-- `NO_PLAN`
-- `PLAN_READY`
-- `COMMITTED`
-- `REVIEW_READY`
-- `UNKNOWN_OR_INCOMPLETE`
-
-`next_recommended_command` 정책:
-
-- `NO_PLAN` -> `paper.py preview --date YYYYMMDD`
-- `PLAN_READY` -> `paper.py commit --date YYYYMMDD`
-- `COMMITTED` -> `paper.py review`
-- `REVIEW_READY` -> `no immediate action`
-- `UNKNOWN_OR_INCOMPLETE` -> 상태 상세 확인 후 수동 판단
-
-## 10. 문제 상황별 대응
-
-### prepare에서 freshness warning 발생
-
-- 기본 정책은 중단이다.
-- warning 내용을 먼저 확인한다.
-- 특히 `daily_indicators` stale warning은 plan 품질에 직접 영향이 있으므로 쉽게 무시하지 않는다.
-- 정말 의도된 예외 상황일 때만 `--allow-warnings`를 사용한다.
-
-### preview에서 `rows_to_append=0`
-
-- 거래 없는 날이면 정상일 수 있다.
-- `write_performed=False`와 함께 확인한다.
-- 그날 snapshot 저장이 필요하면 `commit`은 여전히 고려할 수 있다.
-
-### commit에서 same-date snapshot exists로 차단
-
-- 기본 차단이 정상 동작한 것이다.
-- 정말 같은 날짜 snapshot 교체가 필요한 경우에만 `--replace`를 사용한다.
-- 왜 재실행이 필요한지 먼저 확인한 뒤 진행한다.
-
-### review validation FAIL
-
-- `paper_manual_review_log_validation_report.md`와 issues CSV를 먼저 확인한다.
-- `manual_answer`, `review_status`, `follow_up_needed`, `review_tag` 형식을 점검한다.
-- validation이 PASS가 되기 전까지 append는 실행하지 않는다.
-
-### status가 `UNKNOWN_OR_INCOMPLETE`
-
-- plan/snapshot/report/review 파일 간 상태가 어긋난 경우다.
-- 저수준 진단용 명령으로 원인을 좁힌다.
-  - `paper.py data-freshness --date YYYYMMDD`
-  - `paper.py preflight --date YYYYMMDD --stage plan`
-  - `paper.py preflight --date YYYYMMDD --stage eod`
-
-### DB 최신 날짜가 target date보다 이전
-
-- 기본적으로 `prepare`를 다시 점검해야 한다.
-- 휴장일인지 먼저 확인한다.
-- 휴장일이 아니라면 data readiness가 부족한 상태로 보고 `preview`를 바로 진행하지 않는다.
-
-## 11. 금지/주의 명령
-
-운영 표준에서는 아래 저수준 명령을 직접 쓰지 않는다.
-
-```bash
-python scripts/paper.py eod --date YYYYMMDD --commit
-```
-
-이유:
-
-- 저수준 명령이라 운영 shortcut의 same-date commit guard 흐름을 우회할 수 있다.
-- 운영 표준은 `paper.py commit`을 사용한다.
-
-아래도 일상 운영에 포함하지 않는다.
-
-- `setup_db.py`
-- `review-append` 자동 실행
-- `run-all` 또는 `daily` 형태의 자동 commit 체인
-
-문제 진단이 필요할 때만 개별 명령을 사용하고, 일상 운영은 shortcut 기준으로 유지한다.
-
-## 12. PAPER14 Notion Export SOP Addendum
-
-This addendum documents the PAPER14 Notion export step for paper operations.
-
-Notion export is added after the existing loop:
-
-`prepare -> preview -> commit -> review -> status -> notion export`
-
-### 12.1 Role of Notion
-
-Notion export does not replace the source artifacts produced by the paper workflow.
-
-- Notion export는 CSV/JSON/Markdown/SQLite 원천 데이터를 대체하지 않는다.
-- Notion은 검토와 표시를 위한 presentation/review layer다.
-- Source of truth remains local CSV / JSON / Markdown / SQLite outputs.
-- If Notion export fails, the paper ledger is not considered failed when the source artifacts were generated correctly.
-- Notion export failure should be logged separately and fixed before the next operational cycle.
-
-### 12.2 Execution order
-
-Run schema validation first, then dry-run, then actual export.
-
-```bash
-cd /d D:\python\StockScreener
-set PYTHONPATH=.
-
-python scripts\dev\validate_notion_schema.py --all --json
-
-python scripts\export_paper_to_notion.py --weekly --dry-run --json
-python scripts\export_paper_to_notion.py --benchmark --dry-run --json
-python scripts\export_paper_to_notion.py --account-snapshot --dry-run --json
-
-python scripts\export_paper_to_notion.py --weekly --json
-python scripts\export_paper_to_notion.py --benchmark --json
-python scripts\export_paper_to_notion.py --account-snapshot --json
-```
-
-Operational rules:
-
-- If schema validation returns any `FAIL`, do not run actual export.
-- If any dry-run fails, do not run actual export.
-- Run actual export per target, not with `--all`.
-- Execution order is fixed:
-  - `weekly`
-  - `benchmark`
-  - `account-snapshot`
-
-### 12.3 Success criteria
-
-- Schema validation result is `PASS` or `WARNING`
-- All three dry-run commands succeed
-- All three actual export commands succeed
-- No duplicate row is created for the same `External Key`
-- Major properties are visible in the Notion UI
-
-### 12.4 Failure handling
-
-Schema validation `FAIL`:
-
-- Fix the Notion DB property names, property types, or select configuration.
-- Do not run actual export.
-
-Dry-run failure:
-
-- Check the source JSON / CSV / Markdown paths and the Notion property mapping.
-- Do not run actual export.
-
-Actual export failure:
-
-- Check `NOTION_TOKEN`, data source id values, and integration permissions.
-- Do not modify source ledger files to compensate for the Notion failure.
-- Record the failure in the operation log or task report and retry after the cause is fixed.
-
-### 12.5 Security and configuration
-
-- `NOTION_TOKEN` must be managed only through `.env` or environment variables.
-- Real data source ids must be stored only in `config/notion_settings.json` or environment variables.
-- `config/notion_settings.json` should remain gitignored.
-- `config/notion_property_mapping.json` should remain gitignored.
-- Never expose tokens or real data source ids in logs or operational documents.
-
-### 12.6 Out of scope
-
-The following are not part of the current SOP step:
-
-- Daily Plan export
-- Daily Review Summary export
-- Performance Summary export
-- Manual Review input integration
-- Notion DB auto-creation
-- Notion schema migration
-- page body improvement
-
-## 13. PAPER14 Notion and Review Daily Loop
-
-The following loop supersedes the earlier PAPER14 addendum scope and reflects the
-current daily paper operation with Manual Review included.
-
-`Prepare -> Daily Plan -> Plan Export -> Action -> Manual Executions Input -> Execution Preview -> Execution Commit -> State Refresh -> Execution Status Sync -> Daily Review Summary -> Manual Review Input -> Manual Review Preview -> Manual Review Append -> Manual Review Status Sync -> Weekly / Benchmark / Account Snapshot Export`
-
-Recommended daily order:
+최신 PAPER14 기준 daily loop:
 
 1. `Prepare / preflight`
-2. `Daily Plan` generation
+2. `Daily Plan` 생성
 3. `Daily Plan` Notion export
-4. Confirm `Daily Plan` in Notion
-5. Execute the actual action
-6. Enter `Manual Executions` in Notion
-7. Run `Manual Executions` preview
-8. Review preview and run execution commit
-9. Confirm `paper_account_snapshot`, `paper_position_snapshot`, and `paper_current_state`
-10. Run `Manual Executions` status sync
-11. Export `Daily Review Summary`
-12. Confirm `Daily Review Summary` in Notion
-13. Enter `Manual Reviews` in Notion
-14. Run `Manual Reviews` preview
-15. Review preview and run review append
-16. Run `Manual Reviews` status sync
-17. Run `Weekly / Benchmark / Account Snapshot` export as needed
+4. Notion에서 `Daily Plan` 확인
+5. 실제 action 수행
+6. Notion `Manual Executions` 입력
+7. `Manual Executions` preview
+8. preview 확인 후 execution commit
+9. `paper_account_snapshot`, `paper_position_snapshot`, `paper_current_state` 갱신 확인
+10. `Manual Executions` status sync
+11. `Daily Review Summary` export
+12. Notion에서 `Daily Review Summary` 확인
+13. Notion `Manual Reviews` 입력
+14. `Manual Reviews` preview
+15. preview 확인 후 review append
+16. `Manual Reviews` status sync
+17. `Weekly / Benchmark / Account Snapshot` export
 
-Reference:
+운영 해석:
 
-- Detailed Notion procedure is documented in [paper_notion_ops.md](paper_notion_ops.md).
+- 계획 계층: `Daily Plan`
+- 실제 체결 입력 계층: `Manual Executions`
+- 결과 요약 계층: `Daily Review Summary`
+- 사후복기 계층: `Manual Reviews`
+- 기간 요약 계층: `Weekly / Benchmark / Account Snapshot`
 
-## 14. Review and Notion Operating Policy
+## 4. 스마트폰 가능 단계 / 로컬 PC 필수 단계
 
-### 14.1 Source of truth
+### 스마트폰 가능 단계
 
-- Notion is an input UI / review UI / staging layer.
-- CSV / JSON / Markdown / SQLite remain the source of truth.
-- Python is the validation / preview / commit / append owner.
+- `Daily Plan` 확인
+- `Manual Executions` 입력
+- `Daily Review Summary` 확인
+- `Manual Reviews` 입력
+- Notion `READY / COMMITTED / SYNCED` 상태 확인
 
-### 14.2 When Manual Review is required
+### 로컬 PC 필수 단계
 
-- If trades or fills occurred, `Manual Review` is required.
-- If there was any `WARNING`, `FAIL`, or meaningful plan deviation, `Manual Review` is required.
-- If there was no trade and `Daily Review Summary` reports `NO_ACTIVITY`, `Manual Review` can be skipped.
+- preview 실행
+- commit / append 실행
+- ledger / review log / state 갱신
+- status back-write
+- Notion export / sync
 
-### 14.3 Smartphone vs local PC
+실무 원칙:
 
-Smartphone-friendly steps:
+- 스마트폰은 입력 / 확인 / 검토용
+- 로컬 PC는 source-of-truth 변경과 운영 검증용
 
-- Check `Daily Plan`
-- Enter `Manual Executions`
-- Check `Daily Review Summary`
-- Enter `Manual Reviews`
-- Check Notion status fields such as `READY` and `COMMITTED`
+## 5. Safety Policy
 
-Local PC only:
+운영 안전 원칙:
 
-- Run preview commands
-- Run commit / append commands
-- Refresh ledger / review log / state artifacts
-- Run status back-write
-- Run Notion export and sync commands
+- preview 없이 commit / append 금지
+- `FAIL`이 있으면 commit / append 금지
+- `WARNING`이 있으면 기본 차단
+- `--allow-warnings`를 명시했을 때만 commit / append 허용
+- `--allow-warnings` 사용 시 운영자가 사유를 review note 또는 operation note에 기록해야 함
+- Notion 입력값은 source-of-truth 반영 전까지 staging data로만 취급
+- source-of-truth commit 성공 후 Notion sync 실패 시 원장 rollback 금지
+- 같은 commit report로 status sync만 재실행
 
-### 14.4 WARNING / FAIL policy
+추가 주의:
 
-- If any preview result contains `FAIL`, do not run commit or append.
-- If preview result contains `WARNING`, block by default.
-- Use `--allow-warnings` only when the operator explicitly accepts the warning.
-- When warnings are accepted, record the reason in the review note or operation note.
+- 저수준 명령으로 same-date guard를 우회하지 않는다.
+- 운영 표준은 `scripts/paper.py` shortcut 및 별도 importer/sync script를 사용한다.
 
-### 14.5 Notion sync failure policy
+## 6. Status Policy
 
-- If Python source-of-truth commit succeeds but Notion status sync fails, do not roll back the source artifacts.
-- Re-run only the status sync step using the same commit report.
+### `READY`
 
-Reason:
+- Notion 입력이 완료됨
+- Python preview 대기 상태
 
-- Notion status sync is a presentation / status layer.
-- Source-of-truth commit success is judged separately from Notion sync success.
+### `COMMITTED`
+
+- local source-of-truth artifact에 commit 또는 append 완료
+- execution / review 원장 반영 기준 상태
+
+### `SYNCED`
+
+- read-only export row가 최신 값으로 동기화됨
+- 주로 export 대상 DB의 표시 상태 의미
+
+### `PASS`
+
+- blocking issue 없음
+
+### `WARNING`
+
+- 비차단 이슈 있음
+- 기본적으로 commit / append 차단
+
+### `FAIL`
+
+- blocking issue 있음
+- commit / append 금지
+
+### `created`
+
+- Notion export 시 동일 External Key row가 없어 새 row 생성
+
+### `updated`
+
+- Notion export 시 동일 External Key row 1개를 찾아 update
+
+### `dry-run`
+
+- payload / decision path만 생성
+- Notion write 없음
+- CSV / ledger / review log write 없음
+
+### `--allow-warnings`
+
+- `WARNING` preview를 운영자가 명시적으로 허용할 때만 사용하는 override
+- 평상시 기본 운영 경로는 아니다
+
+## 7. Daily Checklist
+
+### 시작 전
+
+- 오늘 operation date를 명확히 정한다.
+- data freshness / preflight가 통과하는지 확인한다.
+- Daily Plan source artifact가 생성되었는지 확인한다.
+
+### 장중 / 실행 후
+
+- Notion `Daily Plan` 확인
+- 실제 체결이 있으면 Notion `Manual Executions`에 입력
+- local PC에서 execution preview 실행
+- `FAIL` / `WARNING` 여부 확인
+- 필요한 경우에만 `--allow-warnings`로 execution commit
+- account / position / current state 반영 확인
+- execution status sync 확인
+
+### 장마감 후
+
+- `Daily Review Summary` export
+- Notion에서 `Daily Review Summary` 확인
+- 거래 또는 경고/계획이탈이 있으면 `Manual Reviews` 입력
+- local PC에서 review preview 실행
+- `FAIL` / `WARNING` 여부 확인
+- 필요한 경우에만 `--allow-warnings`로 review append
+- review status sync 확인
+
+### 보조 export
+
+- 필요 시 `Weekly / Benchmark / Account Snapshot` export 실행
+
+## 8. Failure / Retry Policy
+
+### preview 단계 실패
+
+- source artifact, mapping, validation issue를 먼저 수정
+- preview 성공 전에는 commit / append 진행 금지
+
+### commit / append 단계 실패
+
+- source-of-truth가 반영되지 않았는지 먼저 확인
+- 실패 원인이 중복인지, validation인지, file write인지 구분
+- 원인 해결 전 재시도하지 않는다
+
+### Notion sync 실패
+
+- source-of-truth rollback 금지
+- 같은 commit report로 sync만 재실행
+- 이유:
+  - Notion sync는 presentation / status layer
+  - source-of-truth commit 성공과 분리해야 함
+
+### `WARNING` 처리
+
+- 기본은 중단
+- 허용 시 운영자가 사유 기록
+- 기록 위치:
+  - review note
+  - operation note
+  - 작업 보고
+
+## 9. Relationship with Other Docs
+
+- [mfu_paper14_notion_closeout.md](/D:/python/StockScreener/docs/TRD/mfu_paper14_notion_closeout.md)
+  - PAPER14 전체 범위 / 완료 / 보류 / 후속 결정 기록
+
+- [paper_notion_ops.md](/D:/python/StockScreener/docs/operations/paper_notion_ops.md)
+  - Notion-specific operation detail
+
+- `paper_daily_ops.md`
+  - 매일 보는 canonical daily operation guide
+
+원칙:
+
+- daily 운영 순서를 빠르게 확인할 때는 이 문서를 본다.
+- Notion DB별 상세 절차나 명령 예시는 `paper_notion_ops.md`를 본다.
+- 범위/설계/보류 판단은 closeout 문서를 본다.
+
+## 10. Historical / Deprecated Notes
+
+다음은 현재 canonical 본문에서 제외된 과거 표현 또는 구버전 관점이다.
+
+- `prepare -> preview -> commit -> review -> status -> notion export`
+  - 초기 PAPER14 addendum 단계의 단순 loop
+  - 현재는 `Manual Executions`, `Daily Review Summary`, `Manual Reviews`가 포함된 loop가 canonical이다.
+
+- 초기 addendum에서 `Daily Plan export`, `Daily Review Summary export`, `Manual Review input integration`이 out-of-scope로 적혀 있던 부분
+  - 당시 시점 기준이며, 현재는 해당 범위 상당 부분이 구현 완료되었다.
+
+- 기존 문서에 남아 있던 구버전 section과 최신 addendum의 병존
+  - 이번 리팩토링으로 canonical 본문에서는 제거하고, historical note로만 남긴다.
