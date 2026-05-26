@@ -107,10 +107,23 @@
     "latest_snapshot_date": "Latest Snapshot Date"
   },
   "manual_reviews": {
+    "name": "Name",
+    "external_key": "External Key",
     "review_date": "Review Date",
     "symbol": "Symbol",
-    "status": "Status",
-    "note": "Note"
+    "question_id": "Question ID",
+    "question": "Question",
+    "manual_answer": "Manual Answer",
+    "review_status": "Review Status",
+    "follow_up_needed": "Follow-up Needed",
+    "review_tag": "Review Tag",
+    "reviewer_note": "Reviewer Note",
+    "source_template_key": "Source Template Key",
+    "validation_status": "Validation Status",
+    "validation_message": "Validation Message",
+    "import_status": "Import Status",
+    "imported_at": "Imported At",
+    "synced_at": "Synced At"
   },
   "manual_executions": {
     "name": "Name",

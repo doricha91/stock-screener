@@ -109,6 +109,25 @@ def _mapping() -> dict[str, dict[str, str]]:
             "imported_at": "Imported At",
             "synced_at": "Synced At",
         },
+        "manual_reviews": {
+            "name": "Name",
+            "external_key": "External Key",
+            "review_date": "Review Date",
+            "symbol": "Symbol",
+            "question_id": "Question ID",
+            "question": "Question",
+            "manual_answer": "Manual Answer",
+            "review_status": "Review Status",
+            "follow_up_needed": "Follow-up Needed",
+            "review_tag": "Review Tag",
+            "reviewer_note": "Reviewer Note",
+            "source_template_key": "Source Template Key",
+            "validation_status": "Validation Status",
+            "validation_message": "Validation Message",
+            "import_status": "Import Status",
+            "imported_at": "Imported At",
+            "synced_at": "Synced At",
+        },
         "daily_review_summaries": {
             "name": "Name",
             "external_key": "External Key",
@@ -240,6 +259,40 @@ def _daily_review_schema(*, review_options=None, availability_options=None, sync
     }
 
 
+def _manual_review_schema(*, follow_up_type="select", review_tag_type="select", import_options=None) -> dict:
+    follow_up_property = (
+        _property("Follow-up Needed", "checkbox")
+        if follow_up_type == "checkbox"
+        else _property("Follow-up Needed", "select", options=["true", "false"])
+    )
+    review_tag_property = (
+        _property("Review Tag", "multi_select")
+        if review_tag_type == "multi_select"
+        else _property("Review Tag", "select", options=["entry_rule", "other"])
+    )
+    return {
+        "properties": {
+            "Name": _property("Name", "title"),
+            "External Key": _property("External Key", "rich_text"),
+            "Review Date": _property("Review Date", "date"),
+            "Symbol": _property("Symbol", "rich_text"),
+            "Question ID": _property("Question ID", "rich_text"),
+            "Question": _property("Question", "rich_text"),
+            "Manual Answer": _property("Manual Answer", "rich_text"),
+            "Review Status": _property("Review Status", "select", options=["pending", "reviewed", "deferred", "not_applicable"]),
+            "Follow-up Needed": follow_up_property,
+            "Review Tag": review_tag_property,
+            "Reviewer Note": _property("Reviewer Note", "rich_text"),
+            "Source Template Key": _property("Source Template Key", "rich_text"),
+            "Validation Status": _property("Validation Status", "select", options=["NOT_CHECKED", "PASS", "WARNING", "FAIL"]),
+            "Validation Message": _property("Validation Message", "rich_text"),
+            "Import Status": _property("Import Status", "select", options=import_options or ["DRAFT", "READY", "PREVIEWED", "COMMITTED", "SKIPPED"]),
+            "Imported At": _property("Imported At", "rich_text"),
+            "Synced At": _property("Synced At", "rich_text"),
+        }
+    }
+
+
 def test_expected_schema_is_built_for_all_targets():
     schema = build_expected_schema(_mapping())
     assert set(schema.keys()) == {
@@ -248,6 +301,7 @@ def test_expected_schema_is_built_for_all_targets():
         "account_snapshots",
         "daily_plans",
         "manual_executions",
+        "manual_reviews",
         "daily_review_summaries",
     }
 
@@ -426,6 +480,51 @@ def test_daily_review_missing_select_options_is_warning():
         target="daily_review_summaries",
         data_source_id="ds-review",
         actual_schema=_daily_review_schema(review_options=["PASS"], availability_options=["AVAILABLE"], sync_options=[]),
+        mapping_root=_mapping(),
+    )
+    assert result.status == WARNING
+    assert any(issue.code == "missing_select_options" for issue in result.issues)
+
+
+def test_manual_review_schema_passes_when_required_properties_match():
+    result = validate_data_source_schema(
+        target="manual_reviews",
+        data_source_id="ds-manual-review",
+        actual_schema=_manual_review_schema(),
+        mapping_root=_mapping(),
+    )
+    assert result.status == PASS
+    assert result.issues == []
+
+
+def test_manual_review_optional_types_accept_checkbox_and_multi_select():
+    result = validate_data_source_schema(
+        target="manual_reviews",
+        data_source_id="ds-manual-review",
+        actual_schema=_manual_review_schema(follow_up_type="checkbox", review_tag_type="multi_select"),
+        mapping_root=_mapping(),
+    )
+    assert result.status == PASS
+
+
+def test_manual_review_missing_required_property_is_fail():
+    schema = _manual_review_schema()
+    schema["properties"].pop("Manual Answer")
+    result = validate_data_source_schema(
+        target="manual_reviews",
+        data_source_id="ds-manual-review",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == FAIL
+    assert any(issue.property_name == "Manual Answer" for issue in result.issues)
+
+
+def test_manual_review_missing_select_options_is_warning():
+    result = validate_data_source_schema(
+        target="manual_reviews",
+        data_source_id="ds-manual-review",
+        actual_schema=_manual_review_schema(import_options=["READY"]),
         mapping_root=_mapping(),
     )
     assert result.status == WARNING

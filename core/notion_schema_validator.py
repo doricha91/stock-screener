@@ -168,6 +168,54 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(manual_execution, "imported_at", "rich_text", required=False),
             _expected(manual_execution, "synced_at", "rich_text", required=False),
         ]
+    if "manual_reviews" in mapping_root:
+        manual_review = get_mapping_section(mapping_root, "manual_reviews")
+        schemas["manual_reviews"] = [
+            _expected(manual_review, "name", "title"),
+            _expected(manual_review, "external_key", "rich_text", required=False),
+            _expected(manual_review, "review_date", "date"),
+            _expected(manual_review, "symbol", "rich_text"),
+            _expected(manual_review, "question_id", "rich_text"),
+            _expected(manual_review, "question", "rich_text"),
+            _expected(manual_review, "manual_answer", "rich_text"),
+            _expected(
+                manual_review,
+                "review_status",
+                "select",
+                select_options=("pending", "reviewed", "deferred", "not_applicable"),
+                check_options=True,
+            ),
+            _expected(
+                manual_review,
+                "follow_up_needed",
+                ("select", "checkbox"),
+                required=False,
+                select_options=("true", "false"),
+                check_options=False,
+            ),
+            _expected(manual_review, "review_tag", ("select", "multi_select", "rich_text"), required=False),
+            _expected(manual_review, "reviewer_note", "rich_text", required=False),
+            _expected(manual_review, "source_template_key", "rich_text", required=False),
+            _expected(
+                manual_review,
+                "validation_status",
+                "select",
+                required=False,
+                select_options=("NOT_CHECKED", "PASS", "WARNING", "FAIL"),
+                check_options=True,
+            ),
+            _expected(manual_review, "validation_message", "rich_text", required=False),
+            _expected(
+                manual_review,
+                "import_status",
+                "select",
+                required=False,
+                select_options=("DRAFT", "READY", "PREVIEWED", "COMMITTED", "SKIPPED"),
+                check_options=True,
+            ),
+            _expected(manual_review, "imported_at", "rich_text", required=False),
+            _expected(manual_review, "synced_at", "rich_text", required=False),
+        ]
     if "daily_review_summaries" in mapping_root:
         daily_review = get_mapping_section(mapping_root, "daily_review_summaries")
         schemas["daily_review_summaries"] = [
@@ -288,6 +336,7 @@ def validate_selected_data_sources(
         "account_snapshots": "NOTION_ACCOUNT_SNAPSHOTS_DATA_SOURCE_ID",
         "daily_plans": "NOTION_DAILY_PLANS_DATA_SOURCE_ID",
         "manual_executions": "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID",
+        "manual_reviews": "NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID",
         "daily_review_summaries": "NOTION_DAILY_REVIEW_SUMMARIES_DATA_SOURCE_ID",
     }
     results: list[DataSourceValidationResult] = []
@@ -300,7 +349,7 @@ def validate_selected_data_sources(
                 env_override=env_override_map[target],
             )
         except NotionSettingsError as exc:
-            if target not in {"daily_plans", "manual_executions", "daily_review_summaries"}:
+            if target not in {"daily_plans", "manual_executions", "manual_reviews", "daily_review_summaries"}:
                 raise
             expected_schema = build_expected_schema(mapping_root)
             results.append(
