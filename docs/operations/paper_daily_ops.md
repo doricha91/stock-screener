@@ -344,3 +344,83 @@ The following are not part of the current SOP step:
 - Notion DB auto-creation
 - Notion schema migration
 - page body improvement
+
+## 13. PAPER14 Notion and Review Daily Loop
+
+The following loop supersedes the earlier PAPER14 addendum scope and reflects the
+current daily paper operation with Manual Review included.
+
+`Prepare -> Daily Plan -> Plan Export -> Action -> Manual Executions Input -> Execution Preview -> Execution Commit -> State Refresh -> Execution Status Sync -> Daily Review Summary -> Manual Review Input -> Manual Review Preview -> Manual Review Append -> Manual Review Status Sync -> Weekly / Benchmark / Account Snapshot Export`
+
+Recommended daily order:
+
+1. `Prepare / preflight`
+2. `Daily Plan` generation
+3. `Daily Plan` Notion export
+4. Confirm `Daily Plan` in Notion
+5. Execute the actual action
+6. Enter `Manual Executions` in Notion
+7. Run `Manual Executions` preview
+8. Review preview and run execution commit
+9. Confirm `paper_account_snapshot`, `paper_position_snapshot`, and `paper_current_state`
+10. Run `Manual Executions` status sync
+11. Export `Daily Review Summary`
+12. Confirm `Daily Review Summary` in Notion
+13. Enter `Manual Reviews` in Notion
+14. Run `Manual Reviews` preview
+15. Review preview and run review append
+16. Run `Manual Reviews` status sync
+17. Run `Weekly / Benchmark / Account Snapshot` export as needed
+
+Reference:
+
+- Detailed Notion procedure is documented in [paper_notion_ops.md](paper_notion_ops.md).
+
+## 14. Review and Notion Operating Policy
+
+### 14.1 Source of truth
+
+- Notion is an input UI / review UI / staging layer.
+- CSV / JSON / Markdown / SQLite remain the source of truth.
+- Python is the validation / preview / commit / append owner.
+
+### 14.2 When Manual Review is required
+
+- If trades or fills occurred, `Manual Review` is required.
+- If there was any `WARNING`, `FAIL`, or meaningful plan deviation, `Manual Review` is required.
+- If there was no trade and `Daily Review Summary` reports `NO_ACTIVITY`, `Manual Review` can be skipped.
+
+### 14.3 Smartphone vs local PC
+
+Smartphone-friendly steps:
+
+- Check `Daily Plan`
+- Enter `Manual Executions`
+- Check `Daily Review Summary`
+- Enter `Manual Reviews`
+- Check Notion status fields such as `READY` and `COMMITTED`
+
+Local PC only:
+
+- Run preview commands
+- Run commit / append commands
+- Refresh ledger / review log / state artifacts
+- Run status back-write
+- Run Notion export and sync commands
+
+### 14.4 WARNING / FAIL policy
+
+- If any preview result contains `FAIL`, do not run commit or append.
+- If preview result contains `WARNING`, block by default.
+- Use `--allow-warnings` only when the operator explicitly accepts the warning.
+- When warnings are accepted, record the reason in the review note or operation note.
+
+### 14.5 Notion sync failure policy
+
+- If Python source-of-truth commit succeeds but Notion status sync fails, do not roll back the source artifacts.
+- Re-run only the status sync step using the same commit report.
+
+Reason:
+
+- Notion status sync is a presentation / status layer.
+- Source-of-truth commit success is judged separately from Notion sync success.
