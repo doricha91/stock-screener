@@ -325,7 +325,7 @@ def test_existing_review_log_duplicate_is_fail(monkeypatch, tmp_path):
 
 
 def test_commit_mode_returns_not_implemented(capsys):
-    exit_code = review_script.main(["--date", "2026-05-25", "--commit", "--json"])
+    exit_code = review_script.main(["--date", "2026-05-25", "--commit", "--json", "--preview-json", "missing.json"])
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "not implemented in PAPER14-7D" in captured.out
+    assert "Preview JSON not found" in captured.out

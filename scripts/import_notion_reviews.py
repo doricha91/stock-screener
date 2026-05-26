@@ -16,6 +16,10 @@ from core.notion_manual_review_importer import (  # noqa: E402
     ManualReviewImportError,
     build_manual_review_preview,
 )
+from core.paper_manual_review_append_commit import (  # noqa: E402
+    ManualReviewAppendCommitError,
+    commit_manual_review_preview,
+)
 from core.notion_mapping import load_notion_property_mapping  # noqa: E402
 from core.notion_settings import (  # noqa: E402
     NotionSettingsError,
@@ -35,7 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--date", required=True, help="Review date in YYYY-MM-DD format")
     parser.add_argument("--preview", action="store_true", help="Generate preview only")
-    parser.add_argument("--commit", action="store_true", help="Reserved for future append workflow")
+    parser.add_argument("--commit", action="store_true", help="Append validated preview JSON rows to paper_manual_review_log.csv")
+    parser.add_argument("--preview-json", help="Preview JSON path required for --commit")
+    parser.add_argument("--allow-warnings", action="store_true", help="Allow commit when preview status is true_with_warnings")
     parser.add_argument("--json", action="store_true", help="Print machine-readable preview summary")
     return parser
 
@@ -49,12 +55,40 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Select one mode: --preview or --commit.")
 
     if args.commit:
-        message = "not implemented in PAPER14-7D"
+        if not args.preview_json:
+            parser.error("--preview-json is required for --commit.")
+        try:
+            result = commit_manual_review_preview(
+                review_date=args.date,
+                preview_json_path=Path(args.preview_json),
+                allow_warnings=args.allow_warnings,
+            )
+        except ManualReviewAppendCommitError as exc:
+            if args.json:
+                print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
+            else:
+                print(f"MANUAL REVIEW COMMIT FAILED\n{exc}")
+            return 1
+
+        payload = {
+            "status": "COMMITTED",
+            "review_date": result.review_date,
+            "preview_json_path": result.preview_json_path,
+            "commit_json_path": result.commit_json_path,
+            "commit_markdown_path": result.commit_markdown_path,
+            "appended_count": result.appended_count,
+            "skipped_count": result.skipped_count,
+            "failed_count": result.failed_count,
+            "backups": result.backups,
+        }
+        print("MANUAL REVIEW COMMIT")
+        print(
+            f"  date={result.review_date} appended_rows={result.appended_count} "
+            f"commit_json={result.commit_json_path}"
+        )
         if args.json:
-            print(json.dumps({"status": "FAIL", "error": message}, ensure_ascii=False, indent=2))
-        else:
-            print(f"MANUAL REVIEW IMPORT FAILED\n{message}")
-        return 1
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
 
     settings = load_notion_settings(allow_missing=True)
     mapping = load_notion_property_mapping()
