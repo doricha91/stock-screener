@@ -1,59 +1,135 @@
 # Paper Notion Operations Guide
 
-## 1. Purpose
+## 1. Role of This Document
 
-This document explains the detailed PAPER14 Notion operating procedure.
+이번 MFU-PAPER14-NOTION-OPS-ALIGNMENT는 `paper_notion_ops.md`를 최신 `paper_daily_ops.md`의 canonical daily loop와 source-of-truth/safety/status 정책에 맞춰 업데이트하는 작업이며, Python 코드 수정, Notion actual write/export, Manual Execution commit, Manual Review append, paper trading ledger 수정은 수행하지 않는다.
 
-이번 PAPER14 Notion 운영 절차는 Notion을 source of truth로 두지 않는다.
+이 문서의 역할:
+
+- `paper_daily_ops.md`에서 정의한 canonical daily loop를 전제로 한다
+- Notion DB별 세부 입력 / 확인 / 동기화 SOP를 정리한다
+- 운영자가 Notion에서 무엇을 하고, 로컬 PC에서 무엇을 해야 하는지 구분한다
+
+문서 관계:
+
+- `paper_daily_ops.md` = canonical daily loop
+- `paper_notion_ops.md` = Notion DB별 세부 입력 / 확인 / 동기화 SOP
+- `mfu_paper14_notion_closeout.md` = PAPER14 전체 범위와 결정 기록
+
+즉, 이 문서는 daily loop의 상위 문서가 아니라 하위 세부 절차 문서다.
+
+## 2. Source-of-Truth 원칙
+
+운영 원칙:
 
 - Notion = 입력 UI / 검토 UI / staging layer
 - CSV / JSON / Markdown / SQLite = source of truth
-- Python = validation / preview / commit / append 주체
+- Python = validation / preview / commit / append / export 주체
 
-## 2. Notion DB roles
+실무 해석:
 
-### `Daily Plans`
+- Notion 입력값은 preview / commit / append 전까지 staging data다
+- source-of-truth commit 성공 후 Notion sync 실패는 원장 실패가 아니다
+- Notion sync 실패 시 원장 rollback은 하지 않는다
+- 같은 commit report로 status sync만 재실행한다
 
-- System-generated daily plan
-- Review and presentation layer only
-- Operators use it to confirm today's intended action
+## 3. Notion in the Canonical Daily Loop
 
-### `Manual Executions`
+이 문서가 다루는 Notion 관련 절차는 아래 순서를 따른다.
 
-- Input UI for actual fills
-- Staging layer before execution preview and commit
+1. `Daily Plan` Notion export / 확인
+2. `Manual Executions` 입력
+3. `Manual Executions` preview / commit / status sync
+4. `Daily Review Summary` export / 확인
+5. `Manual Reviews` 입력
+6. `Manual Reviews` preview / append / status sync
+7. `Weekly / Benchmark / Account Snapshot` export
 
-### `Daily Review Summaries`
+주요 원칙:
 
-- System-generated day-end result summary
-- Review layer only
+- Notion은 입력과 확인에 사용한다
+- commit / append / export의 최종 실행 주체는 Python이다
+- 스마트폰은 입력과 확인, 로컬 PC는 preview / commit / append / sync 용도다
 
-### `Manual Reviews`
+## 4. Notion DB별 SOP
 
-- Input UI for retrospective answers at question level
-- Staging layer before review append
+### 4.1 `Daily Plans`
 
-### `Account Snapshots`
+목적:
 
-- Read-only account status export
+- 당일 실행 계획을 Notion에서 확인하기 쉽게 보여준다
 
-### `Weekly Reports`
+사용자가 Notion에서 하는 일:
 
-- Read-only weekly rollup export
+- 당일 계획 확인
+- page body에서 확정 거래 / 검토 항목 / 경고 확인
 
-### `Benchmark Reports`
+Python이 하는 일:
 
-- Read-only benchmark comparison export
+- local plan source를 바탕으로 read-only export
+- External Key 기준 created / updated upsert
 
-## 3. Daily operating sequence
+source artifact:
 
-### 3.1 Daily Plan
+- `daily_action_plan_YYYYMMDD.md`
+- `paper_config_snapshot_YYYYMMDD.json`
 
-Generate the plan locally first, then export it to Notion.
+write 방향:
 
-### 3.2 Manual Executions
+- Python -> Notion
 
-Use Notion only for input, then validate and commit locally.
+status 필드:
+
+- `Sync Status`
+
+주의사항:
+
+- Notion row는 계획 표시 계층이다
+- source-of-truth는 local Markdown / JSON이다
+
+### 4.2 `Manual Executions`
+
+목적:
+
+- 실제 체결을 스마트폰 포함 Notion UI에서 쉽게 입력한다
+
+사용자가 Notion에서 하는 일:
+
+- execution row 입력
+- `READY` 상태 확인
+
+Python이 하는 일:
+
+- read-only import
+- preview 생성
+- preview 기준 execution commit
+- commit report 기준 status sync
+
+source artifact:
+
+- Notion input row
+- `manual_execution_import_preview_YYYYMMDD.json`
+- `manual_execution_import_commit_YYYYMMDD.json`
+- `paper_execution_log.csv`
+
+write 방향:
+
+- Notion -> Python -> CSV -> Notion status sync
+
+status 필드:
+
+- `Status`
+- `Validation Status`
+- `Import Status`
+
+주의사항:
+
+- Notion input row는 source-of-truth가 아니다
+- preview 없이 commit 금지
+- `WARNING`은 기본 차단
+- `--allow-warnings`가 있을 때만 commit 허용
+
+예시 명령:
 
 ```cmd
 python scripts\import_notion_executions.py --date 2026-05-25 --preview --json
@@ -61,18 +137,95 @@ python scripts\import_notion_executions.py --date 2026-05-25 --commit --preview-
 python scripts\sync_notion_execution_status.py --date 2026-05-25 --commit-report outputs\paper_test\reports\manual_execution_import_commit_20260525.json --json
 ```
 
-### 3.3 Daily Review Summary
+### 4.3 `Daily Review Summaries`
 
-Generate the review summary from local source artifacts and export it to Notion.
+목적:
+
+- 하루 운영 결과를 요약해서 검토한다
+
+사용자가 Notion에서 하는 일:
+
+- trade count, warning count, cash impact, position impact 확인
+
+Python이 하는 일:
+
+- local source artifact를 사용해 read-only export
+- External Key 기준 created / updated upsert
+
+source artifact:
+
+- execution commit report
+- execution preview report
+- `paper_execution_log.csv`
+- `paper_account_snapshot.csv`
+- `paper_position_snapshot.csv`
+- optional `paper_current_state_YYYYMMDD.json`
+
+write 방향:
+
+- Python -> Notion
+
+status 필드:
+
+- `Review Status`
+- `Availability Status`
+- `Sync Status`
+
+주의사항:
+
+- result summary일 뿐 source-of-truth는 아니다
+- commit report가 없으면 fallback summary만 가능할 수 있다
+
+예시 명령:
 
 ```cmd
 python scripts\export_paper_to_notion.py --daily-review-summary --date 2026-05-25 --dry-run --json
 python scripts\export_paper_to_notion.py --daily-review-summary --date 2026-05-25 --json
 ```
 
-### 3.4 Manual Reviews
+### 4.4 `Manual Reviews`
 
-Use Notion only for answer entry, then validate and append locally.
+목적:
+
+- 질문 단위 retrospective 답변을 Notion에서 입력한다
+
+사용자가 Notion에서 하는 일:
+
+- question-level row에 `Manual Answer`, `Review Status`, `Follow-up Needed`, `Review Tag`, `Reviewer Note` 입력
+- `READY` 상태 확인
+
+Python이 하는 일:
+
+- read-only import
+- preview 생성
+- preview 기준 review append
+- commit report 기준 status sync
+
+source artifact:
+
+- Notion input row
+- `manual_review_import_preview_YYYYMMDD.json`
+- `manual_review_import_commit_YYYYMMDD.json`
+- `paper_manual_review_log.csv`
+
+write 방향:
+
+- Notion -> Python -> CSV -> Notion status sync
+
+status 필드:
+
+- `Validation Status`
+- `Import Status`
+
+주의사항:
+
+- review 원장은 `paper_manual_review_log.csv`
+- Notion은 입력/staging layer
+- preview 없이 append 금지
+- `WARNING`은 기본 차단
+- `--allow-warnings`가 있을 때만 append 허용
+
+예시 명령:
 
 ```cmd
 python scripts\import_notion_reviews.py --date 2026-05-25 --preview --json
@@ -80,92 +233,199 @@ python scripts\import_notion_reviews.py --date 2026-05-25 --commit --preview-jso
 python scripts\sync_notion_review_status.py --date 2026-05-25 --commit-report outputs\paper_test\reports\manual_review_import_commit_20260525.json --json
 ```
 
-## 4. Import Status and Validation Status
+### 4.5 `Account Snapshots`
 
-### `READY`
+목적:
 
-- Input has been entered in Notion
-- Candidate is waiting for Python preview
+- 최신 또는 특정 날짜의 계좌 상태를 표시한다
 
-### `COMMITTED`
+사용자가 Notion에서 하는 일:
 
-- The local source-of-truth artifact was successfully committed or appended
-- Status sync may write this back to Notion afterward
+- equity, cash, cash ratio, position count 확인
 
-### `PASS`
+Python이 하는 일:
 
-- Validation produced no blocking issue
+- snapshot CSV 기준 read-only export
 
-### `WARNING`
+source artifact:
 
-- Validation found non-fatal issues
-- Commit or append is blocked by default
-- The operator must explicitly use `--allow-warnings` to continue
+- `paper_account_snapshot.csv`
 
-### `FAIL`
+write 방향:
 
-- Validation found blocking issues
-- Commit or append must not run
+- Python -> Notion
 
-## 5. Dry-run, created, updated
+status 필드:
 
-### `dry-run`
+- `Sync Status`
+- `Valuation Status`
 
-- Payload and decision path are built
-- Notion write does not happen
-- CSV / ledger / review log write does not happen
+주의사항:
 
-### `created`
+- source-of-truth는 snapshot CSV다
 
-- No existing Notion row was found for the External Key
-- A new Notion row is created
+### 4.6 `Weekly Reports`
 
-### `updated`
+목적:
 
-- One existing Notion row was found for the External Key
-- The existing row is updated instead of duplicated
+- 주간 운영 completeness와 변화 요약
 
-## 6. WARNING and FAIL handling
+사용자가 Notion에서 하는 일:
 
-- `FAIL` means stop and fix the issue first.
-- `WARNING` means stop by default.
-- Use `--allow-warnings` only when the operator explicitly accepts the risk.
-- When `--allow-warnings` is used, record the reason in the review note or operation note.
+- gap count, coverage, overall status 확인
 
-## 7. Smartphone vs PC
+Python이 하는 일:
 
-### Smartphone-friendly
+- weekly report export
 
-- Confirm `Daily Plan`
-- Enter `Manual Executions`
-- Confirm `Daily Review Summary`
-- Enter `Manual Reviews`
-- Check `READY` / `COMMITTED` status in Notion
+source artifact:
 
-### Local PC required
+- weekly markdown / json report
 
-- Run preview commands
-- Run commit / append commands
-- Refresh local source-of-truth artifacts
-- Run status back-write
-- Run Notion export and sync commands
+write 방향:
 
-## 8. Notion sync failure response
+- Python -> Notion
 
-If local source-of-truth commit succeeds but Notion sync fails:
+status 필드:
 
-- do not roll back the local source artifacts
-- keep the ledger / review log as-is
-- re-run only the matching status sync command with the same commit report
+- `Overall Status`
+- `Coverage Status`
+- `Sync Status`
 
-This applies because Notion sync is a presentation / status layer, not the source of truth.
+주의사항:
 
-## 9. Out of scope
+- 주간 운영 판단 보조용이며 source-of-truth는 local report다
 
-This SOP does not cover:
+### 4.7 `Benchmark Reports`
 
-- Notion DB auto-creation
+목적:
+
+- paper 성과를 benchmark와 비교
+
+사용자가 Notion에서 하는 일:
+
+- paper return, excess return, MDD 비교 확인
+
+Python이 하는 일:
+
+- benchmark comparison export
+
+source artifact:
+
+- benchmark comparison markdown / json
+
+write 방향:
+
+- Python -> Notion
+
+status 필드:
+
+- `Availability Status`
+- `Sync Status`
+
+주의사항:
+
+- 비교용 report 계층이며 source-of-truth는 local report다
+
+## 5. Status and Safety Policy
+
+### 운영 용어
+
+`READY`
+: Notion 입력 완료, Python preview 대기 상태
+
+`COMMITTED`
+: local source-of-truth artifact 반영 완료 상태
+
+`SYNCED`
+: export row가 최신 동기화 상태로 반영된 상태
+
+`PASS`
+: blocking issue 없음
+
+`WARNING`
+: 비차단 이슈 있음, 기본 차단 상태
+
+`FAIL`
+: blocking issue 있음, commit / append 금지
+
+`created`
+: export 시 새 Notion row 생성
+
+`updated`
+: export 시 기존 Notion row update
+
+`dry-run`
+: payload / decision path만 생성, write 없음
+
+`--allow-warnings`
+: 운영자가 WARNING을 명시 허용할 때만 사용하는 override
+
+### 운영 정책
+
+- preview 없이 commit / append 금지
+- `FAIL` 있으면 commit / append 금지
+- `WARNING` 있으면 기본 차단
+- `--allow-warnings`가 있을 때만 commit / append 허용
+- `WARNING` 허용 시 운영자가 사유 기록
+- Notion 입력값은 source-of-truth 반영 전까지 staging data
+
+## 6. Smartphone vs Local PC
+
+### 스마트폰 가능
+
+- `Daily Plan` 확인
+- `Manual Executions` 입력
+- `Daily Review Summary` 확인
+- `Manual Reviews` 입력
+- Notion status 확인
+
+### 로컬 PC 필수
+
+- preview 실행
+- commit / append 실행
+- ledger / review log / state 갱신
+- status back-write
+- Notion export / sync
+
+## 7. Notion Sync Failure / Retry Policy
+
+기본 원칙:
+
+- source-of-truth commit 성공 후 Notion sync 실패는 원장 실패가 아니다
+- 원장 rollback은 하지 않는다
+- 같은 commit report로 status sync만 재실행한다
+
+적용 대상:
+
+- `Manual Executions` status sync
+- `Manual Reviews` status sync
+
+이유:
+
+- status sync는 presentation / status layer
+- source-of-truth commit 성공 여부와 분리해서 다뤄야 한다
+
+## 8. Historical / Deprecated Notes
+
+현재 canonical 본문과 충돌하는 구버전 해석은 운영 본문에서 제외한다.
+
+예:
+
+- Notion이 상위 운영 문서처럼 보이는 표현
+- 스마트폰에서 commit / append도 할 수 있는 것처럼 보이는 표현
+- Notion sync 실패를 원장 실패처럼 다루는 표현
+- 초기 addendum 단계의 단순 export 중심 loop
+
+이 문서는 최신 `paper_daily_ops.md`를 전제로 하는 하위 SOP다.
+
+## 9. Out of Scope
+
+이 문서는 다음을 다루지 않는다.
+
+- Notion DB 자동 생성
 - Notion schema migration
+- Performance Summary 구현
 - mobile remote execution
-- GitHub Actions automation
-- broker/API integration
+- GitHub Actions / cloud runner 운영
+- broker/API 연동
