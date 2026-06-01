@@ -32,3 +32,27 @@ def test_missing_mapping_section_raises_error(tmp_path):
     mapping = load_notion_property_mapping(path, fallback_to_example=False)
     with pytest.raises(NotionMappingError):
         get_mapping_section(mapping, "smoke_test")
+
+
+def test_example_mapping_contains_account_id_for_multi_account_targets():
+    mapping = load_notion_property_mapping(fallback_to_example=True)
+    for section in (
+        "daily_plans",
+        "manual_executions",
+        "account_snapshots",
+        "weekly_reports",
+        "benchmark_reports",
+        "daily_review_summaries",
+        "manual_reviews",
+    ):
+        section_mapping = get_mapping_section(mapping, section)
+        assert resolve_notion_property_name(section_mapping, "account_id") == "Account ID"
+
+
+def test_example_mapping_contains_daily_ops_status_section():
+    mapping = load_notion_property_mapping(fallback_to_example=True)
+    section = get_mapping_section(mapping, "daily_ops_status")
+    assert resolve_notion_property_name(section, "external_key") == "External Key"
+    assert resolve_notion_property_name(section, "account_id") == "Account ID"
+    assert resolve_notion_property_name(section, "workflow_status") == "Workflow Status"
+    assert resolve_notion_property_name(section, "review_progress_status") == "Review Progress Status"

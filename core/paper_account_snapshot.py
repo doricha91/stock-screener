@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_guard import assert_non_default_writer_target
 from core.paper_account_state import PaperAccountState
 from core.paper_market_valuation import PaperAccountValuation
 from core.paper_safety import assert_paper_path
@@ -177,9 +178,25 @@ def save_paper_account_snapshot(
     snapshot_path: Path,
     archive_dir: Path,
     now: datetime | None = None,
+    account_paths=None,
 ) -> dict[str, Any]:
-    assert_paper_path(snapshot_path, PAPER_TEST_DIR)
-    assert_paper_path(archive_dir, PAPER_TEST_DIR)
+    if account_paths is None:
+        assert_paper_path(snapshot_path, PAPER_TEST_DIR)
+        assert_paper_path(archive_dir, PAPER_TEST_DIR)
+    elif account_paths.account_id != "paper_default":
+        assert_non_default_writer_target(
+            snapshot_path,
+            account_id=account_paths.account_id,
+            account_root=account_paths.root,
+        )
+        assert_non_default_writer_target(
+            archive_dir,
+            account_id=account_paths.account_id,
+            account_root=account_paths.root,
+        )
+    else:
+        assert_paper_path(snapshot_path, PAPER_TEST_DIR)
+        assert_paper_path(archive_dir, PAPER_TEST_DIR)
 
     snapshot_date = str(snapshot_row.get("snapshot_date", "")).strip()
     if not snapshot_date:
@@ -195,7 +212,14 @@ def save_paper_account_snapshot(
         if any(str(row.get("snapshot_date", "")).strip() == snapshot_date for row in existing_rows):
             archive_dir.mkdir(parents=True, exist_ok=True)
             backup_path = build_paper_account_snapshot_backup_path(snapshot_path, archive_dir, now=now)
-            assert_paper_path(backup_path, PAPER_TEST_DIR)
+            if account_paths is None or account_paths.account_id == "paper_default":
+                assert_paper_path(backup_path, PAPER_TEST_DIR)
+            else:
+                assert_non_default_writer_target(
+                    backup_path,
+                    account_id=account_paths.account_id,
+                    account_root=account_paths.root,
+                )
             shutil.copy2(snapshot_path, backup_path)
             replaced = True
 

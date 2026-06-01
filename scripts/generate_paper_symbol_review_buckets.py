@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.paper_account_paths import PaperAccountPaths  # noqa: E402
 from core.paper_symbol_review_buckets import (  # noqa: E402
     build_paper_symbol_review_buckets,
     load_paper_symbol_side_by_side_performance_rows,
@@ -18,15 +19,20 @@ from core.paper_symbol_review_buckets import (  # noqa: E402
 from core.paths import paper_reports_dir  # noqa: E402
 
 
-def generate_paper_symbol_review_buckets() -> dict:
-    reports_dir = paper_reports_dir()
+def generate_paper_symbol_review_buckets(account_paths: PaperAccountPaths | None = None) -> dict:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        reports_dir = account_paths.reports_dir
+        allowed_root = account_paths.root
+    else:
+        reports_dir = paper_reports_dir()
+        allowed_root = None
     input_path = reports_dir / "paper_symbol_side_by_side_performance.csv"
     output_csv_path = reports_dir / "paper_symbol_review_buckets.csv"
     output_summary_path = reports_dir / "paper_symbol_review_buckets_summary.md"
 
-    rows = load_paper_symbol_side_by_side_performance_rows(input_path)
+    rows = load_paper_symbol_side_by_side_performance_rows(input_path, allowed_root=allowed_root)
     review_rows, summary_data, warnings = build_paper_symbol_review_buckets(rows)
-    write_paper_symbol_review_buckets(review_rows, output_csv_path)
+    write_paper_symbol_review_buckets(review_rows, output_csv_path, allowed_root=allowed_root)
     summary = summarize_paper_symbol_review_buckets(
         summary_data,
         warnings,
@@ -36,6 +42,7 @@ def generate_paper_symbol_review_buckets() -> dict:
     write_paper_symbol_review_buckets_summary(
         render_paper_symbol_review_buckets_summary(summary),
         output_summary_path,
+        allowed_root=allowed_root,
     )
     return {
         "input_path": input_path,

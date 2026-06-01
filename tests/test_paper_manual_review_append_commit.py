@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 import core.paper_manual_review_append_commit as commit_module
+from core.paper_account_paths import build_paper_account_paths
 from core.paper_manual_review_append_commit import (
     ManualReviewAppendCommitError,
     commit_manual_review_preview,
@@ -108,6 +109,7 @@ def _preview_payload(
     candidates = candidates or []
     return {
         "review_date": review_date,
+        "account_id": "paper_default",
         "candidate_count": len(candidates),
         "pass_count": sum(1 for item in candidates if item["validation_status"] == "PASS"),
         "warning_count": warning_count,
@@ -230,6 +232,7 @@ def test_warning_preview_appends_with_allow_warnings(review_commit_env):
         preview_json_path=review_commit_env["preview_path"],
         allow_warnings=True,
     )
+    assert result.account_id == "paper_default"
     assert result.appended_count == 1
     with review_commit_env["review_log_path"].open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -237,6 +240,11 @@ def test_warning_preview_appends_with_allow_warnings(review_commit_env):
     assert rows[0]["manual_answer"] == "예, 조건과 일치했다."
     assert rows[0]["review_status"] == "reviewed"
     sidecar = json.loads(Path(result.commit_json_path).read_text(encoding="utf-8"))
+    assert sidecar["account_id"] == "paper_default"
+    assert sidecar["rows"][0]["account_id"] == "paper_default"
+    assert sidecar["rows"][0]["canonical_key"] == "manual_review:paper_default:2026-05-25:AAPL:Q001"
+    assert sidecar["rows"][0]["legacy_canonical_key"] == "manual_review:2026-05-25:AAPL:Q001"
+    assert sidecar["rows"][0]["legacy_key_compatible"] is True
     assert sidecar["appended_count"] == 1
     assert sidecar["rows"][0]["append_status"] == "APPENDED"
 
@@ -336,3 +344,66 @@ def test_append_failure_rolls_back(review_commit_env, monkeypatch):
     with review_commit_env["review_log_path"].open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert rows == []
+
+
+def test_non_default_review_append_writes_under_account_root(tmp_path, monkeypatch):
+    account_root = tmp_path / "paper_accounts" / "paper_growth"
+    account_paths = build_paper_account_paths(
+        "paper_growth",
+        account_root=account_root,
+        allow_legacy_default=False,
+        create=True,
+    )
+    review_log_path = account_paths.reviews_dir / "paper_manual_review_log.csv"
+    template_path = account_paths.reviews_dir / "paper_manual_review_log_template.csv"
+    preview_path = tmp_path / "manual_review_preview_non_default.json"
+
+    _write_csv(review_log_path, [])
+    _write_csv(
+        template_path,
+        [
+            {
+                "review_date": "2026-05-25",
+                "symbol": "AAPL",
+                "review_bucket": "review_loss",
+                "review_priority": "high",
+                "sample_size_flag": "low_sample",
+                "symbol_status": "realized_only",
+                "question_id": "Q001",
+                "question_text": "Question text",
+                "question_category": "review_loss",
+                "is_actionable": "false",
+                "manual_answer": "",
+                "review_status": "pending",
+                "follow_up_needed": "false",
+                "review_tag": "",
+                "reviewer_note": "",
+                "source_worksheet_path": "worksheet.csv",
+                "created_at": "2026-05-25T09:00:00",
+            }
+        ],
+    )
+
+    payload = _preview_payload(candidates=[_preview_candidate()])
+    payload["account_id"] = "paper_growth"
+    payload["candidates"][0]["account_id"] = "paper_growth"
+    payload["candidates"][0]["canonical_key"] = "manual_review:paper_growth:2026-05-25:AAPL:Q001"
+    preview_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = commit_manual_review_preview(
+        review_date="2026-05-25",
+        preview_json_path=preview_path,
+        account_paths=account_paths,
+    )
+
+    assert result.account_id == "paper_growth"
+    sidecar = json.loads(Path(result.commit_json_path).read_text(encoding="utf-8"))
+    row = sidecar["rows"][0]
+    assert row["account_id"] == "paper_growth"
+    assert row["canonical_key"] == "manual_review:paper_growth:2026-05-25:AAPL:Q001"
+    assert row["legacy_canonical_key"] is None
+    assert row["legacy_key_compatible"] is False
+    assert Path(result.commit_json_path).is_relative_to(account_paths.reports_dir.resolve())
+    with review_log_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1

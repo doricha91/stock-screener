@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_paths import PaperAccountPaths
 from core.paths import PAPER_TEST_DIR, paper_account_snapshot_path, paper_execution_log_path, paper_position_snapshot_path
 
 
@@ -15,6 +16,8 @@ WORKFLOW_NO_PLAN = "NO_PLAN"
 WORKFLOW_PLAN_READY = "PLAN_READY"
 WORKFLOW_COMMITTED = "COMMITTED"
 WORKFLOW_REVIEW_READY = "REVIEW_READY"
+WORKFLOW_REVIEW_PARTIAL = "REVIEW_PARTIAL"
+WORKFLOW_REVIEW_DONE = "REVIEW_DONE"
 WORKFLOW_UNKNOWN = "UNKNOWN_OR_INCOMPLETE"
 
 
@@ -160,6 +163,47 @@ def _bool_to_label(value: bool) -> str:
     return "exists" if value else "missing"
 
 
+def _is_review_row_answered(row: dict[str, str]) -> bool:
+    review_status = row.get("review_status", "").strip().lower()
+    manual_answer = row.get("manual_answer", "").strip()
+    return review_status in {"reviewed", "done", "complete", "completed"} or bool(manual_answer)
+
+
+def _summarize_review_progress(
+    review_template_rows: list[dict[str, str]],
+    review_log_rows: list[dict[str, str]],
+) -> dict[str, Any]:
+    template_row_count = len(review_template_rows)
+    log_row_count = len(review_log_rows)
+    if template_row_count == 0:
+        return {
+            "review_answered_row_count": 0,
+            "review_pending_row_count": 0,
+            "review_done_row_count": 0,
+            "review_completion_ratio": 0.0,
+            "review_progress_status": "NOT_APPLICABLE",
+        }
+
+    answered_row_count = sum(1 for row in review_template_rows if _is_review_row_answered(row))
+    pending_row_count = max(template_row_count - answered_row_count, 0)
+    completion_ratio = answered_row_count / template_row_count if template_row_count else 0.0
+
+    if log_row_count == 0:
+        progress_status = "NOT_STARTED"
+    elif pending_row_count == 0:
+        progress_status = "DONE"
+    else:
+        progress_status = "PARTIAL"
+
+    return {
+        "review_answered_row_count": answered_row_count,
+        "review_pending_row_count": pending_row_count,
+        "review_done_row_count": answered_row_count,
+        "review_completion_ratio": round(completion_ratio, 4),
+        "review_progress_status": progress_status,
+    }
+
+
 def _detect_workflow_status(status: dict[str, Any]) -> str:
     if not status["date"]:
         return WORKFLOW_UNKNOWN
@@ -168,6 +212,10 @@ def _detect_workflow_status(status: dict[str, Any]) -> str:
     if not status["same_date_snapshot_exists"]:
         return WORKFLOW_PLAN_READY
     if status["reports_ready"] and status["review_template_exists"] and status["review_validation_result"] == "PASS":
+        if status["manual_review_log_row_count"] > 0:
+            if status["review_pending_row_count"] == 0:
+                return WORKFLOW_REVIEW_DONE
+            return WORKFLOW_REVIEW_PARTIAL
         return WORKFLOW_REVIEW_READY
     if status["current_state_exists"] and status["account_snapshot_exists"] and status["position_snapshot_exists"]:
         return WORKFLOW_COMMITTED
@@ -182,12 +230,22 @@ def _next_recommended_command(workflow_status: str, date_str: str | None) -> str
     if workflow_status == WORKFLOW_COMMITTED:
         return "paper.py review"
     if workflow_status == WORKFLOW_REVIEW_READY:
+        return "paper.py review-append"
+    if workflow_status == WORKFLOW_REVIEW_PARTIAL:
+        return "complete pending review rows then paper.py review-append"
+    if workflow_status == WORKFLOW_REVIEW_DONE:
         return "no immediate action"
     return "inspect status details manually"
 
 
-def run_paper_status(date_str: str | None = None, *, paper_root: Path | None = None) -> dict[str, Any]:
-    paths = build_paper_status_paths(paper_root)
+def run_paper_status(
+    date_str: str | None = None,
+    *,
+    paper_root: Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
+) -> dict[str, Any]:
+    resolved_root = account_paths.root if account_paths is not None else paper_root
+    paths = build_paper_status_paths(resolved_root)
     target_date = _resolve_target_date(date_str, paths)
     compact_date = target_date.replace("-", "") if target_date else None
 
@@ -211,6 +269,7 @@ def run_paper_status(date_str: str | None = None, *, paper_root: Path | None = N
     execution_rows_for_date = [row for row in execution_rows if row.get("date") == target_date]
     review_template_rows = _read_csv_rows(review_template_path) if review_template_path.exists() else []
     review_log_rows = _read_csv_rows(review_log_path) if review_log_path.exists() else []
+    review_progress = _summarize_review_progress(review_template_rows, review_log_rows)
 
     current_state_exists = bool(current_state_path and current_state_path.exists())
     account_snapshot_exists = bool(target_date and account_row.get("snapshot_date") == target_date)
@@ -220,6 +279,9 @@ def run_paper_status(date_str: str | None = None, *, paper_root: Path | None = N
     reports_ready = daily_review_summary_path.exists() and performance_summary_path.exists()
 
     status = {
+        "account_id": account_paths.account_id if account_paths is not None else "paper_default",
+        "account_root": str(paths.paper_root),
+        "legacy_default_used": bool(account_paths.legacy_default_used) if account_paths is not None else False,
         "date": target_date,
         "workflow_status": WORKFLOW_UNKNOWN,
         "latest_plan_date": _latest_date_from_filenames(paths.paper_root, r"daily_action_plan_(\d{8})\.md"),
@@ -254,6 +316,11 @@ def run_paper_status(date_str: str | None = None, *, paper_root: Path | None = N
         "review_validation_result": review_validation["validation_result"],
         "manual_review_log_exists": review_log_path.exists(),
         "manual_review_log_row_count": len(review_log_rows),
+        "review_answered_row_count": review_progress["review_answered_row_count"],
+        "review_pending_row_count": review_progress["review_pending_row_count"],
+        "review_done_row_count": review_progress["review_done_row_count"],
+        "review_completion_ratio": review_progress["review_completion_ratio"],
+        "review_progress_status": review_progress["review_progress_status"],
         "errors": [item for item in [account.get("error"), positions.get("error"), execution.get("error")] if item],
         "reports_ready": reports_ready,
         "paths": {
@@ -270,6 +337,9 @@ def run_paper_status(date_str: str | None = None, *, paper_root: Path | None = N
 def format_paper_status(status: dict[str, Any], *, verbose: bool = False) -> str:
     lines = [
         "PAPER STATUS",
+        f"  account_id: {status.get('account_id') or '-'}",
+        f"  account_root: {status.get('account_root') or '-'}",
+        f"  legacy_default_used: {str(bool(status.get('legacy_default_used'))).lower()}",
         f"  date: {status['date'] or '-'}",
         f"  workflow_status: {status['workflow_status']}",
         f"  latest_snapshot_date: {status['latest_account_snapshot_date'] or status['latest_current_state_date'] or '-'}",
@@ -281,6 +351,9 @@ def format_paper_status(status: dict[str, Any], *, verbose: bool = False) -> str
         f"  reports: {_bool_to_label(status['reports_exists'])}",
         f"  review_template: {_bool_to_label(status['review_template_exists'])}",
         f"  review_validation: {status['review_validation_result'] or ('missing' if not status['review_validation_exists'] else 'unknown')}",
+        f"  review_progress_status: {status.get('review_progress_status') or '-'}",
+        f"  review_pending_row_count: {status.get('review_pending_row_count', 0)}",
+        f"  manual_review_log_row_count: {status['manual_review_log_row_count']}",
         f"  same_date_snapshot_exists: {str(status['same_date_snapshot_exists']).lower()}",
         f"  next_recommended_command: {status['next_recommended_command']}",
     ]
@@ -292,7 +365,9 @@ def format_paper_status(status: dict[str, Any], *, verbose: bool = False) -> str
                 f"  latest_position_snapshot_date: {status['latest_position_snapshot_date'] or '-'}",
                 f"  latest_execution_trade_date: {status['latest_execution_trade_date'] or '-'}",
                 f"  review_template_row_count: {status['review_template_row_count']}",
-                f"  manual_review_log_row_count: {status['manual_review_log_row_count']}",
+                f"  review_answered_row_count: {status.get('review_answered_row_count', 0)}",
+                f"  review_done_row_count: {status.get('review_done_row_count', 0)}",
+                f"  review_completion_ratio: {status.get('review_completion_ratio', 0.0)}",
             ]
         )
         if status["errors"]:

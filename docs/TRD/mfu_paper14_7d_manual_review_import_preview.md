@@ -79,6 +79,238 @@ import candidate 기본 조건:
 - `Review Date = --date`
 - `Import Status = READY`
 
+## 5-1. Manual Reviews DB 속성 정리
+
+`Manual Reviews` DB는 아래 3개 그룹으로 나누어 정리한다.
+
+1. 사용자 입력 중심 필드
+2. 질문 식별 / 추적 필드
+3. 검증 / import 관리 필드
+
+### 1. 사용자 입력 중심 필드
+
+- `Manual Answer`
+- `Review Status`
+- `Follow-up Needed`
+- `Review Tag`
+- `Reviewer Note`
+
+권장 타입:
+
+- `Manual Answer`: `Rich text`
+- `Review Status`: `Select`
+- `Follow-up Needed`: `Select` 또는 `Checkbox`
+- `Review Tag`: `Select` 또는 `Multi-select`
+- `Reviewer Note`: `Rich text`
+
+속성 설명:
+
+- `Manual Answer`
+  - 사용자가 질문에 대해 직접 작성하는 사후복기 답변
+- `Review Status`
+  - 해당 질문에 대한 검토 완료 상태
+- `Follow-up Needed`
+  - 추가 확인 또는 후속 액션 필요 여부
+- `Review Tag`
+  - 사후복기 분류 태그
+- `Reviewer Note`
+  - 자유 메모, 보강 설명, 다음 점검 메모
+
+### 2. 질문 식별 / 추적 필드
+
+- `Name`
+- `External Key`
+- `Review Date`
+- `Symbol`
+- `Question ID`
+- `Question`
+- `Source Template Key`
+
+권장 타입:
+
+- `Name`: `Title`
+- `External Key`: `Rich text`
+- `Review Date`: `Date`
+- `Symbol`: `Rich text`
+- `Question ID`: `Rich text`
+- `Question`: `Rich text`
+- `Source Template Key`: `Rich text`
+
+속성 설명:
+
+- `Name`
+  - Notion 목록 화면에서 row를 식별하기 위한 제목
+  - 예: `2026-05-25 AAPL review_loss_1`
+- `External Key`
+  - Notion row와 Python preview/import 결과를 안정적으로 연결하기 위한 식별자
+- `Review Date`
+  - review 대상 날짜
+- `Symbol`
+  - review 대상 종목
+- `Question ID`
+  - 기존 template/CSV 기준 질문 식별자
+- `Question`
+  - 사용자가 답변할 실제 질문 원문
+- `Source Template Key`
+  - 어떤 template row 또는 worksheet source에서 왔는지 추적하기 위한 키
+
+### 3. 검증 / import 관리 필드
+
+- `Validation Status`
+- `Validation Message`
+- `Import Status`
+- `Imported At`
+- `Synced At`
+
+권장 타입:
+
+- `Validation Status`: `Select`
+- `Validation Message`: `Rich text`
+- `Import Status`: `Select`
+- `Imported At`: `Rich text`
+- `Synced At`: `Rich text`
+
+속성 설명:
+
+- `Validation Status`
+  - Python preview/validator 기준 PASS/WARNING/FAIL 상태
+- `Validation Message`
+  - warning 또는 fail 상세 메시지 요약
+- `Import Status`
+  - preview 대상인지, commit 완료인지 등 review import workflow 상태
+- `Imported At`
+  - 최종 append commit 완료 시각
+- `Synced At`
+  - Notion row와 Python sync 처리 시각
+
+## 5-2. 권장 select / boolean option
+
+### Review Status
+
+권장 option:
+
+- `pending`
+- `reviewed`
+- `deferred`
+- `not_applicable`
+
+의미:
+
+- `pending`
+  - 아직 답변/검토 완료 전 상태
+- `reviewed`
+  - 답변 작성 완료, 일반 검토 완료 상태
+- `deferred`
+  - 답변은 남기되 후속 검토로 넘기는 상태
+- `not_applicable`
+  - 해당 질문이 이번 review row에 실질적으로 적용되지 않는 상태
+
+### Follow-up Needed
+
+권장 option:
+
+- `true`
+- `false`
+
+의미:
+
+- `true`
+  - 해당 질문에 대해 추가 확인, 후속 조사, 다음 회차 점검이 필요함
+- `false`
+  - 현재 답변 기준으로 추가 후속 조치가 필요하지 않음
+
+정책:
+
+- 기존 Python validator와의 정합성을 위해 의미상 boolean으로 유지한다.
+- Notion 속성 타입은 `Select` 또는 `Checkbox`를 허용하되, importer에서는 `true/false` 의미로 정규화한다.
+
+### Review Tag
+
+권장 option:
+
+- `entry_rule`
+- `exit_rule`
+- `position_sizing`
+- `market_regime`
+- `risk_management`
+- `data_quality`
+- `execution_quality`
+- `signal_quality`
+- `psychology`
+- `other`
+
+의미:
+
+- `entry_rule`
+  - 진입 조건 해석, 진입 신호 품질, 진입 시점 판단 문제
+- `exit_rule`
+  - 청산 조건, stop rule, 이익실현/손절 실행 문제
+- `position_sizing`
+  - 포지션 크기, 비중, sizing 규칙 관련 문제
+- `market_regime`
+  - 시장 국면 판단, regime 전환 대응, macro context 관련 문제
+- `risk_management`
+  - 손실 통제, 리스크 한도, 보호 장치 관련 문제
+- `data_quality`
+  - 데이터 누락, 가격 이상치, source artifact 정합성 문제
+- `execution_quality`
+  - 체결 품질, 주문 실행, 실제 체결과 계획 차이 관련 문제
+- `signal_quality`
+  - 신호 자체의 품질, false positive/negative, 전략 적합성 문제
+- `psychology`
+  - 사용자의 심리, 규칙 이탈, discretionary 판단 개입 문제
+- `other`
+  - 위 분류에 명확히 들어가지 않는 기타 review 메모
+
+정책:
+
+- 단일 태그면 `Select`
+- 다중 태그를 허용하려면 `Multi-select`
+- 기존 Python validator는 comma-separated multiple tag를 warning으로 보므로, 1차 운영은 단일 태그 기준이 더 안전하다.
+
+### Validation Status
+
+권장 option:
+
+- `NOT_CHECKED`
+- `PASS`
+- `WARNING`
+- `FAIL`
+
+의미:
+
+- `NOT_CHECKED`
+  - Python preview/validator를 아직 실행하지 않은 상태
+- `PASS`
+  - 필수 입력과 기존 validator 규칙을 모두 만족한 상태
+- `WARNING`
+  - import는 가능하지만, 보강 메모 또는 선택 필드 누락 등 경고가 있는 상태
+- `FAIL`
+  - append commit 전 반드시 수정해야 하는 오류가 있는 상태
+
+### Import Status
+
+권장 option:
+
+- `DRAFT`
+- `READY`
+- `PREVIEWED`
+- `COMMITTED`
+- `SKIPPED`
+
+의미:
+
+- `DRAFT`
+  - 사용자가 아직 입력 중인 상태
+- `READY`
+  - preview 대상 후보로 읽어도 되는 상태
+- `PREVIEWED`
+  - Python preview는 완료됐지만 아직 append commit 전 상태
+- `COMMITTED`
+  - 최종 review log append 완료 상태
+- `SKIPPED`
+  - 정책상 import 대상에서 제외된 상태
+
 
 ## 6. validation 규칙
 

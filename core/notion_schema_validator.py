@@ -18,6 +18,7 @@ class ExpectedProperty:
     source_key: str
     notion_type: str | tuple[str, ...]
     required: bool = True
+    missing_severity: str = FAIL
     select_options: tuple[str, ...] = ()
     check_options: bool = False
 
@@ -46,6 +47,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
         schemas["weekly_reports"] = [
             _expected(weekly, "name", "title"),
             _expected(weekly, "external_key", "rich_text"),
+            _expected(weekly, "account_id", "select", required=False, missing_severity=WARNING, select_options=("paper_default",), check_options=True),
             _expected(weekly, "period.actual_start", "date"),
             _expected(weekly, "period.actual_end", "date"),
             _expected(weekly, "latest_snapshot_date", "date"),
@@ -69,6 +71,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
         schemas["benchmark_reports"] = [
             _expected(benchmark, "name", "title"),
             _expected(benchmark, "external_key", "rich_text"),
+            _expected(benchmark, "account_id", "select", required=False, missing_severity=WARNING, select_options=("paper_default",), check_options=True),
             _expected(benchmark, "latest_snapshot_date", "date"),
             _expected(benchmark, "run_mode", "select", select_options=("EXPLORATORY",), check_options=False),
             _expected(benchmark, "official_run", "select", select_options=("TRUE", "FALSE"), check_options=True),
@@ -94,6 +97,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
         schemas["account_snapshots"] = [
             _expected(account, "name", "title"),
             _expected(account, "external_key", "rich_text"),
+            _expected(account, "account_id", "select", required=False, missing_severity=WARNING, select_options=("paper_default",), check_options=True),
             _expected(account, "snapshot_date", "date"),
             _expected(account, "initial_cash", "number"),
             _expected(account, "cash", "number"),
@@ -114,6 +118,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
         schemas["daily_plans"] = [
             _expected(daily_plan, "name", "title"),
             _expected(daily_plan, "external_key", "rich_text"),
+            _expected(daily_plan, "account_id", "select", required=False, missing_severity=WARNING, select_options=("paper_default",), check_options=True),
             _expected(daily_plan, "plan_date", "date"),
             _expected(daily_plan, "regime", "select", select_options=("BULL", "BEAR", "PANIC"), check_options=False),
             _expected(daily_plan, "confirmed_trade_count", "number"),
@@ -129,6 +134,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
         manual_execution = get_mapping_section(mapping_root, "manual_executions")
         schemas["manual_executions"] = [
             _expected(manual_execution, "name", "title"),
+            _expected(manual_execution, "account_id", "select", required=False, missing_severity=WARNING, select_options=("paper_default",), check_options=True),
             _expected(manual_execution, "execution_date", "date"),
             _expected(manual_execution, "symbol", "rich_text"),
             _expected(manual_execution, "side", "select", select_options=("BUY", "SELL"), check_options=True),
@@ -173,6 +179,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
         schemas["manual_reviews"] = [
             _expected(manual_review, "name", "title"),
             _expected(manual_review, "external_key", "rich_text", required=False),
+            _expected(manual_review, "account_id", "select", required=False, missing_severity=WARNING, select_options=("paper_default",), check_options=True),
             _expected(manual_review, "review_date", "date"),
             _expected(manual_review, "symbol", "rich_text"),
             _expected(manual_review, "question_id", "rich_text"),
@@ -221,6 +228,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
         schemas["daily_review_summaries"] = [
             _expected(daily_review, "name", "title"),
             _expected(daily_review, "external_key", "rich_text"),
+            _expected(daily_review, "account_id", "select", required=False, missing_severity=WARNING, select_options=("paper_default",), check_options=True),
             _expected(daily_review, "review_date", "date"),
             _expected(
                 daily_review,
@@ -250,6 +258,73 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(daily_review, "synced_at", "rich_text"),
             _expected(daily_review, "sync_status", "select", select_options=("SYNCED",), check_options=True),
         ]
+    if "daily_ops_status" in mapping_root:
+        daily_ops = get_mapping_section(mapping_root, "daily_ops_status")
+        schemas["daily_ops_status"] = [
+            _expected(daily_ops, "name", "title"),
+            _expected(daily_ops, "external_key", "rich_text"),
+            _expected(daily_ops, "account_id", "select", required=False, missing_severity=WARNING, select_options=("paper_default",), check_options=True),
+            _expected(daily_ops, "status_date", "date"),
+            _expected(
+                daily_ops,
+                "workflow_status",
+                "select",
+                select_options=(
+                    "NO_PLAN",
+                    "PLAN_READY",
+                    "COMMITTED",
+                    "REVIEW_READY",
+                    "REVIEW_PARTIAL",
+                    "REVIEW_DONE",
+                    "UNKNOWN_OR_INCOMPLETE",
+                ),
+                check_options=True,
+            ),
+            _expected(
+                daily_ops,
+                "review_progress_status",
+                "select",
+                select_options=("NOT_STARTED", "READY", "PARTIAL", "DONE", "UNKNOWN", "NOT_APPLICABLE"),
+                check_options=True,
+            ),
+            _expected(daily_ops, "review_completion_ratio", "number"),
+            _expected(daily_ops, "next_recommended_command", "rich_text"),
+            _expected(daily_ops, "blocking_reason", "rich_text", required=False),
+            _expected(daily_ops, "plan_exists", "checkbox"),
+            _expected(daily_ops, "current_state_exists", "checkbox"),
+            _expected(daily_ops, "account_snapshot_exists", "checkbox"),
+            _expected(daily_ops, "position_snapshot_exists", "checkbox"),
+            _expected(daily_ops, "execution_log_rows_for_date", "number"),
+            _expected(daily_ops, "reports_ready", "checkbox"),
+            _expected(daily_ops, "daily_review_summary_exists", "checkbox"),
+            _expected(daily_ops, "performance_summary_exists", "checkbox"),
+            _expected(daily_ops, "review_template_exists", "checkbox"),
+            _expected(daily_ops, "review_template_row_count", "number"),
+            _expected(
+                daily_ops,
+                "review_validation_result",
+                "select",
+                required=False,
+                select_options=("PASS", "FAIL"),
+                check_options=True,
+            ),
+            _expected(daily_ops, "manual_review_log_exists", "checkbox"),
+            _expected(daily_ops, "manual_review_log_row_count", "number"),
+            _expected(daily_ops, "review_answered_row_count", "number"),
+            _expected(daily_ops, "review_pending_row_count", "number"),
+            _expected(daily_ops, "last_status_checked_at", "date"),
+            _expected(
+                daily_ops,
+                "sync_status",
+                "select",
+                required=False,
+                select_options=("DRY_RUN", "SYNCED", "FAILED", "SKIPPED"),
+                check_options=True,
+            ),
+            _expected(daily_ops, "synced_at", "date", required=False),
+            _expected(daily_ops, "schema_version", "rich_text"),
+            _expected(daily_ops, "source_root", "rich_text"),
+        ]
     return schemas
 
 
@@ -274,10 +349,19 @@ def validate_data_source_schema(
             if expected.required:
                 issues.append(
                     ValidationIssue(
-                        severity=FAIL,
+                        severity=expected.missing_severity,
                         property_name=property_name,
                         code="missing_property",
                         message=f"{property_name} is missing.",
+                    )
+                )
+            elif expected.missing_severity in {WARNING, FAIL}:
+                issues.append(
+                    ValidationIssue(
+                        severity=expected.missing_severity,
+                        property_name=property_name,
+                        code="recommended_property_missing",
+                        message=f"{property_name} is recommended for multi-account support but is missing.",
                     )
                 )
             continue
@@ -338,6 +422,7 @@ def validate_selected_data_sources(
         "manual_executions": "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID",
         "manual_reviews": "NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID",
         "daily_review_summaries": "NOTION_DAILY_REVIEW_SUMMARIES_DATA_SOURCE_ID",
+        "daily_ops_status": "NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID",
     }
     results: list[DataSourceValidationResult] = []
     for target in targets:
@@ -349,7 +434,7 @@ def validate_selected_data_sources(
                 env_override=env_override_map[target],
             )
         except NotionSettingsError as exc:
-            if target not in {"daily_plans", "manual_executions", "manual_reviews", "daily_review_summaries"}:
+            if target not in {"daily_plans", "manual_executions", "manual_reviews", "daily_review_summaries", "daily_ops_status"}:
                 raise
             expected_schema = build_expected_schema(mapping_root)
             results.append(
@@ -423,6 +508,7 @@ def _expected(
     notion_type: str | tuple[str, ...],
     *,
     required: bool = True,
+    missing_severity: str = FAIL,
     select_options: tuple[str, ...] = (),
     check_options: bool = False,
 ) -> ExpectedProperty:
@@ -430,6 +516,7 @@ def _expected(
         source_key=resolve_notion_property_name(mapping_section, source_key),
         notion_type=notion_type,
         required=required,
+        missing_severity=missing_severity,
         select_options=select_options,
         check_options=check_options,
     )

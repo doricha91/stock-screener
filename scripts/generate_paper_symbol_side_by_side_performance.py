@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.paper_account_paths import PaperAccountPaths  # noqa: E402
 from core.paper_symbol_side_by_side_performance import (  # noqa: E402
     build_paper_symbol_side_by_side_performance,
     load_paper_symbol_realized_performance_rows,
@@ -19,17 +20,22 @@ from core.paper_symbol_side_by_side_performance import (  # noqa: E402
 from core.paths import paper_reports_dir  # noqa: E402
 
 
-def generate_paper_symbol_side_by_side_performance() -> dict:
-    reports_dir = paper_reports_dir()
+def generate_paper_symbol_side_by_side_performance(account_paths: PaperAccountPaths | None = None) -> dict:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        reports_dir = account_paths.reports_dir
+        allowed_root = account_paths.root
+    else:
+        reports_dir = paper_reports_dir()
+        allowed_root = None
     realized_input_path = reports_dir / "paper_symbol_realized_performance.csv"
     unrealized_input_path = reports_dir / "paper_symbol_unrealized_performance.csv"
     output_csv_path = reports_dir / "paper_symbol_side_by_side_performance.csv"
     output_summary_path = reports_dir / "paper_symbol_side_by_side_performance_summary.md"
 
-    realized_rows = load_paper_symbol_realized_performance_rows(realized_input_path)
-    unrealized_rows = load_paper_symbol_unrealized_performance_rows(unrealized_input_path)
+    realized_rows = load_paper_symbol_realized_performance_rows(realized_input_path, allowed_root=allowed_root)
+    unrealized_rows = load_paper_symbol_unrealized_performance_rows(unrealized_input_path, allowed_root=allowed_root)
     rows, summary_data, warnings = build_paper_symbol_side_by_side_performance(realized_rows, unrealized_rows)
-    write_paper_symbol_side_by_side_performance(rows, output_csv_path)
+    write_paper_symbol_side_by_side_performance(rows, output_csv_path, allowed_root=allowed_root)
     summary = summarize_paper_symbol_side_by_side_performance(
         summary_data,
         warnings,
@@ -40,6 +46,7 @@ def generate_paper_symbol_side_by_side_performance() -> dict:
     write_paper_symbol_side_by_side_performance_summary(
         render_paper_symbol_side_by_side_performance_summary(summary),
         output_summary_path,
+        allowed_root=allowed_root,
     )
     return {
         "realized_input_path": realized_input_path,

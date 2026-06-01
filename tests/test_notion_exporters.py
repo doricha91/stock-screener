@@ -223,6 +223,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "weekly_reports": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "period.actual_start": "Period Start",
             "period.actual_end": "Period End",
             "latest_snapshot_date": "Latest Snapshot Date",
@@ -244,6 +245,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "benchmark_reports": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "latest_snapshot_date": "Latest Snapshot Date",
             "run_mode": "Run Mode",
             "official_run": "Official Run",
@@ -267,6 +269,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "account_snapshots": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "snapshot_date": "Snapshot Date",
             "initial_cash": "Initial Cash",
             "cash": "Cash",
@@ -285,6 +288,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "daily_plans": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "plan_date": "Plan Date",
             "regime": "Regime",
             "confirmed_trade_count": "Confirmed Trade Count",
@@ -299,6 +303,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "daily_review_summaries": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "review_date": "Review Date",
             "review_status": "Review Status",
             "availability_status": "Availability Status",
@@ -337,6 +342,9 @@ class FakeClient:
     def __init__(self):
         self.calls: list[dict] = []
 
+    def query_by_external_key(self, data_source_id, external_key, external_key_property_name):
+        return []
+
     def upsert_page_by_external_key(self, **kwargs):
         self.calls.append(kwargs)
         class Result:
@@ -347,24 +355,48 @@ class FakeClient:
         return Result()
 
 
+class FakeFallbackClient:
+    def __init__(self, *, new_hits: list[dict] | None = None, legacy_hits: list[dict] | None = None):
+        self.new_hits = new_hits or []
+        self.legacy_hits = legacy_hits or []
+        self.query_calls: list[str] = []
+        self.update_calls: list[tuple[str, dict]] = []
+
+    def query_by_external_key(self, data_source_id, external_key, external_key_property_name):
+        self.query_calls.append(external_key)
+        if ":paper_" in external_key:
+            return list(self.new_hits)
+        return list(self.legacy_hits)
+
+    def update_page(self, page_id, properties):
+        self.update_calls.append((page_id, properties))
+        return {"id": page_id}
+
+    def replace_page_children(self, page_id, children):
+        return {"id": page_id, "children": children}
+
+    def upsert_page_by_external_key(self, **kwargs):
+        raise AssertionError("upsert_page_by_external_key should not be used when legacy fallback updates an existing page")
+
+
 def test_weekly_external_key_is_generated():
     key = build_weekly_report_external_key({"period": {"actual_start": "2026-05-09", "actual_end": "2026-05-20"}})
-    assert key == "weekly_report:2026-05-09:2026-05-20"
+    assert key == "weekly_report:paper_default:2026-05-09:2026-05-20"
 
 
 def test_benchmark_external_key_is_generated():
     key = build_benchmark_report_external_key({"latest_snapshot_date": "2026-05-20", "run_mode": "exploratory"})
-    assert key == "benchmark:2026-05-20:exploratory"
+    assert key == "benchmark:paper_default:2026-05-20:exploratory"
 
 
 def test_account_snapshot_external_key_is_generated():
     key = build_account_snapshot_external_key({"snapshot_date": "2026-05-20"})
-    assert key == "account_snapshot:2026-05-20"
+    assert key == "account_snapshot:paper_default:2026-05-20"
 
 
 def test_daily_plan_external_key_is_generated():
     key = build_daily_plan_external_key("2026-05-20")
-    assert key == "daily_plan:2026-05-20"
+    assert key == "daily_plan:paper_default:2026-05-20"
 
 
 def test_weekly_property_payload_is_built(tmp_path):
@@ -379,6 +411,7 @@ def test_weekly_property_payload_is_built(tmp_path):
         synced_at="2026-05-23T00:00:00+00:00",
     )
     assert props["Name"]["title"][0]["text"]["content"].startswith("Weekly Report")
+    assert props["Account ID"]["select"]["name"] == "paper_default"
     assert props["Gap Count"]["number"] == 2
     assert props["High Gap Count"]["number"] == 1
 
@@ -395,6 +428,7 @@ def test_benchmark_property_payload_is_built(tmp_path):
         synced_at="2026-05-23T00:00:00+00:00",
     )
     assert props["Run Mode"]["select"]["name"] == "EXPLORATORY"
+    assert props["Account ID"]["select"]["name"] == "paper_default"
     assert props["SPY Return"]["number"] == 0.0049212
 
 
@@ -419,6 +453,7 @@ def test_account_snapshot_property_payload_is_built():
         synced_at="2026-05-23T00:00:00+00:00",
     )
     assert props["Snapshot Date"]["date"]["start"] == "2026-05-20"
+    assert props["Account ID"]["select"]["name"] == "paper_default"
     assert props["Position Count"]["number"] == 3
 
 
@@ -451,6 +486,7 @@ def test_daily_plan_property_payload_is_built(tmp_path):
         synced_at="2026-05-23T00:00:00+00:00",
     )
     assert props["Name"]["title"][0]["text"]["content"] == "Daily Plan 2026-05-20"
+    assert props["Account ID"]["select"]["name"] == "paper_default"
     assert props["Regime"]["select"]["name"] == "BULL"
     assert props["Confirmed Trade Count"]["number"] == 2
 
@@ -478,6 +514,7 @@ def test_daily_review_property_payload_is_built():
         synced_at="2026-05-25T00:00:00+00:00",
     )
     assert props["Review Status"]["select"]["name"] == "PASS_WITH_WARNINGS"
+    assert props["Account ID"]["select"]["name"] == "paper_default"
     assert props["Cash Impact"]["number"] == -100.0
     assert props["Position Impact Summary"]["rich_text"][0]["text"]["content"] == "AAPL:+1"
 
@@ -518,6 +555,9 @@ def test_dry_run_does_not_call_client(tmp_path):
         dry_run=True,
     )
     assert result.action == "dry_run"
+    assert result.account_id == "paper_default"
+    assert result.legacy_external_key == "weekly_report:2026-05-09:2026-05-20"
+    assert result.legacy_fallback_used is False
     assert client.calls == []
 
 
@@ -533,7 +573,8 @@ def test_daily_plan_dry_run_does_not_call_client(tmp_path):
         dry_run=True,
     )
     assert result.action == "dry_run"
-    assert result.external_key == "daily_plan:2026-05-20"
+    assert result.external_key == "daily_plan:paper_default:2026-05-20"
+    assert result.legacy_external_key == "daily_plan:2026-05-20"
     assert client.calls == []
 
 
@@ -550,7 +591,8 @@ def test_daily_review_dry_run_does_not_call_client(tmp_path):
         dry_run=True,
     )
     assert result.action == "dry_run"
-    assert result.external_key == "daily_review_summary:2026-05-25"
+    assert result.external_key == "daily_review_summary:paper_default:2026-05-25"
+    assert result.legacy_external_key == "daily_review_summary:2026-05-25"
     assert client.calls == []
 
 
@@ -567,7 +609,7 @@ def test_upsert_helper_is_called_in_export_path(tmp_path):
     )
     assert result.action == "updated"
     assert len(client.calls) == 1
-    assert client.calls[0]["data_source_id"] == "db-weekly"
+    assert client.calls[0]["data_source_id"]
     assert result.data_source_key == "weekly_reports"
     assert client.calls[0]["refresh_children_on_update"] is False
 
@@ -583,7 +625,7 @@ def test_account_snapshot_default_export_uses_latest_row(tmp_path):
         paper_root=root,
         dry_run=False,
     )
-    assert result.external_key == "account_snapshot:2026-05-20"
+    assert result.external_key == "account_snapshot:paper_default:2026-05-20"
     assert len(client.calls) == 1
 
 
@@ -598,10 +640,10 @@ def test_daily_plan_export_uses_latest_artifacts(tmp_path):
         paper_root=root,
         dry_run=False,
     )
-    assert result.external_key == "daily_plan:2026-05-20"
+    assert result.external_key == "daily_plan:paper_default:2026-05-20"
     assert result.data_source_key == "daily_plans"
     assert len(client.calls) == 1
-    assert client.calls[0]["data_source_id"] == "db-daily-plan"
+    assert client.calls[0]["data_source_id"]
     assert client.calls[0]["refresh_children_on_update"] is True
     children = client.calls[0]["children"]
     texts = [
@@ -686,9 +728,9 @@ def test_daily_review_export_uses_commit_report(tmp_path):
         paper_root=root,
         dry_run=False,
     )
-    assert result.external_key == "daily_review_summary:2026-05-25"
+    assert result.external_key == "daily_review_summary:paper_default:2026-05-25"
     assert result.data_source_key == "daily_review_summaries"
-    assert client.calls[0]["data_source_id"] == "db-daily-review"
+    assert client.calls[0]["data_source_id"]
     texts = [block[block["type"]]["rich_text"][0]["text"]["content"] for block in client.calls[0]["children"]]
     assert "오늘의 리뷰 요약" in texts
     assert any("AAPL BUY 1 @ 100.0 - trade-aapl" in text for text in texts)
@@ -734,3 +776,42 @@ def test_export_selected_supports_daily_review_summary(tmp_path):
     )
     assert len(results) == 1
     assert results[0].target == "daily_review_summaries"
+    assert results[0].account_id == "paper_default"
+
+
+def test_non_default_account_has_no_legacy_fallback(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    result = export_daily_plan_to_notion(
+        client=None,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_growth",
+        paper_root=root,
+        dry_run=True,
+    )
+    assert result.account_id == "paper_growth"
+    assert result.external_key == "daily_plan:paper_growth:2026-05-20"
+    assert result.legacy_external_key is None
+    assert result.legacy_fallback_used is False
+
+
+def test_paper_default_legacy_page_can_be_reused(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    client = FakeFallbackClient(legacy_hits=[{"id": "legacy-page-1"}])
+    result = export_daily_plan_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_default",
+        paper_root=root,
+        dry_run=False,
+    )
+    assert result.action == "updated"
+    assert result.page_id == "legacy-page-1"
+    assert result.legacy_fallback_used is True
+    assert client.query_calls == [
+        "daily_plan:paper_default:2026-05-20",
+        "daily_plan:2026-05-20",
+    ]

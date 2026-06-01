@@ -21,6 +21,8 @@ from core.paper_manual_review_append_commit import (  # noqa: E402
     commit_manual_review_preview,
 )
 from core.notion_mapping import load_notion_property_mapping  # noqa: E402
+from core.notion_account_keys import normalize_notion_account_id  # noqa: E402
+from core.paper_account_paths import build_paper_account_paths  # noqa: E402
 from core.notion_settings import (  # noqa: E402
     NotionSettingsError,
     get_notion_token,
@@ -38,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--date", required=True, help="Review date in YYYY-MM-DD format")
+    parser.add_argument("--account-id", help="Paper account id for preview account filtering")
     parser.add_argument("--preview", action="store_true", help="Generate preview only")
     parser.add_argument("--commit", action="store_true", help="Append validated preview JSON rows to paper_manual_review_log.csv")
     parser.add_argument("--preview-json", help="Preview JSON path required for --commit")
@@ -49,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    resolved_account_id = normalize_notion_account_id(args.account_id)
     if args.preview and args.commit:
         parser.error("Select either --preview or --commit, not both.")
     if not args.preview and not args.commit:
@@ -58,10 +62,16 @@ def main(argv: list[str] | None = None) -> int:
         if not args.preview_json:
             parser.error("--preview-json is required for --commit.")
         try:
+            account_paths = (
+                None
+                if resolved_account_id == "paper_default"
+                else build_paper_account_paths(resolved_account_id, create=True)
+            )
             result = commit_manual_review_preview(
                 review_date=args.date,
                 preview_json_path=Path(args.preview_json),
                 allow_warnings=args.allow_warnings,
+                account_paths=account_paths,
             )
         except ManualReviewAppendCommitError as exc:
             if args.json:
@@ -72,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
 
         payload = {
             "status": "COMMITTED",
+            "account_id": result.account_id,
             "review_date": result.review_date,
             "preview_json_path": result.preview_json_path,
             "commit_json_path": result.commit_json_path,
@@ -83,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         print("MANUAL REVIEW COMMIT")
         print(
-            f"  date={result.review_date} appended_rows={result.appended_count} "
+            f"  account_id={result.account_id} date={result.review_date} appended_rows={result.appended_count} "
             f"commit_json={result.commit_json_path}"
         )
         if args.json:
@@ -99,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             settings=settings,
             mapping_root=mapping,
             review_date=args.date,
+            account_id=resolved_account_id,
         )
     except (ManualReviewImportError, NotionAPIError, NotionSettingsError) as exc:
         if args.json:
@@ -110,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = preview.to_dict()
     print("MANUAL REVIEW IMPORT PREVIEW")
     print(
-        f"  date={preview.review_date} candidates={preview.candidate_count} "
+        f"  account_id={preview.account_id} date={preview.review_date} candidates={preview.candidate_count} "
         f"append_allowed={preview.append_allowed} json={preview.json_path}"
     )
     if args.json:

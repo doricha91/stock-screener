@@ -10,6 +10,7 @@
   "weekly_reports": {
     "name": "Name",
     "external_key": "External Key",
+    "account_id": "Account ID",
     "period.actual_start": "Period Start",
     "period.actual_end": "Period End",
     "latest_snapshot_date": "Latest Snapshot Date",
@@ -31,6 +32,7 @@
   "benchmark_reports": {
     "name": "Name",
     "external_key": "External Key",
+    "account_id": "Account ID",
     "latest_snapshot_date": "Latest Snapshot Date",
     "run_mode": "Run Mode",
     "official_run": "Official Run",
@@ -54,6 +56,7 @@
   "daily_plans": {
     "name": "Name",
     "external_key": "External Key",
+    "account_id": "Account ID",
     "plan_date": "Plan Date",
     "regime": "Regime",
     "confirmed_trade_count": "Confirmed Trade Count",
@@ -68,6 +71,7 @@
   "account_snapshots": {
     "name": "Name",
     "external_key": "External Key",
+    "account_id": "Account ID",
     "snapshot_date": "Snapshot Date",
     "initial_cash": "Initial Cash",
     "cash": "Cash",
@@ -86,6 +90,7 @@
   "daily_review_summaries": {
     "name": "Name",
     "external_key": "External Key",
+    "account_id": "Account ID",
     "review_date": "Review Date",
     "review_status": "Review Status",
     "availability_status": "Availability Status",
@@ -109,6 +114,7 @@
   "manual_reviews": {
     "name": "Name",
     "external_key": "External Key",
+    "account_id": "Account ID",
     "review_date": "Review Date",
     "symbol": "Symbol",
     "question_id": "Question ID",
@@ -128,6 +134,7 @@
   "manual_executions": {
     "name": "Name",
     "external_key": "External Key",
+    "account_id": "Account ID",
     "execution_date": "Execution Date",
     "plan_date": "Plan Date",
     "symbol": "Symbol",
@@ -145,5 +152,36 @@
     "import_status": "Import Status",
     "imported_at": "Imported At",
     "synced_at": "Synced At"
+  },
+  "daily_ops_status": {
+    "name": "Name",
+    "external_key": "External Key",
+    "account_id": "Account ID",
+    "status_date": "Status Date",
+    "workflow_status": "Workflow Status",
+    "review_progress_status": "Review Progress Status",
+    "review_completion_ratio": "Review Completion Ratio",
+    "next_recommended_command": "Next Recommended Command",
+    "blocking_reason": "Blocking Reason",
+    "plan_exists": "Plan Exists",
+    "current_state_exists": "Current State Exists",
+    "account_snapshot_exists": "Account Snapshot Exists",
+    "position_snapshot_exists": "Position Snapshot Exists",
+    "execution_log_rows_for_date": "Execution Log Rows For Date",
+    "reports_ready": "Reports Ready",
+    "daily_review_summary_exists": "Daily Review Summary Exists",
+    "performance_summary_exists": "Performance Summary Exists",
+    "review_template_exists": "Review Template Exists",
+    "review_template_row_count": "Review Template Row Count",
+    "review_validation_result": "Review Validation Result",
+    "manual_review_log_exists": "Manual Review Log Exists",
+    "manual_review_log_row_count": "Manual Review Log Row Count",
+    "review_answered_row_count": "Review Answered Row Count",
+    "review_pending_row_count": "Review Pending Row Count",
+    "last_status_checked_at": "Last Status Checked At",
+    "sync_status": "Sync Status",
+    "synced_at": "Synced At",
+    "schema_version": "Schema Version",
+    "source_root": "Source Root"
   }
 }

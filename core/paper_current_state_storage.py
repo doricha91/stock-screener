@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_guard import assert_non_default_writer_target
 from core.paper_current_state_serializer import paper_account_state_to_current_state_dict
 from core.paper_safety import assert_paper_path
 from core.paths import PAPER_TEST_DIR
@@ -45,9 +46,25 @@ def save_paper_current_state(
     output_path: Path,
     archive_dir: Path,
     now: datetime | None = None,
+    account_paths=None,
 ) -> dict[str, Any]:
-    assert_paper_path(output_path, PAPER_TEST_DIR)
-    assert_paper_path(archive_dir, PAPER_TEST_DIR)
+    if account_paths is None:
+        assert_paper_path(output_path, PAPER_TEST_DIR)
+        assert_paper_path(archive_dir, PAPER_TEST_DIR)
+    elif account_paths.account_id != "paper_default":
+        assert_non_default_writer_target(
+            output_path,
+            account_id=account_paths.account_id,
+            account_root=account_paths.root,
+        )
+        assert_non_default_writer_target(
+            archive_dir,
+            account_id=account_paths.account_id,
+            account_root=account_paths.root,
+        )
+    else:
+        assert_paper_path(output_path, PAPER_TEST_DIR)
+        assert_paper_path(archive_dir, PAPER_TEST_DIR)
 
     payload = paper_account_state_to_current_state_dict(state, date_str)
     _validate_saved_current_state_payload(payload)
@@ -56,7 +73,14 @@ def save_paper_current_state(
     if output_path.exists():
         archive_dir.mkdir(parents=True, exist_ok=True)
         backup_path = build_paper_current_state_backup_path(output_path, archive_dir, now=now)
-        assert_paper_path(backup_path, PAPER_TEST_DIR)
+        if account_paths is None or account_paths.account_id == "paper_default":
+            assert_paper_path(backup_path, PAPER_TEST_DIR)
+        else:
+            assert_non_default_writer_target(
+                backup_path,
+                account_id=account_paths.account_id,
+                account_root=account_paths.root,
+            )
         shutil.copy2(output_path, backup_path)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,10 +10,23 @@ from typing import Any
 
 from core.daily_review_summary_exporter import (
     build_daily_review_summary,
-    build_daily_review_summary_external_key,
+)
+from core.notion_account_keys import (
+    build_account_snapshot_external_key as build_account_snapshot_external_key_with_account,
+    build_benchmark_report_external_key as build_benchmark_report_external_key_with_account,
+    build_daily_plan_external_key as build_daily_plan_external_key_with_account,
+    build_daily_review_summary_external_key as build_daily_review_summary_external_key_with_account,
+    build_legacy_account_snapshot_external_key,
+    build_legacy_benchmark_report_external_key,
+    build_legacy_daily_plan_external_key,
+    build_legacy_daily_review_summary_external_key,
+    build_legacy_weekly_report_external_key,
+    build_weekly_report_external_key as build_weekly_report_external_key_with_account,
+    normalize_notion_account_id,
 )
 from core.notion_client import (
     NotionClient,
+    NotionDuplicateExternalKeyError,
     notion_date,
     notion_number,
     notion_rich_text,
@@ -35,8 +48,11 @@ class NotionExportError(RuntimeError):
 
 @dataclass
 class ExportResult:
+    account_id: str
     target: str
     external_key: str
+    legacy_external_key: str | None
+    legacy_fallback_used: bool
     action: str
     page_id: str | None
     source_path: str
@@ -86,21 +102,41 @@ def _safe_float(value: str | float | int | None) -> float | None:
         return None
 
 
-def build_weekly_report_external_key(summary: dict[str, Any]) -> str:
+def build_weekly_report_external_key(
+    summary: dict[str, Any],
+    account_id: str | None = None,
+) -> str:
     period = summary.get("period") or {}
-    return f"weekly_report:{period.get('actual_start')}:{period.get('actual_end')}"
+    return build_weekly_report_external_key_with_account(
+        account_id,
+        str(period.get("actual_start") or ""),
+        str(period.get("actual_end") or ""),
+    )
 
 
-def build_benchmark_report_external_key(summary: dict[str, Any]) -> str:
-    return f"benchmark:{summary.get('latest_snapshot_date')}:{summary.get('run_mode')}"
+def build_benchmark_report_external_key(
+    summary: dict[str, Any],
+    account_id: str | None = None,
+) -> str:
+    return build_benchmark_report_external_key_with_account(
+        account_id,
+        str(summary.get("latest_snapshot_date") or ""),
+        str(summary.get("run_mode") or ""),
+    )
 
 
-def build_account_snapshot_external_key(row: dict[str, str]) -> str:
-    return f"account_snapshot:{row.get('snapshot_date')}"
+def build_account_snapshot_external_key(
+    row: dict[str, str],
+    account_id: str | None = None,
+) -> str:
+    return build_account_snapshot_external_key_with_account(
+        account_id,
+        str(row.get("snapshot_date") or ""),
+    )
 
 
-def build_daily_plan_external_key(plan_date: str) -> str:
-    return f"daily_plan:{plan_date}"
+def build_daily_plan_external_key(plan_date: str, account_id: str | None = None) -> str:
+    return build_daily_plan_external_key_with_account(account_id, plan_date)
 
 
 def _paragraph_block(text: str) -> dict[str, Any]:
@@ -313,11 +349,13 @@ def build_weekly_report_properties(
     summary: dict[str, Any],
     mapping: dict[str, str],
     *,
+    account_id: str | None = None,
     markdown_path: Path,
     json_path: Path,
     synced_at: str,
 ) -> dict[str, Any]:
     period = summary["period"]
+    resolved_account_id = normalize_notion_account_id(account_id)
     account_summary = summary.get("account_summary") or {}
     trade_summary = summary.get("trade_summary") or {}
     gaps = summary.get("operation_gaps") or []
@@ -327,8 +365,9 @@ def build_weekly_report_properties(
             f"Weekly Report {period['actual_start']} to {period['actual_end']}"
         ),
         resolve_notion_property_name(mapping, "external_key"): notion_rich_text(
-            build_weekly_report_external_key(summary)
+            build_weekly_report_external_key(summary, resolved_account_id)
         ),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(resolved_account_id),
         resolve_notion_property_name(mapping, "period.actual_start"): notion_date(period["actual_start"]),
         resolve_notion_property_name(mapping, "period.actual_end"): notion_date(period["actual_end"]),
         resolve_notion_property_name(mapping, "latest_snapshot_date"): notion_date(summary["latest_snapshot_date"]),
@@ -364,10 +403,12 @@ def build_benchmark_report_properties(
     summary: dict[str, Any],
     mapping: dict[str, str],
     *,
+    account_id: str | None = None,
     markdown_path: Path,
     json_path: Path,
     synced_at: str,
 ) -> dict[str, Any]:
+    resolved_account_id = normalize_notion_account_id(account_id)
     benchmarks = summary.get("summary", {}).get("benchmarks", {})
     paper_summary = summary.get("summary", {}).get("paper", {})
     properties = {
@@ -375,8 +416,9 @@ def build_benchmark_report_properties(
             f"Benchmark Report {summary['latest_snapshot_date']} {summary['run_mode']}"
         ),
         resolve_notion_property_name(mapping, "external_key"): notion_rich_text(
-            build_benchmark_report_external_key(summary)
+            build_benchmark_report_external_key(summary, resolved_account_id)
         ),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(resolved_account_id),
         resolve_notion_property_name(mapping, "latest_snapshot_date"): notion_date(summary["latest_snapshot_date"]),
         resolve_notion_property_name(mapping, "run_mode"): notion_select(summary["run_mode"].upper()),
         resolve_notion_property_name(mapping, "official_run"): notion_select(
@@ -430,8 +472,10 @@ def build_account_snapshot_properties(
     row: dict[str, str],
     mapping: dict[str, str],
     *,
+    account_id: str | None = None,
     synced_at: str,
 ) -> dict[str, Any]:
+    resolved_account_id = normalize_notion_account_id(account_id)
     total_equity_market_value = _safe_float(row.get("total_equity_market_value")) or 0.0
     total_equity_cost_basis = _safe_float(row.get("total_equity_cost_basis")) or 0.0
     properties = {
@@ -439,8 +483,9 @@ def build_account_snapshot_properties(
             f"Account Snapshot {row.get('snapshot_date')}"
         ),
         resolve_notion_property_name(mapping, "external_key"): notion_rich_text(
-            build_account_snapshot_external_key(row)
+            build_account_snapshot_external_key(row, resolved_account_id)
         ),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(resolved_account_id),
         resolve_notion_property_name(mapping, "snapshot_date"): notion_date(row["snapshot_date"]),
         resolve_notion_property_name(mapping, "initial_cash"): notion_number(
             _safe_float(row.get("initial_cash")) or 0.0
@@ -479,17 +524,20 @@ def build_daily_plan_properties(
     summary: dict[str, Any],
     mapping: dict[str, str],
     *,
+    account_id: str | None = None,
     markdown_path: Path,
     json_path: Path,
     synced_at: str,
 ) -> dict[str, Any]:
+    resolved_account_id = normalize_notion_account_id(account_id)
     properties = {
         resolve_notion_property_name(mapping, "name"): notion_title(
             f"Daily Plan {summary['plan_date']}"
         ),
         resolve_notion_property_name(mapping, "external_key"): notion_rich_text(
-            build_daily_plan_external_key(summary["plan_date"])
+            build_daily_plan_external_key(summary["plan_date"], resolved_account_id)
         ),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(resolved_account_id),
         resolve_notion_property_name(mapping, "plan_date"): notion_date(summary["plan_date"]),
         resolve_notion_property_name(mapping, "regime"): notion_select(summary["regime"]),
         resolve_notion_property_name(mapping, "confirmed_trade_count"): notion_number(
@@ -516,15 +564,21 @@ def build_daily_review_summary_properties(
     summary: dict[str, Any],
     mapping: dict[str, str],
     *,
+    account_id: str | None = None,
     synced_at: str,
 ) -> dict[str, Any]:
+    resolved_account_id = normalize_notion_account_id(account_id)
     properties = {
         resolve_notion_property_name(mapping, "name"): notion_title(
             f"Daily Review Summary {summary['review_date']}"
         ),
         resolve_notion_property_name(mapping, "external_key"): notion_rich_text(
-            build_daily_review_summary_external_key(summary["review_date"])
+            build_daily_review_summary_external_key_with_account(
+                resolved_account_id,
+                summary["review_date"],
+            )
         ),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(resolved_account_id),
         resolve_notion_property_name(mapping, "review_date"): notion_date(summary["review_date"]),
         resolve_notion_property_name(mapping, "review_status"): notion_select(summary["review_status"]),
         resolve_notion_property_name(mapping, "availability_status"): notion_select(summary["availability_status"]),
@@ -772,7 +826,9 @@ def _upsert_or_dry_run(
     *,
     client: NotionClient | None,
     data_source_id: str | None,
+    account_id: str,
     external_key: str,
+    legacy_external_key: str | None,
     external_key_property_name: str,
     properties: dict[str, Any],
     children: list[dict[str, Any]],
@@ -784,8 +840,11 @@ def _upsert_or_dry_run(
 ) -> ExportResult:
     if dry_run:
         return ExportResult(
+            account_id=account_id,
             target=target,
             external_key=external_key,
+            legacy_external_key=legacy_external_key,
+            legacy_fallback_used=False,
             action="dry_run",
             page_id=None,
             source_path=_relative_to_project(source_path),
@@ -796,6 +855,62 @@ def _upsert_or_dry_run(
         raise NotionExportError("Notion client is required for non-dry-run export.")
     if not data_source_id:
         raise NotionExportError("Notion data source id is required for non-dry-run export.")
+
+    if legacy_external_key and account_id == "paper_default":
+        existing = client.query_by_external_key(
+            data_source_id,
+            external_key,
+            external_key_property_name,
+        )
+        if len(existing) >= 2:
+            raise NotionDuplicateExternalKeyError(
+                f"Multiple Notion pages found for external key '{external_key}'."
+            )
+        if len(existing) == 1:
+            page_id = existing[0]["id"]
+            payload = client.update_page(page_id, properties)
+            if refresh_children_on_update:
+                client.replace_page_children(page_id, children or [])
+            return ExportResult(
+                account_id=account_id,
+                target=target,
+                external_key=external_key,
+                legacy_external_key=legacy_external_key,
+                legacy_fallback_used=False,
+                action="updated",
+                page_id=page_id,
+                source_path=_relative_to_project(source_path),
+                data_source_key=data_source_key,
+                dry_run=False,
+            )
+
+        legacy_existing = client.query_by_external_key(
+            data_source_id,
+            legacy_external_key,
+            external_key_property_name,
+        )
+        if len(legacy_existing) >= 2:
+            raise NotionDuplicateExternalKeyError(
+                f"Multiple Notion pages found for legacy external key '{legacy_external_key}'."
+            )
+        if len(legacy_existing) == 1:
+            page_id = legacy_existing[0]["id"]
+            client.update_page(page_id, properties)
+            if refresh_children_on_update:
+                client.replace_page_children(page_id, children or [])
+            return ExportResult(
+                account_id=account_id,
+                target=target,
+                external_key=external_key,
+                legacy_external_key=legacy_external_key,
+                legacy_fallback_used=True,
+                action="updated",
+                page_id=page_id,
+                source_path=_relative_to_project(source_path),
+                data_source_key=data_source_key,
+                dry_run=False,
+            )
+
     result = client.upsert_page_by_external_key(
         data_source_id=data_source_id,
         external_key=external_key,
@@ -805,8 +920,11 @@ def _upsert_or_dry_run(
         refresh_children_on_update=refresh_children_on_update,
     )
     return ExportResult(
+        account_id=account_id,
         target=target,
         external_key=external_key,
+        legacy_external_key=legacy_external_key,
+        legacy_fallback_used=False,
         action=result.action,
         page_id=result.page_id,
         source_path=_relative_to_project(source_path),
@@ -820,9 +938,11 @@ def export_weekly_report_to_notion(
     client: NotionClient | None,
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
+    account_id: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> ExportResult:
+    resolved_account_id = normalize_notion_account_id(account_id)
     root = Path(paper_root) if paper_root is not None else paper_reports_dir().parent
     reports_dir = root / "reports"
     json_path = reports_dir / "paper_weekly_status_summary.json"
@@ -832,10 +952,17 @@ def export_weekly_report_to_notion(
         raise NotionExportError(f"Missing source file: {markdown_path}")
     mapping = get_mapping_section(mapping_root, "weekly_reports")
     synced_at = datetime.now(timezone.utc).isoformat()
-    external_key = build_weekly_report_external_key(summary)
+    period = summary["period"]
+    external_key = build_weekly_report_external_key(summary, resolved_account_id)
+    legacy_external_key = (
+        build_legacy_weekly_report_external_key(period["actual_start"], period["actual_end"])
+        if resolved_account_id == "paper_default"
+        else None
+    )
     properties = build_weekly_report_properties(
         summary,
         mapping,
+        account_id=resolved_account_id,
         markdown_path=markdown_path,
         json_path=json_path,
         synced_at=synced_at,
@@ -848,7 +975,9 @@ def export_weekly_report_to_notion(
     return _upsert_or_dry_run(
         client=client,
         data_source_id=data_source_id,
+        account_id=resolved_account_id,
         external_key=external_key,
+        legacy_external_key=legacy_external_key,
         external_key_property_name=resolve_notion_property_name(mapping, "external_key"),
         properties=properties,
         children=_build_weekly_children(summary, markdown_path, json_path),
@@ -865,9 +994,11 @@ def export_benchmark_report_to_notion(
     client: NotionClient | None,
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
+    account_id: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> ExportResult:
+    resolved_account_id = normalize_notion_account_id(account_id)
     root = Path(paper_root) if paper_root is not None else paper_reports_dir().parent
     reports_dir = root / "reports"
     json_path = reports_dir / "paper_benchmark_comparison.json"
@@ -877,10 +1008,16 @@ def export_benchmark_report_to_notion(
         raise NotionExportError(f"Missing source file: {markdown_path}")
     mapping = get_mapping_section(mapping_root, "benchmark_reports")
     synced_at = datetime.now(timezone.utc).isoformat()
-    external_key = build_benchmark_report_external_key(summary)
+    external_key = build_benchmark_report_external_key(summary, resolved_account_id)
+    legacy_external_key = (
+        build_legacy_benchmark_report_external_key(summary["latest_snapshot_date"], summary["run_mode"])
+        if resolved_account_id == "paper_default"
+        else None
+    )
     properties = build_benchmark_report_properties(
         summary,
         mapping,
+        account_id=resolved_account_id,
         markdown_path=markdown_path,
         json_path=json_path,
         synced_at=synced_at,
@@ -893,7 +1030,9 @@ def export_benchmark_report_to_notion(
     return _upsert_or_dry_run(
         client=client,
         data_source_id=data_source_id,
+        account_id=resolved_account_id,
         external_key=external_key,
+        legacy_external_key=legacy_external_key,
         external_key_property_name=resolve_notion_property_name(mapping, "external_key"),
         properties=properties,
         children=_build_benchmark_children(summary, markdown_path, json_path),
@@ -910,9 +1049,11 @@ def export_latest_account_snapshot_to_notion(
     client: NotionClient | None,
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
+    account_id: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> ExportResult:
+    resolved_account_id = normalize_notion_account_id(account_id)
     root = Path(paper_root) if paper_root is not None else paper_account_snapshot_path().parent
     csv_path = root / paper_account_snapshot_path().name
     rows = _read_csv_rows(csv_path)
@@ -921,8 +1062,18 @@ def export_latest_account_snapshot_to_notion(
     latest_row = max(rows, key=lambda row: row.get("snapshot_date", ""))
     mapping = get_mapping_section(mapping_root, "account_snapshots")
     synced_at = datetime.now(timezone.utc).isoformat()
-    external_key = build_account_snapshot_external_key(latest_row)
-    properties = build_account_snapshot_properties(latest_row, mapping, synced_at=synced_at)
+    external_key = build_account_snapshot_external_key(latest_row, resolved_account_id)
+    legacy_external_key = (
+        build_legacy_account_snapshot_external_key(str(latest_row.get("snapshot_date") or ""))
+        if resolved_account_id == "paper_default"
+        else None
+    )
+    properties = build_account_snapshot_properties(
+        latest_row,
+        mapping,
+        account_id=resolved_account_id,
+        synced_at=synced_at,
+    )
     data_source_id = None if dry_run else get_notion_data_source_id(
         settings,
         "account_snapshots",
@@ -931,7 +1082,9 @@ def export_latest_account_snapshot_to_notion(
     return _upsert_or_dry_run(
         client=client,
         data_source_id=data_source_id,
+        account_id=resolved_account_id,
         external_key=external_key,
+        legacy_external_key=legacy_external_key,
         external_key_property_name=resolve_notion_property_name(mapping, "external_key"),
         properties=properties,
         children=_build_account_snapshot_children(latest_row),
@@ -948,9 +1101,11 @@ def export_daily_plan_to_notion(
     client: NotionClient | None,
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
+    account_id: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> ExportResult:
+    resolved_account_id = normalize_notion_account_id(account_id)
     root = Path(paper_root) if paper_root is not None else paper_daily_action_plan_path("1970-01-01").parent
     markdown_path, config_snapshot_path = _latest_paper_daily_plan_artifacts(root)
     summary = summarize_daily_plan_artifacts(
@@ -959,10 +1114,16 @@ def export_daily_plan_to_notion(
     )
     mapping = get_mapping_section(mapping_root, "daily_plans")
     synced_at = datetime.now(timezone.utc).isoformat()
-    external_key = build_daily_plan_external_key(summary["plan_date"])
+    external_key = build_daily_plan_external_key(summary["plan_date"], resolved_account_id)
+    legacy_external_key = (
+        build_legacy_daily_plan_external_key(summary["plan_date"])
+        if resolved_account_id == "paper_default"
+        else None
+    )
     properties = build_daily_plan_properties(
         summary,
         mapping,
+        account_id=resolved_account_id,
         markdown_path=markdown_path,
         json_path=config_snapshot_path,
         synced_at=synced_at,
@@ -975,7 +1136,9 @@ def export_daily_plan_to_notion(
     return _upsert_or_dry_run(
         client=client,
         data_source_id=data_source_id,
+        account_id=resolved_account_id,
         external_key=external_key,
+        legacy_external_key=legacy_external_key,
         external_key_property_name=resolve_notion_property_name(mapping, "external_key"),
         properties=properties,
         children=_build_daily_plan_children(summary, markdown_path, config_snapshot_path),
@@ -993,15 +1156,30 @@ def export_daily_review_summary_to_notion(
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
     review_date: str,
+    account_id: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> ExportResult:
+    resolved_account_id = normalize_notion_account_id(account_id)
     root = Path(paper_root) if paper_root is not None else paper_reports_dir().parent
     summary = build_daily_review_summary(review_date=review_date, paper_root=root)
     mapping = get_mapping_section(mapping_root, "daily_review_summaries")
     synced_at = datetime.now(timezone.utc).isoformat()
-    external_key = build_daily_review_summary_external_key(summary["review_date"])
-    properties = build_daily_review_summary_properties(summary, mapping, synced_at=synced_at)
+    external_key = build_daily_review_summary_external_key_with_account(
+        resolved_account_id,
+        summary["review_date"],
+    )
+    legacy_external_key = (
+        build_legacy_daily_review_summary_external_key(summary["review_date"])
+        if resolved_account_id == "paper_default"
+        else None
+    )
+    properties = build_daily_review_summary_properties(
+        summary,
+        mapping,
+        account_id=resolved_account_id,
+        synced_at=synced_at,
+    )
     data_source_id = None if dry_run else get_notion_data_source_id(
         settings,
         "daily_review_summaries",
@@ -1011,7 +1189,9 @@ def export_daily_review_summary_to_notion(
     return _upsert_or_dry_run(
         client=client,
         data_source_id=data_source_id,
+        account_id=resolved_account_id,
         external_key=external_key,
+        legacy_external_key=legacy_external_key,
         external_key_property_name=resolve_notion_property_name(mapping, "external_key"),
         properties=properties,
         children=_build_daily_review_summary_children(summary),
@@ -1028,6 +1208,7 @@ def export_selected_paper_reports_to_notion(
     client: NotionClient | None,
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
+    account_id: str | None = None,
     export_weekly: bool = False,
     export_benchmark: bool = False,
     export_account_snapshot: bool = False,
@@ -1047,6 +1228,7 @@ def export_selected_paper_reports_to_notion(
                 client=client,
                 settings=settings,
                 mapping_root=mapping_root,
+                account_id=account_id,
                 paper_root=paper_root,
                 dry_run=dry_run,
             )
@@ -1057,6 +1239,7 @@ def export_selected_paper_reports_to_notion(
                 client=client,
                 settings=settings,
                 mapping_root=mapping_root,
+                account_id=account_id,
                 paper_root=paper_root,
                 dry_run=dry_run,
             )
@@ -1067,6 +1250,7 @@ def export_selected_paper_reports_to_notion(
                 client=client,
                 settings=settings,
                 mapping_root=mapping_root,
+                account_id=account_id,
                 paper_root=paper_root,
                 dry_run=dry_run,
             )
@@ -1077,6 +1261,7 @@ def export_selected_paper_reports_to_notion(
                 client=client,
                 settings=settings,
                 mapping_root=mapping_root,
+                account_id=account_id,
                 paper_root=paper_root,
                 dry_run=dry_run,
             )
@@ -1090,6 +1275,7 @@ def export_selected_paper_reports_to_notion(
                 settings=settings,
                 mapping_root=mapping_root,
                 review_date=review_date,
+                account_id=account_id,
                 paper_root=paper_root,
                 dry_run=dry_run,
             )

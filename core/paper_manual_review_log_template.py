@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_guard import assert_path_under_account_root
 from core.paper_safety import assert_paper_path
 from core.paths import PAPER_TEST_DIR
 
@@ -53,8 +54,16 @@ REQUIRED_BUCKET_COLUMNS = [
 ]
 
 
-def load_csv_rows(path: Path, required_columns: list[str], label: str) -> list[dict[str, str]]:
-    assert_paper_path(path, PAPER_TEST_DIR)
+def load_csv_rows(
+    path: Path,
+    required_columns: list[str],
+    label: str,
+    allowed_root: Path | None = None,
+) -> list[dict[str, str]]:
+    if allowed_root is None:
+        assert_paper_path(path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(path, allowed_root)
     if not path.exists():
         raise FileNotFoundError(f"{label} not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -127,8 +136,15 @@ def build_paper_manual_review_log_template(
     return output_rows, summary_data, warnings
 
 
-def write_paper_manual_review_log_template_csv(rows: list[dict[str, Any]], output_path: Path) -> None:
-    assert_paper_path(output_path, PAPER_TEST_DIR)
+def write_paper_manual_review_log_template_csv(
+    rows: list[dict[str, Any]],
+    output_path: Path,
+    allowed_root: Path | None = None,
+) -> None:
+    if allowed_root is None:
+        assert_paper_path(output_path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(output_path, allowed_root)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS)
@@ -219,7 +235,10 @@ def render_paper_manual_review_log_template_markdown(summary: dict[str, Any]) ->
     return "\n".join(lines) + "\n"
 
 
-def write_markdown(path: Path, markdown: str) -> None:
-    assert_paper_path(path, PAPER_TEST_DIR)
+def write_markdown(path: Path, markdown: str, allowed_root: Path | None = None) -> None:
+    if allowed_root is None:
+        assert_paper_path(path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(path, allowed_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(markdown, encoding="utf-8")

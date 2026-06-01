@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 import sys
@@ -25,15 +26,24 @@ from core.paper_commit_guard import check_same_date_commit_guard  # noqa: E402
 from core.paper_status import format_paper_status, paper_status_to_json, run_paper_status  # noqa: E402
 from core.paper_weekly_status import generate_paper_weekly_status  # noqa: E402
 from core.paper_benchmark_comparison import generate_paper_benchmark_comparison  # noqa: E402
+from core.paper_account_paths import build_paper_account_paths  # noqa: E402
+from core.paper_account_guard import (  # noqa: E402
+    format_writer_account_guard_message,
+    guard_paper_writer_account,
+)
+from core.paper_account_bootstrap import (  # noqa: E402
+    PaperAccountBootstrapError,
+    initialize_paper_account,
+)
 from core.paper_prepare_data import (  # noqa: E402
     format_paper_prepare_data_summary,
     run_paper_prepare_data,
 )
 from core.paths import PAPER_TEST_DIR  # noqa: E402
 from scripts.generate_paper_daily_review_summary import generate_paper_daily_review_summary  # noqa: E402
-from scripts.generate_paper_drawdown import generate_paper_drawdown  # noqa: E402
+from scripts.generate_paper_drawdown import generate_paper_drawdown_for_account  # noqa: E402
 from scripts.generate_paper_manual_review_log_template import generate_paper_manual_review_log_template  # noqa: E402
-from scripts.generate_paper_equity_curve import generate_paper_equity_curve  # noqa: E402
+from scripts.generate_paper_equity_curve import generate_paper_equity_curve_for_account  # noqa: E402
 from scripts.generate_paper_realized_ranking_report import generate_paper_realized_ranking_report  # noqa: E402
 from scripts.generate_paper_realized_trade_journal import generate_paper_realized_trade_journal  # noqa: E402
 from scripts.generate_paper_symbol_realized_performance import generate_paper_symbol_realized_performance  # noqa: E402
@@ -42,15 +52,15 @@ from scripts.generate_paper_symbol_review_worksheet import generate_paper_symbol
 from scripts.generate_paper_symbol_side_by_side_performance import generate_paper_symbol_side_by_side_performance  # noqa: E402
 from scripts.generate_paper_symbol_unrealized_performance import generate_paper_symbol_unrealized_performance  # noqa: E402
 from scripts.append_paper_manual_review_log import append_paper_manual_review_log_from_template  # noqa: E402
-from scripts.generate_paper_performance_summary import main as generate_paper_performance_summary_main  # noqa: E402
+from scripts.generate_paper_performance_summary import generate_paper_performance_summary  # noqa: E402
 from scripts.run_paper_daily_plan import run_paper_daily_plan  # noqa: E402
 from scripts.run_paper_eod_update import run_paper_eod_dry_run  # noqa: E402
 from scripts.validate_paper_manual_review_log import validate_paper_manual_review_log  # noqa: E402
 
 REPORT_STEPS = [
-    ("equity_curve", generate_paper_equity_curve),
-    ("drawdown", generate_paper_drawdown),
-    ("performance_summary", generate_paper_performance_summary_main),
+    ("equity_curve", generate_paper_equity_curve_for_account),
+    ("drawdown", generate_paper_drawdown_for_account),
+    ("performance_summary", generate_paper_performance_summary),
     ("realized_trade_journal", generate_paper_realized_trade_journal),
     ("symbol_realized_performance", generate_paper_symbol_realized_performance),
     ("realized_ranking_report", generate_paper_realized_ranking_report),
@@ -60,6 +70,27 @@ REPORT_STEPS = [
     ("symbol_review_worksheet", generate_paper_symbol_review_worksheet),
     ("daily_review_summary", generate_paper_daily_review_summary),
 ]
+
+
+def _call_with_optional_account_paths(func, *args, account_paths, **kwargs):
+    if "account_paths" in inspect.signature(func).parameters:
+        return func(*args, account_paths=account_paths, **kwargs)
+    return func(*args, **kwargs)
+
+
+def _guard_writer_account(
+    account_id: str | None,
+    command_name: str,
+    *,
+    allow_non_default: bool = False,
+) -> int:
+    context = guard_paper_writer_account(
+        account_id=account_id,
+        command_name=command_name,
+        allow_non_default=allow_non_default,
+    )
+    print(format_writer_account_guard_message(context))
+    return 0 if context["write_allowed"] else 1
 
 
 def _print_preflight_summary(summary: dict) -> None:
@@ -214,7 +245,7 @@ def run_preview_shortcut(date_str: str, allow_warnings: bool) -> int:
     return handle_eod(argparse.Namespace(date=date_str, dry_run=True, commit=False))
 
 
-def run_commit_shortcut(date_str: str, replace: bool) -> int:
+def run_commit_shortcut(date_str: str, replace: bool, account_id: str | None = None) -> int:
     guard = check_same_date_commit_guard(date_str)
     if guard["error"]:
         print(f"Commit guard failed: {guard['error']}")
@@ -227,17 +258,25 @@ def run_commit_shortcut(date_str: str, replace: bool) -> int:
             for item in guard["existing_sources"]:
                 print(f"  - {item}")
         return 1
-    return handle_eod(argparse.Namespace(date=date_str, dry_run=False, commit=True))
+    return handle_eod(
+        argparse.Namespace(
+            date=date_str,
+            dry_run=False,
+            commit=True,
+            account_id=account_id,
+            guard_checked=True,
+        )
+    )
 
 
-def run_review_shortcut(allow_warnings: bool) -> int:
-    reports_result = handle_reports(argparse.Namespace(strict=not allow_warnings))
+def run_review_shortcut(allow_warnings: bool, account_id: str | None = None) -> int:
+    reports_result = handle_reports(argparse.Namespace(strict=not allow_warnings, account_id=account_id))
     if reports_result != 0:
         return reports_result
-    template_result = handle_review_template(argparse.Namespace())
+    template_result = handle_review_template(argparse.Namespace(account_id=account_id))
     if template_result != 0:
         return template_result
-    return handle_review_validate(argparse.Namespace())
+    return handle_review_validate(argparse.Namespace(account_id=account_id))
 
 
 def handle_prepare(args: argparse.Namespace) -> int:
@@ -256,15 +295,22 @@ def handle_preview(args: argparse.Namespace) -> int:
 
 
 def handle_commit(args: argparse.Namespace) -> int:
-    return run_commit_shortcut(args.date, replace=args.replace)
+    if _guard_writer_account(args.account_id, "paper.py commit", allow_non_default=True) != 0:
+        return 1
+    return run_commit_shortcut(args.date, replace=args.replace, account_id=args.account_id)
 
 
 def handle_review(args: argparse.Namespace) -> int:
-    return run_review_shortcut(allow_warnings=args.allow_warnings)
+    return run_review_shortcut(allow_warnings=args.allow_warnings, account_id=args.account_id)
 
 
 def handle_status(args: argparse.Namespace) -> int:
-    status = run_paper_status(args.date)
+    account_paths = build_paper_account_paths(args.account_id, create=False)
+    status = _call_with_optional_account_paths(
+        run_paper_status,
+        args.date,
+        account_paths=account_paths,
+    )
     if args.json:
         print(paper_status_to_json(status))
     else:
@@ -272,14 +318,63 @@ def handle_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_init_account(args: argparse.Namespace) -> int:
+    if args.dry_run and args.confirm_create:
+        raise PaperAccountBootstrapError("--dry-run and --confirm-create cannot be used together.")
+    effective_confirm_create = bool(args.confirm_create)
+    summary = initialize_paper_account(
+        account_id=args.account_id,
+        initial_cash=args.initial_cash,
+        currency=args.currency,
+        date_str=args.date,
+        confirm_create=effective_confirm_create,
+        allow_existing=args.allow_existing,
+    )
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        print("PAPER INIT ACCOUNT")
+        print(f"  account_id: {summary['account_id']}")
+        print(f"  account_root: {summary['account_root']}")
+        print(f"  snapshot_date: {summary['snapshot_date']}")
+        print(f"  initial_cash: {summary['initial_cash']}")
+        print(f"  currency: {summary['currency']}")
+        print(f"  dry_run: {str(bool(summary['dry_run'])).lower()}")
+        print(f"  created: {str(bool(summary['created'])).lower()}")
+        print(f"  blocked_reason: {summary['blocked_reason'] or '-'}")
+    return 0
+
+
 def handle_weekly_status(args: argparse.Namespace) -> int:
-    result = generate_paper_weekly_status(
+    account_paths = build_paper_account_paths(args.account_id, create=False)
+    if not account_paths.root.exists():
+        summary = {
+            "account_id": account_paths.account_id,
+            "account_root": str(account_paths.root),
+            "legacy_default_used": account_paths.legacy_default_used,
+            "status": "NO_DATA",
+            "message": f"Account root does not exist: {account_paths.root}",
+        }
+        print("PAPER WEEKLY STATUS")
+        print(f"  account_id: {summary['account_id']}")
+        print(f"  account_root: {summary['account_root']}")
+        print(f"  status: {summary['status']}")
+        print(f"  message: {summary['message']}")
+        if args.json:
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 1
+    result = _call_with_optional_account_paths(
+        generate_paper_weekly_status,
         days=args.days,
         start=args.start,
         end=args.end,
+        account_paths=account_paths,
     )
     summary = result["summary"]
     print("PAPER WEEKLY STATUS")
+    print(f"  account_id: {summary.get('account_id')}")
+    print(f"  account_root: {summary.get('account_root')}")
+    print(f"  legacy_default_used: {str(bool(summary.get('legacy_default_used'))).lower()}")
     print(f"  markdown_path: {result['markdown_path']}")
     print(f"  json_path: {result['json_path']}")
     print(f"  schema_version: {summary['schema_version']}")
@@ -294,9 +389,32 @@ def handle_weekly_status(args: argparse.Namespace) -> int:
 
 
 def handle_benchmark(args: argparse.Namespace) -> int:
-    result = generate_paper_benchmark_comparison()
+    account_paths = build_paper_account_paths(args.account_id, create=False)
+    if not account_paths.root.exists():
+        summary = {
+            "account_id": account_paths.account_id,
+            "account_root": str(account_paths.root),
+            "legacy_default_used": account_paths.legacy_default_used,
+            "availability_status": "NO_DATA",
+            "message": f"Account root does not exist: {account_paths.root}",
+        }
+        print("PAPER BENCHMARK COMPARISON")
+        print(f"  account_id: {summary['account_id']}")
+        print(f"  account_root: {summary['account_root']}")
+        print(f"  availability_status: {summary['availability_status']}")
+        print(f"  message: {summary['message']}")
+        if args.json:
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 1
+    result = _call_with_optional_account_paths(
+        generate_paper_benchmark_comparison,
+        account_paths=account_paths,
+    )
     summary = result["summary"]
     print("PAPER BENCHMARK COMPARISON")
+    print(f"  account_id: {summary.get('account_id')}")
+    print(f"  account_root: {summary.get('account_root')}")
+    print(f"  legacy_default_used: {str(bool(summary.get('legacy_default_used'))).lower()}")
     print(f"  markdown_path: {result['markdown_path']}")
     print(f"  json_path: {result['json_path']}")
     print(f"  schema_version: {summary['schema_version']}")
@@ -310,6 +428,8 @@ def handle_benchmark(args: argparse.Namespace) -> int:
 
 
 def handle_plan(args: argparse.Namespace) -> int:
+    if _guard_writer_account(args.account_id, "paper.py plan", allow_non_default=True) != 0:
+        return 1
     summary = run_preflight(
         stage="plan",
         date_str=args.date,
@@ -322,7 +442,14 @@ def handle_plan(args: argparse.Namespace) -> int:
     if summary["result"] == "PASS_WITH_WARNINGS":
         print("Paper plan continues with preflight warnings.")
 
-    report_path = run_paper_daily_plan(args.date)
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=True)
+    report_path = _call_with_optional_account_paths(
+        run_paper_daily_plan,
+        args.date,
+        account_paths=account_paths,
+    )
     if not report_path:
         print("Failed to generate official paper daily plan.")
         return 1
@@ -332,6 +459,9 @@ def handle_plan(args: argparse.Namespace) -> int:
 
 
 def handle_eod(args: argparse.Namespace) -> int:
+    if not getattr(args, "guard_checked", False):
+        if _guard_writer_account(args.account_id, "paper.py eod", allow_non_default=True) != 0:
+            return 1
     summary = run_preflight(
         stage="eod",
         date_str=args.date,
@@ -345,19 +475,26 @@ def handle_eod(args: argparse.Namespace) -> int:
         print("Paper EOD continues with preflight warnings.")
 
     commit = bool(args.commit)
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=commit)
     return run_paper_eod_dry_run(
         args.date,
         allow_empty_journal=True,
         commit=commit,
         plan_path=None,
+        account_paths=account_paths,
     )
 
 
-def run_report_chain() -> list[dict[str, object]]:
+def run_report_chain(account_paths=None) -> list[dict[str, object]]:
     results: list[dict[str, object]] = []
     for step_name, runner in REPORT_STEPS:
         try:
-            result = runner()
+            result = _call_with_optional_account_paths(
+                runner,
+                account_paths=account_paths,
+            )
             exit_code = result if isinstance(result, int) else 0
             if exit_code != 0:
                 results.append(
@@ -401,7 +538,10 @@ def handle_reports(args: argparse.Namespace) -> int:
         print("Paper reports aborted because preflight failed.")
         return 1
 
-    results = run_report_chain()
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=True)
+    results = run_report_chain(account_paths=account_paths)
     print("PAPER REPORTS")
     for item in results:
         print(
@@ -425,7 +565,10 @@ def handle_review_template(args: argparse.Namespace) -> int:
     if summary["result"] == "FAIL":
         print("Paper review-template aborted because preflight failed.")
         return 1
-    result = generate_paper_manual_review_log_template()
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=True)
+    result = generate_paper_manual_review_log_template(account_paths=account_paths)
     print("PAPER REVIEW TEMPLATE")
     print(f"  csv_output_path: {result['csv_output_path']}")
     print(f"  markdown_output_path: {result['markdown_output_path']}")
@@ -434,7 +577,10 @@ def handle_review_template(args: argparse.Namespace) -> int:
 
 
 def handle_review_validate(args: argparse.Namespace) -> int:
-    result = validate_paper_manual_review_log()
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=True)
+    result = validate_paper_manual_review_log(account_paths=account_paths)
     summary = result["summary"]
     print("PAPER REVIEW VALIDATE")
     print(f"  input_path: {result['input_path']}")
@@ -447,6 +593,8 @@ def handle_review_validate(args: argparse.Namespace) -> int:
 
 
 def handle_review_append(args: argparse.Namespace) -> int:
+    if _guard_writer_account(args.account_id, "paper.py review-append", allow_non_default=True) != 0:
+        return 1
     summary = run_preflight(
         stage="review-append",
         date_str=None,
@@ -456,7 +604,13 @@ def handle_review_append(args: argparse.Namespace) -> int:
     if summary["result"] == "FAIL":
         print("Paper review-append aborted because preflight failed.")
         return 1
-    result = append_paper_manual_review_log_from_template()
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=True)
+    result = _call_with_optional_account_paths(
+        append_paper_manual_review_log_from_template,
+        account_paths=account_paths,
+    )
     append_summary = result["summary"]
     print("PAPER REVIEW APPEND")
     print(f"  target_log_path: {result['target_log_path']}")
@@ -511,9 +665,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run read-only paper workflow status summary",
     )
     status_parser.add_argument("--date", help="Target date (YYYYMMDD or YYYY-MM-DD)")
+    status_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     status_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output")
     status_parser.add_argument("--verbose", action="store_true", help="Print extra status details")
     status_parser.set_defaults(handler=handle_status)
+
+    init_account_parser = subparsers.add_parser(
+        "init-account",
+        help="Bootstrap a new non-default paper account root with initial CSV/JSON seeds",
+    )
+    init_account_parser.add_argument("--account-id", required=True, help="Non-default paper account id")
+    init_account_parser.add_argument("--initial-cash", required=True, type=float, help="Initial cash amount (> 0)")
+    init_account_parser.add_argument("--currency", required=True, help="Account currency (for example USD)")
+    init_account_parser.add_argument("--date", required=True, help="Bootstrap date (YYYYMMDD or YYYY-MM-DD)")
+    init_account_parser.add_argument("--dry-run", action="store_true", help="Show bootstrap plan without writing files")
+    init_account_parser.add_argument("--confirm-create", action="store_true", help="Actually create the bootstrap root and seed files")
+    init_account_parser.add_argument("--allow-existing", action="store_true", help="Allow read-only inspection of an existing target without overwrite")
+    init_account_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary")
+    init_account_parser.set_defaults(handler=handle_init_account)
 
     weekly_status_parser = subparsers.add_parser(
         "weekly-status",
@@ -522,6 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_status_parser.add_argument("--days", type=int, default=5, help="Use the latest N snapshot_date rows")
     weekly_status_parser.add_argument("--start", help="Inclusive snapshot_date start (YYYYMMDD or YYYY-MM-DD)")
     weekly_status_parser.add_argument("--end", help="Inclusive snapshot_date end (YYYYMMDD or YYYY-MM-DD)")
+    weekly_status_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     weekly_status_parser.add_argument("--json", action="store_true", help="Print JSON summary to stdout after writing files")
     weekly_status_parser.set_defaults(handler=handle_weekly_status)
 
@@ -529,6 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
         "benchmark",
         help="Generate exploratory paper benchmark comparison markdown/json report",
     )
+    benchmark_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     benchmark_parser.add_argument("--json", action="store_true", help="Print JSON summary to stdout after writing files")
     benchmark_parser.set_defaults(handler=handle_benchmark)
 
@@ -546,6 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commit_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
     commit_parser.add_argument("--replace", action="store_true", help="Allow same-date snapshot replacement intentionally")
+    commit_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     commit_parser.set_defaults(handler=handle_commit)
 
     preflight_parser = subparsers.add_parser(
@@ -568,6 +740,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run paper daily plan after automatic paper preflight",
     )
     plan_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+    plan_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     plan_parser.set_defaults(handler=handle_plan)
 
     eod_parser = subparsers.add_parser(
@@ -578,6 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     eod_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+    eod_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     eod_mode_group = eod_parser.add_mutually_exclusive_group(required=True)
     eod_mode_group.add_argument("--dry-run", action="store_true", help="Run read-only EOD preview wrapper")
     eod_mode_group.add_argument("--commit", action="store_true", help="Run EOD commit wrapper that may modify paper ledger files")
@@ -588,6 +762,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run paper report generator chain after automatic paper preflight",
     )
     reports_parser.add_argument("--strict", action="store_true", help="Treat preflight warnings as failures")
+    reports_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     reports_parser.set_defaults(handler=handle_reports)
 
     review_parser = subparsers.add_parser(
@@ -595,24 +770,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Operator shortcut: reports, review-template, review-validate",
     )
     review_parser.add_argument("--allow-warnings", action="store_true", help="Allow PASS_WITH_WARNINGS during reports preflight")
+    review_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     review_parser.set_defaults(handler=handle_review)
 
     review_template_parser = subparsers.add_parser(
         "review-template",
         help="Run manual review log template generator after automatic paper preflight",
     )
+    review_template_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     review_template_parser.set_defaults(handler=handle_review_template)
 
     review_validate_parser = subparsers.add_parser(
         "review-validate",
         help="Run manual review log validator",
     )
+    review_validate_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     review_validate_parser.set_defaults(handler=handle_review_validate)
 
     review_append_parser = subparsers.add_parser(
         "review-append",
         help="Run manual review log append workflow after automatic paper preflight",
     )
+    review_append_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     review_append_parser.set_defaults(handler=handle_review_append)
 
     return parser

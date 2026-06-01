@@ -17,25 +17,37 @@ from core.paper_manual_review_log_append import (  # noqa: E402
     write_paper_manual_review_log,
 )
 from core.paper_manual_review_log_validator import load_paper_manual_review_log_rows  # noqa: E402
+from core.paper_account_paths import PaperAccountPaths  # noqa: E402
 from core.paths import paper_reviews_dir  # noqa: E402
 
 
-def append_paper_manual_review_log_from_template() -> dict:
-    reviews_dir = paper_reviews_dir()
+def append_paper_manual_review_log_from_template(
+    account_paths: PaperAccountPaths | None = None,
+) -> dict:
+    reviews_dir = (
+        account_paths.reviews_dir
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else paper_reviews_dir()
+    )
+    allowed_root = (
+        account_paths.root
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else None
+    )
     template_path = reviews_dir / "paper_manual_review_log_template.csv"
     target_log_path = reviews_dir / "paper_manual_review_log.csv"
     append_report_path = reviews_dir / "paper_manual_review_log_append_report.md"
     append_issues_path = reviews_dir / "paper_manual_review_log_append_issues.csv"
 
-    template_rows = load_paper_manual_review_log_rows(template_path)
-    existing_log_rows = load_existing_paper_manual_review_log_rows(target_log_path)
+    template_rows = load_paper_manual_review_log_rows(template_path, allowed_root=allowed_root)
+    existing_log_rows = load_existing_paper_manual_review_log_rows(target_log_path, allowed_root=allowed_root)
     final_rows, append_issues, summary_data = append_paper_manual_review_log(
         template_rows,
         existing_log_rows,
     )
     if summary_data["append_executed"]:
-        write_paper_manual_review_log(final_rows, target_log_path)
-    write_append_issues_csv(append_issues, append_issues_path)
+        write_paper_manual_review_log(final_rows, target_log_path, allowed_root=allowed_root)
+    write_append_issues_csv(append_issues, append_issues_path, allowed_root=allowed_root)
     summary = summarize_paper_manual_review_log_append(
         template_path=template_path,
         target_log_path=target_log_path,
@@ -46,6 +58,7 @@ def append_paper_manual_review_log_from_template() -> dict:
     write_markdown(
         append_report_path,
         render_paper_manual_review_log_append_report(summary),
+        allowed_root=allowed_root,
     )
     return {
         "template_path": template_path,

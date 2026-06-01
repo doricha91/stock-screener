@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_guard import assert_path_under_account_root
 from core.paper_safety import assert_paper_path
 from core.paths import PAPER_TEST_DIR
 
@@ -25,127 +26,130 @@ REQUIRED_REVIEW_BUCKET_COLUMNS = [
     "sample_size_flag",
 ]
 
-REPORT_INDEX_ROWS = [
+def build_report_index_rows(report_base_root: Path) -> list[dict[str, str]]:
+    report_base_root = report_base_root.resolve()
+    return [
     {
-        "report_path": "outputs/paper_test/reports/paper_daily_review_summary.md",
+        "report_path": str(report_base_root / "paper_daily_review_summary.md"),
         "category": "Final / operator-facing reports",
         "purpose": "Daily operator-facing review entrypoint",
         "operator_should_read_daily": "true",
         "notes": "Non-actionable final summary",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_report_index.md",
+        "report_path": str(report_base_root / "paper_report_index.md"),
         "category": "Final / operator-facing reports",
         "purpose": "Index of paper-test reports",
         "operator_should_read_daily": "false",
         "notes": "Navigation aid",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_performance_summary.md",
+        "report_path": str(report_base_root / "paper_performance_summary.md"),
         "category": "Core account reports",
         "purpose": "Account-level paper performance summary",
         "operator_should_read_daily": "true",
         "notes": "Primary account summary source",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_equity_curve.csv",
+        "report_path": str(report_base_root / "paper_equity_curve.csv"),
         "category": "Core account reports",
         "purpose": "Equity curve time series",
         "operator_should_read_daily": "false",
         "notes": "Intermediate quantitative source",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_drawdown.csv",
+        "report_path": str(report_base_root / "paper_drawdown.csv"),
         "category": "Core account reports",
         "purpose": "Drawdown time series",
         "operator_should_read_daily": "false",
         "notes": "Intermediate quantitative source",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_realized_trade_journal.csv",
+        "report_path": str(report_base_root / "paper_realized_trade_journal.csv"),
         "category": "Trade-level reports",
         "purpose": "SELL-event realized trade journal",
         "operator_should_read_daily": "false",
         "notes": "Average-cost realized ledger",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_realized_trade_journal_summary.md",
+        "report_path": str(report_base_root / "paper_realized_trade_journal_summary.md"),
         "category": "Trade-level reports",
         "purpose": "Realized trade journal summary",
         "operator_should_read_daily": "false",
         "notes": "Quick trade-level realized summary",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_symbol_realized_performance.csv",
+        "report_path": str(report_base_root / "paper_symbol_realized_performance.csv"),
         "category": "Symbol-level reports",
         "purpose": "Per-symbol realized performance table",
         "operator_should_read_daily": "false",
         "notes": "Derived from realized trade journal",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_symbol_unrealized_performance.csv",
+        "report_path": str(report_base_root / "paper_symbol_unrealized_performance.csv"),
         "category": "Symbol-level reports",
         "purpose": "Per-symbol open-position unrealized table",
         "operator_should_read_daily": "false",
         "notes": "Latest snapshot only",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_symbol_side_by_side_performance.csv",
+        "report_path": str(report_base_root / "paper_symbol_side_by_side_performance.csv"),
         "category": "Symbol-level reports",
         "purpose": "Side-by-side realized/unrealized symbol table",
         "operator_should_read_daily": "true",
         "notes": "Reference total_pnl included",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_realized_ranking_report.md",
+        "report_path": str(report_base_root / "paper_realized_ranking_report.md"),
         "category": "Symbol-level reports",
         "purpose": "Realized ranking markdown report",
         "operator_should_read_daily": "false",
         "notes": "Realized-only ranking context",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_symbol_review_buckets.csv",
+        "report_path": str(report_base_root / "paper_symbol_review_buckets.csv"),
         "category": "Review / worksheet reports",
         "purpose": "Non-actionable review bucket classification",
         "operator_should_read_daily": "true",
         "notes": "Review prioritization source",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_symbol_review_buckets_summary.md",
+        "report_path": str(report_base_root / "paper_symbol_review_buckets_summary.md"),
         "category": "Review / worksheet reports",
         "purpose": "Review bucket summary",
         "operator_should_read_daily": "false",
         "notes": "Bucket counts and warnings",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_symbol_review_worksheet.md",
+        "report_path": str(report_base_root / "paper_symbol_review_worksheet.md"),
         "category": "Review / worksheet reports",
         "purpose": "Manual review worksheet",
         "operator_should_read_daily": "true",
         "notes": "Questions only, non-actionable",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_symbol_review_worksheet.csv",
+        "report_path": str(report_base_root / "paper_symbol_review_worksheet.csv"),
         "category": "Review / worksheet reports",
         "purpose": "Question-row export of worksheet",
         "operator_should_read_daily": "false",
         "notes": "Machine-readable worksheet rows",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_performance_input_audit.md",
+        "report_path": str(report_base_root / "paper_performance_input_audit.md"),
         "category": "Debug / intermediate reports",
         "purpose": "Input integrity audit",
         "operator_should_read_daily": "false",
         "notes": "Debug / validation",
     },
     {
-        "report_path": "outputs/paper_test/reports/paper_report_regeneration_safety.md",
+        "report_path": str(report_base_root / "paper_report_regeneration_safety.md"),
         "category": "Debug / intermediate reports",
         "purpose": "Report regeneration safety check",
         "operator_should_read_daily": "false",
         "notes": "Debug / validation",
     },
 ]
+
 
 
 def _parse_float(value: Any, field_name: str) -> float:
@@ -162,8 +166,16 @@ def _parse_float(value: Any, field_name: str) -> float:
         raise ValueError(f"invalid numeric in {field_name}: {value}") from exc
 
 
-def load_csv_rows(path: Path, required_columns: list[str], label: str) -> list[dict[str, str]]:
-    assert_paper_path(path, PAPER_TEST_DIR)
+def load_csv_rows(
+    path: Path,
+    required_columns: list[str],
+    label: str,
+    allowed_root: Path | None = None,
+) -> list[dict[str, str]]:
+    if allowed_root is None:
+        assert_paper_path(path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(path, allowed_root)
     if not path.exists():
         raise FileNotFoundError(f"{label} not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -176,8 +188,14 @@ def load_csv_rows(path: Path, required_columns: list[str], label: str) -> list[d
     return rows
 
 
-def parse_paper_performance_summary_markdown(path: Path) -> tuple[dict[str, str], list[str]]:
-    assert_paper_path(path, PAPER_TEST_DIR)
+def parse_paper_performance_summary_markdown(
+    path: Path,
+    allowed_root: Path | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    if allowed_root is None:
+        assert_paper_path(path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(path, allowed_root)
     if not path.exists():
         raise FileNotFoundError(f"paper_performance_summary.md not found: {path}")
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -228,9 +246,14 @@ def build_paper_daily_review_summary_data(
     side_by_side_rows: list[dict[str, str]],
     review_bucket_rows: list[dict[str, str]],
     worksheet_path: Path,
+    report_base_root: Path | None = None,
+    allowed_root: Path | None = None,
 ) -> tuple[dict[str, Any], list[str], list[dict[str, str]]]:
     warnings: list[str] = []
-    account_summary, account_warnings = parse_paper_performance_summary_markdown(performance_summary_path)
+    account_summary, account_warnings = parse_paper_performance_summary_markdown(
+        performance_summary_path,
+        allowed_root=allowed_root,
+    )
     warnings.extend(account_warnings)
 
     side_by_side_summary = {
@@ -261,12 +284,15 @@ def build_paper_daily_review_summary_data(
         "high_priority_symbols": high_priority_symbols,
     }
 
-    report_index_rows = REPORT_INDEX_ROWS
+    report_base_root = report_base_root or performance_summary_path.parent
+    report_index_rows = build_report_index_rows(report_base_root)
     summary_data = {
         "account_summary": account_summary,
         "side_by_side_summary": side_by_side_summary,
         "review_bucket_summary": review_bucket_summary,
         "worksheet_path": str(worksheet_path),
+        "report_base_path": str(report_base_root),
+        "performance_summary_path": str(performance_summary_path),
         "report_index_rows": report_index_rows,
         "is_actionable": "false",
     }
@@ -311,7 +337,7 @@ def render_paper_daily_review_summary(summary: dict[str, Any]) -> str:
         "",
         "## Header",
         f"- Generated at: {summary['generated_at']}",
-        f"- Report base path: {PAPER_TEST_DIR / 'reports'}",
+        f"- Report base path: {summary['report_base_path']}",
         f"- is_actionable: {summary['is_actionable']}",
         "",
         "## Account Summary",
@@ -323,7 +349,7 @@ def render_paper_daily_review_summary(summary: dict[str, Any]) -> str:
         f"- Realized PnL: {account.get('realized_pnl') or 'See source report'}",
         f"- Unrealized PnL: {account.get('unrealized_pnl') or 'See source report'}",
         f"- Total PnL: {account.get('total_pnl') or 'See source report'}",
-        f"- Source report: {PAPER_TEST_DIR / 'reports' / 'paper_performance_summary.md'}",
+        f"- Source report: {summary['performance_summary_path']}",
         "",
         "## Symbol Side-by-Side Summary",
         f"- Symbol count: {side['symbol_count']}",
@@ -398,7 +424,10 @@ def render_paper_report_index(report_rows: list[dict[str, str]], generated_at: d
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_markdown(path: Path, markdown: str) -> None:
-    assert_paper_path(path, PAPER_TEST_DIR)
+def write_markdown(path: Path, markdown: str, allowed_root: Path | None = None) -> None:
+    if allowed_root is None:
+        assert_paper_path(path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(path, allowed_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(markdown, encoding="utf-8")

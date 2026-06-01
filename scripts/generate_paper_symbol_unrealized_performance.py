@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.paper_account_paths import PaperAccountPaths  # noqa: E402
 from core.paper_symbol_unrealized_performance import (  # noqa: E402
     build_paper_symbol_unrealized_performance,
     load_paper_account_snapshot_rows,
@@ -23,16 +24,24 @@ from core.paths import (  # noqa: E402
 )
 
 
-def generate_paper_symbol_unrealized_performance() -> dict:
-    position_snapshot_path = paper_position_snapshot_path()
-    account_snapshot_path = paper_account_snapshot_path()
-    output_csv_path = paper_reports_dir() / "paper_symbol_unrealized_performance.csv"
-    output_summary_path = paper_reports_dir() / "paper_symbol_unrealized_performance_summary.md"
+def generate_paper_symbol_unrealized_performance(account_paths: PaperAccountPaths | None = None) -> dict:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        position_snapshot_path = account_paths.position_snapshot_path
+        account_snapshot_path = account_paths.account_snapshot_path
+        reports_dir = account_paths.reports_dir
+        allowed_root = account_paths.root
+    else:
+        position_snapshot_path = paper_position_snapshot_path()
+        account_snapshot_path = paper_account_snapshot_path()
+        reports_dir = paper_reports_dir()
+        allowed_root = None
+    output_csv_path = reports_dir / "paper_symbol_unrealized_performance.csv"
+    output_summary_path = reports_dir / "paper_symbol_unrealized_performance_summary.md"
 
-    position_rows = load_paper_position_snapshot_rows(position_snapshot_path)
-    account_rows = load_paper_account_snapshot_rows(account_snapshot_path)
+    position_rows = load_paper_position_snapshot_rows(position_snapshot_path, allowed_root=allowed_root)
+    account_rows = load_paper_account_snapshot_rows(account_snapshot_path, allowed_root=allowed_root)
     rows, summary_data, warnings = build_paper_symbol_unrealized_performance(position_rows, account_rows)
-    write_paper_symbol_unrealized_performance(rows, output_csv_path)
+    write_paper_symbol_unrealized_performance(rows, output_csv_path, allowed_root=allowed_root)
     summary = summarize_paper_symbol_unrealized_performance(
         summary_data,
         warnings,
@@ -42,6 +51,7 @@ def generate_paper_symbol_unrealized_performance() -> dict:
     write_paper_symbol_unrealized_performance_summary(
         render_paper_symbol_unrealized_performance_summary(summary),
         output_summary_path,
+        allowed_root=allowed_root,
     )
     return {
         "position_snapshot_path": position_snapshot_path,

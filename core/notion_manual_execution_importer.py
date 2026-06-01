@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from core.notion_client import NotionClient
+from core.notion_account_keys import (
+    build_legacy_manual_execution_canonical_key,
+    build_manual_execution_canonical_key,
+    normalize_notion_account_id,
+)
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
 from core.paper_execution_log import build_paper_trade_id
@@ -38,6 +43,7 @@ class ManualExecutionIssue:
 
 @dataclass
 class ManualExecutionCandidate:
+    account_id: str
     page_id: str
     name: str
     execution_date: str
@@ -59,6 +65,8 @@ class ManualExecutionCandidate:
     imported_at_raw: str | None
     synced_at_raw: str | None
     canonical_key: str = ""
+    legacy_canonical_key: str | None = None
+    legacy_key_compatible: bool = False
     projected_cash_delta: float = 0.0
     projected_position_delta: int = 0
     validation_issues: list[ManualExecutionIssue] = field(default_factory=list)
@@ -75,6 +83,7 @@ class ManualExecutionCandidate:
 
 @dataclass(frozen=True)
 class ManualExecutionPreview:
+    account_id: str
     execution_date: str
     candidate_count: int
     pass_count: int
@@ -93,6 +102,7 @@ class ManualExecutionPreview:
     def to_dict(self) -> dict[str, Any]:
         return {
             "execution_date": self.execution_date,
+            "account_id": self.account_id,
             "candidate_count": self.candidate_count,
             "pass_count": self.pass_count,
             "warning_count": self.warning_count,
@@ -121,9 +131,11 @@ def build_manual_execution_preview(
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
     execution_date: str,
+    account_id: str | None = None,
     env: dict[str, str] | None = None,
     reports_dir: Path | None = None,
 ) -> ManualExecutionPreview:
+    resolved_account_id = normalize_notion_account_id(account_id)
     mapping = get_mapping_section(mapping_root, "manual_executions")
     data_source_id = get_notion_data_source_id(
         settings,
@@ -136,8 +148,13 @@ def build_manual_execution_preview(
         data_source_id=data_source_id,
         mapping=mapping,
         execution_date=execution_date,
+        account_id=resolved_account_id,
     )
-    candidates = normalize_manual_execution_pages(pages=pages, mapping=mapping)
+    candidates = normalize_manual_execution_pages(
+        pages=pages,
+        mapping=mapping,
+        account_id=resolved_account_id,
+    )
     existing_trade_ids = _load_existing_trade_ids()
     available_cash = _load_latest_cash_balance()
     holdings = _load_latest_position_shares()
@@ -145,7 +162,7 @@ def build_manual_execution_preview(
 
     for candidate in candidates:
         _validate_candidate_shape(candidate)
-    _assign_canonical_keys(candidates)
+    _assign_canonical_keys(candidates, account_id=resolved_account_id)
     _validate_duplicate_trade_ids(candidates, existing_trade_ids)
 
     running_cash = available_cash
@@ -197,6 +214,7 @@ def build_manual_execution_preview(
     markdown_path = output_dir / f"manual_execution_import_preview_{compact_date}.md"
 
     preview = ManualExecutionPreview(
+        account_id=resolved_account_id,
         execution_date=execution_date,
         candidate_count=len(candidates),
         pass_count=sum(1 for item in candidates if item.validation_status == PASS),
@@ -222,7 +240,28 @@ def fetch_manual_execution_pages(
     data_source_id: str,
     mapping: dict[str, str],
     execution_date: str,
+    account_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    resolved_account_id = normalize_notion_account_id(account_id)
+    account_id_property = resolve_notion_property_name(mapping, "account_id")
+    if resolved_account_id == "paper_default":
+        account_filter = {
+            "or": [
+                {
+                    "property": account_id_property,
+                    "select": {"equals": resolved_account_id},
+                },
+                {
+                    "property": account_id_property,
+                    "select": {"is_empty": True},
+                },
+            ]
+        }
+    else:
+        account_filter = {
+            "property": account_id_property,
+            "select": {"equals": resolved_account_id},
+        }
     filter_payload = {
         "and": [
             {
@@ -233,6 +272,7 @@ def fetch_manual_execution_pages(
                 "property": resolve_notion_property_name(mapping, "status"),
                 "select": {"equals": "READY"},
             },
+            account_filter,
         ]
     }
     sorts = [
@@ -252,7 +292,9 @@ def normalize_manual_execution_pages(
     *,
     pages: list[dict[str, Any]],
     mapping: dict[str, str],
+    account_id: str | None = None,
 ) -> list[ManualExecutionCandidate]:
+    resolved_account_id = normalize_notion_account_id(account_id)
     normalized: list[ManualExecutionCandidate] = []
     for page in sorted(
         pages,
@@ -271,6 +313,7 @@ def normalize_manual_execution_pages(
         actual_price = _extract_number(properties, resolve_notion_property_name(mapping, "actual_price"))
         quantity = int(quantity_value) if quantity_value is not None and float(quantity_value).is_integer() else 0
         candidate = ManualExecutionCandidate(
+            account_id=resolved_account_id,
             page_id=str(page.get("id") or "").strip(),
             name=_extract_title(properties, resolve_notion_property_name(mapping, "name")),
             execution_date=execution_date,
@@ -368,16 +411,32 @@ def _validate_candidate_shape(candidate: ManualExecutionCandidate) -> None:
         )
 
 
-def _assign_canonical_keys(candidates: list[ManualExecutionCandidate]) -> None:
+def _assign_canonical_keys(
+    candidates: list[ManualExecutionCandidate],
+    *,
+    account_id: str | None = None,
+) -> None:
     sequence_by_group: dict[tuple[str, str, str], int] = {}
     seen_keys: set[str] = set()
     for candidate in sorted(candidates, key=lambda item: (item.execution_date, item.symbol, item.side, item.page_id)):
         group = (candidate.execution_date, candidate.symbol, candidate.side)
         sequence_by_group[group] = sequence_by_group.get(group, 0) + 1
         sequence = sequence_by_group[group]
-        candidate.canonical_key = (
-            f"manual_execution:{candidate.execution_date}:{candidate.symbol}:{candidate.side}:{sequence:02d}"
+        candidate.canonical_key = build_manual_execution_canonical_key(
+            account_id,
+            candidate.execution_date,
+            candidate.symbol,
+            candidate.side,
+            sequence,
         )
+        if candidate.account_id == "paper_default":
+            candidate.legacy_canonical_key = build_legacy_manual_execution_canonical_key(
+                candidate.execution_date,
+                candidate.symbol,
+                candidate.side,
+                sequence,
+            )
+            candidate.legacy_key_compatible = True
         if candidate.canonical_key in seen_keys:
             candidate.validation_issues.append(
                 ManualExecutionIssue(
@@ -510,6 +569,7 @@ def _render_preview_markdown(preview: ManualExecutionPreview) -> str:
         f"# Manual Execution Import Preview [{preview.execution_date}]",
         "",
         "## Summary",
+        f"- Account ID: {preview.account_id}",
         f"- Candidate Rows: {preview.candidate_count}",
         f"- PASS: {preview.pass_count}",
         f"- WARNING: {preview.warning_count}",
@@ -535,7 +595,9 @@ def _render_preview_markdown(preview: ManualExecutionPreview) -> str:
         lines.extend(
             [
                 f"### {candidate.symbol} {candidate.side} {candidate.quantity}",
+                f"- Account ID: {candidate.account_id}",
                 f"- Canonical Key: {candidate.canonical_key}",
+                f"- Legacy Canonical Key: {candidate.legacy_canonical_key or '-'}",
                 f"- Validation Status: {candidate.validation_status}",
                 f"- Actual Price: {candidate.actual_price:.4f}",
                 f"- Commission: {candidate.commission:.4f}",

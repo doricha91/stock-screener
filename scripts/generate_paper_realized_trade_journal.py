@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.paper_account_paths import PaperAccountPaths  # noqa: E402
 from core.paper_realized_trade_journal import (  # noqa: E402
     build_average_cost_realized_trade_journal,
     load_paper_execution_rows,
@@ -18,15 +19,21 @@ from core.paper_realized_trade_journal import (  # noqa: E402
 from core.paths import paper_execution_log_path, paper_reports_dir  # noqa: E402
 
 
-def generate_paper_realized_trade_journal() -> dict:
-    input_path = paper_execution_log_path()
-    reports_dir = paper_reports_dir()
+def generate_paper_realized_trade_journal(account_paths: PaperAccountPaths | None = None) -> dict:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        input_path = account_paths.execution_log_path
+        reports_dir = account_paths.reports_dir
+        allowed_root = account_paths.root
+    else:
+        input_path = paper_execution_log_path()
+        reports_dir = paper_reports_dir()
+        allowed_root = None
     output_csv_path = reports_dir / "paper_realized_trade_journal.csv"
     output_summary_path = reports_dir / "paper_realized_trade_journal_summary.md"
 
-    trade_rows = load_paper_execution_rows(input_path)
+    trade_rows = load_paper_execution_rows(input_path, allowed_root=allowed_root)
     build_result = build_average_cost_realized_trade_journal(trade_rows)
-    write_realized_trade_journal(build_result.rows, output_csv_path)
+    write_realized_trade_journal(build_result.rows, output_csv_path, allowed_root=allowed_root)
 
     summary = summarize_realized_trade_journal(
         build_result.rows,
@@ -38,6 +45,7 @@ def generate_paper_realized_trade_journal() -> dict:
     write_realized_trade_journal_summary(
         render_realized_trade_journal_summary(summary),
         output_summary_path,
+        allowed_root=allowed_root,
     )
     return {
         "input_path": input_path,

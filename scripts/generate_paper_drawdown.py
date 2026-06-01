@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_paths import PaperAccountPaths
 from core.paths import PAPER_TEST_DIR
 
 
@@ -226,6 +227,19 @@ def generate_paper_drawdown(
         "latest": drawdown_rows[-1],
         "summary": summary,
     }
+
+
+def generate_paper_drawdown_for_account(
+    account_paths: PaperAccountPaths | None = None,
+) -> dict[str, Any]:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        reports_dir = account_paths.reports_dir
+        return generate_paper_drawdown(
+            equity_curve_path=reports_dir / "paper_equity_curve.csv",
+            output_path=reports_dir / "paper_drawdown.csv",
+            summary_path=reports_dir / "paper_drawdown_summary.md",
+        )
+    return generate_paper_drawdown()
 
 
 def main() -> int:

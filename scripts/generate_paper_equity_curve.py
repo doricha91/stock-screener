@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_paths import PaperAccountPaths
 from core.paths import PAPER_TEST_DIR
 
 
@@ -255,6 +256,19 @@ def generate_paper_equity_curve(
         "latest": curve_rows[-1],
         "warnings": warnings,
     }
+
+
+def generate_paper_equity_curve_for_account(
+    account_paths: PaperAccountPaths | None = None,
+) -> dict[str, Any]:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        return generate_paper_equity_curve(
+            account_snapshot_path=account_paths.account_snapshot_path,
+            position_snapshot_path=account_paths.position_snapshot_path,
+            output_path=account_paths.reports_dir / "paper_equity_curve.csv",
+            summary_path=account_paths.reports_dir / "paper_equity_curve_summary.md",
+        )
+    return generate_paper_equity_curve()
 
 
 def main() -> int:

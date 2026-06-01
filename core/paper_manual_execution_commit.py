@@ -15,10 +15,17 @@ from core.notion_manual_execution_importer import (
     MANUAL_EXECUTION_REASON,
     MANUAL_EXECUTION_SOURCE,
 )
+from core.notion_account_keys import (
+    build_legacy_manual_execution_canonical_key,
+    build_manual_execution_canonical_key,
+    normalize_notion_account_id,
+)
+from core.paper_account_guard import assert_non_default_writer_target
 from core.paper_account_snapshot import (
     build_paper_account_snapshot_row,
     save_paper_account_snapshot,
 )
+from core.paper_account_paths import PaperAccountPaths
 from core.paper_account_state import build_paper_state_from_trades
 from core.paper_current_state_storage import save_paper_current_state
 from core.paper_execution_log import append_paper_execution_log
@@ -49,6 +56,7 @@ class ManualExecutionCommitError(RuntimeError):
 
 @dataclass(frozen=True)
 class ManualExecutionCommitResult:
+    account_id: str
     execution_date: str
     preview_json_path: str
     commit_json_path: str
@@ -66,8 +74,10 @@ def commit_manual_execution_preview(
     execution_date: str,
     preview_json_path: Path,
     allow_warnings: bool = False,
+    account_paths: PaperAccountPaths | None = None,
 ) -> ManualExecutionCommitResult:
     preview_payload = _load_preview_payload(preview_json_path)
+    resolved_account_id = _resolve_preview_account_id(preview_payload, account_paths=account_paths)
     _validate_preview_payload(
         preview_payload,
         execution_date=execution_date,
@@ -81,10 +91,18 @@ def commit_manual_execution_preview(
     ]
     if not candidate_payloads:
         raise ManualExecutionCommitError("Preview JSON contains no committable candidates.")
+    _normalize_commit_candidate_payloads(candidate_payloads, account_id=resolved_account_id)
+    allowed_root = account_paths.root if account_paths is not None and account_paths.account_id != "paper_default" else None
 
     previews = [_candidate_to_trade_preview(candidate) for candidate in candidate_payloads]
-    log_path = paper_execution_log_path()
-    rows_to_append, append_warnings = append_paper_execution_log(previews, log_path, commit=False)
+    writer_paths = _resolve_execution_writer_paths(execution_date=execution_date, account_paths=account_paths)
+    log_path = writer_paths["paper_execution_log"]
+    rows_to_append, append_warnings = append_paper_execution_log(
+        previews,
+        log_path,
+        commit=False,
+        allowed_root=allowed_root,
+    )
     duplicate_warnings = [
         warning for warning in append_warnings
         if warning.startswith("Skipping duplicate paper trade:")
@@ -100,21 +118,27 @@ def commit_manual_execution_preview(
     if len(rows_to_append) != len(previews):
         raise ManualExecutionCommitError("Commit blocked because pre-check row count does not match preview candidate count.")
 
-    initial_cash, currency = _load_initial_cash_and_currency()
-    current_state_path = paper_current_state_snapshot_path(execution_date)
+    initial_cash, currency = _load_initial_cash_and_currency(writer_paths["paper_account_snapshot"])
+    current_state_path = writer_paths["paper_state"]
 
     backup_paths = _create_dev_backups(
         execution_date=execution_date,
         targets={
             "paper_execution_log": log_path,
-            "paper_account_snapshot": paper_account_snapshot_path(),
-            "paper_position_snapshot": paper_position_snapshot_path(),
+            "paper_account_snapshot": writer_paths["paper_account_snapshot"],
+            "paper_position_snapshot": writer_paths["paper_position_snapshot"],
             "paper_current_state": current_state_path,
         },
+        backup_dir=writer_paths["backup_dir"],
     )
 
     try:
-        committed_rows, committed_warnings = append_paper_execution_log(previews, log_path, commit=True)
+        committed_rows, committed_warnings = append_paper_execution_log(
+            previews,
+            log_path,
+            commit=True,
+            allowed_root=allowed_root,
+        )
         if committed_warnings:
             raise ManualExecutionCommitError(
                 "Commit blocked because execution log append returned warnings: "
@@ -156,32 +180,37 @@ def commit_manual_execution_preview(
             committed_state,
             execution_date,
             current_state_path,
-            PAPER_TEST_DIR / "archive",
+            writer_paths["archive_dir"],
+            account_paths=account_paths,
         )
         save_paper_account_snapshot(
             account_snapshot_row,
-            paper_account_snapshot_path(),
-            PAPER_TEST_DIR / "archive",
+            writer_paths["paper_account_snapshot"],
+            writer_paths["archive_dir"],
+            account_paths=account_paths,
         )
         save_paper_position_snapshot(
             position_snapshot_rows,
             execution_date,
-            paper_position_snapshot_path(),
-            PAPER_TEST_DIR / "archive",
+            writer_paths["paper_position_snapshot"],
+            writer_paths["archive_dir"],
+            account_paths=account_paths,
         )
         sidecar_paths = _write_commit_sidecar(
+            account_id=resolved_account_id,
             execution_date=execution_date,
             preview_json_path=preview_json_path,
             candidate_payloads=candidate_payloads,
             committed_rows=committed_rows,
             backup_paths=backup_paths,
+            reports_dir=writer_paths["reports_dir"],
         )
     except Exception as exc:
         _restore_from_backups(
             targets={
                 "paper_execution_log": log_path,
-                "paper_account_snapshot": paper_account_snapshot_path(),
-                "paper_position_snapshot": paper_position_snapshot_path(),
+                "paper_account_snapshot": writer_paths["paper_account_snapshot"],
+                "paper_position_snapshot": writer_paths["paper_position_snapshot"],
                 "paper_current_state": current_state_path,
             },
             backup_paths=backup_paths,
@@ -191,6 +220,7 @@ def commit_manual_execution_preview(
         raise ManualExecutionCommitError(f"Manual execution commit failed and was rolled back: {exc}") from exc
 
     return ManualExecutionCommitResult(
+        account_id=resolved_account_id,
         execution_date=execution_date,
         preview_json_path=str(preview_json_path),
         commit_json_path=str(sidecar_paths["json"]),
@@ -237,6 +267,101 @@ def _validate_preview_payload(
         raise ManualExecutionCommitError(f"Unsupported commit_allowed value: {commit_allowed or 'blank'}.")
 
 
+def _resolve_preview_account_id(
+    payload: dict[str, Any],
+    *,
+    account_paths: PaperAccountPaths | None = None,
+) -> str:
+    root_account_id = payload.get("account_id")
+    if root_account_id is not None and str(root_account_id).strip():
+        resolved_account_id = normalize_notion_account_id(str(root_account_id).strip())
+    else:
+        resolved_account_id = "paper_default"
+
+    candidate_account_ids = {
+        normalize_notion_account_id(str(candidate.get("account_id") or "").strip())
+        for candidate in payload.get("candidates", [])
+        if str(candidate.get("account_id") or "").strip()
+    }
+    if len(candidate_account_ids) > 1:
+        raise ManualExecutionCommitError("Preview JSON contains mixed account_id values.")
+    if candidate_account_ids:
+        candidate_account_id = next(iter(candidate_account_ids))
+        if resolved_account_id != candidate_account_id:
+            raise ManualExecutionCommitError(
+                "Preview JSON account_id does not match candidate account_id values."
+            )
+        resolved_account_id = candidate_account_id
+    if account_paths is not None and account_paths.account_id != resolved_account_id:
+        raise ManualExecutionCommitError("Provided account_paths.account_id does not match preview account_id.")
+    if resolved_account_id != "paper_default" and account_paths is None:
+        raise ManualExecutionCommitError(
+            "Non-default manual execution commit requires account-aware writer paths."
+        )
+    return resolved_account_id
+
+
+def _normalize_commit_candidate_payloads(
+    candidate_payloads: list[dict[str, Any]],
+    *,
+    account_id: str,
+) -> None:
+    for candidate in candidate_payloads:
+        candidate["account_id"] = account_id
+        raw_canonical_key = str(candidate.get("canonical_key") or "").strip()
+        if not raw_canonical_key:
+            raise ManualExecutionCommitError("Preview candidate is missing canonical_key.")
+        normalized = _normalize_execution_canonical_key(
+            account_id=account_id,
+            canonical_key=raw_canonical_key,
+        )
+        candidate["canonical_key"] = normalized["canonical_key"]
+        candidate["legacy_canonical_key"] = normalized["legacy_canonical_key"]
+        candidate["legacy_key_compatible"] = normalized["legacy_key_compatible"]
+
+
+def _normalize_execution_canonical_key(
+    *,
+    account_id: str,
+    canonical_key: str,
+) -> dict[str, Any]:
+    parts = canonical_key.split(":")
+    if len(parts) == 6 and parts[0] == "manual_execution":
+        key_account_id = normalize_notion_account_id(parts[1])
+        if key_account_id != account_id:
+            raise ManualExecutionCommitError(
+                f"Preview canonical_key account_id mismatch: {canonical_key} vs {account_id}."
+            )
+        return {
+            "canonical_key": canonical_key,
+            "legacy_canonical_key": build_legacy_manual_execution_canonical_key(
+                parts[2],
+                parts[3],
+                parts[4],
+                int(parts[5]),
+            ) if account_id == "paper_default" else None,
+            "legacy_key_compatible": account_id == "paper_default",
+        }
+    if len(parts) == 5 and parts[0] == "manual_execution":
+        if account_id != "paper_default":
+            raise ManualExecutionCommitError(
+                "Legacy canonical_key is not allowed for non-default manual execution commit."
+            )
+        normalized_key = build_manual_execution_canonical_key(
+            account_id,
+            parts[1],
+            parts[2],
+            parts[3],
+            int(parts[4]),
+        )
+        return {
+            "canonical_key": normalized_key,
+            "legacy_canonical_key": canonical_key,
+            "legacy_key_compatible": True,
+        }
+    raise ManualExecutionCommitError(f"Unsupported manual execution canonical_key format: {canonical_key}.")
+
+
 def _candidate_to_trade_preview(candidate: dict[str, Any]) -> PaperTradePreview:
     side = str(candidate.get("side") or "").strip().upper()
     quantity = int(candidate.get("quantity") or 0)
@@ -261,8 +386,8 @@ def _candidate_to_trade_preview(candidate: dict[str, Any]) -> PaperTradePreview:
     )
 
 
-def _load_initial_cash_and_currency() -> tuple[float, str]:
-    rows = _read_csv_rows(paper_account_snapshot_path())
+def _load_initial_cash_and_currency(account_snapshot_path: Path) -> tuple[float, str]:
+    rows = _read_csv_rows(account_snapshot_path)
     if not rows:
         raise ManualExecutionCommitError("paper_account_snapshot.csv has no rows.")
     latest = max(rows, key=lambda row: str(row.get("snapshot_date") or "").strip())
@@ -286,9 +411,10 @@ def _create_dev_backups(
     *,
     execution_date: str,
     targets: dict[str, Path],
+    backup_dir: Path,
 ) -> dict[str, Path | None]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_dir = dev_backups_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
     backups: dict[str, Path | None] = {}
     compact_date = execution_date.replace("-", "")
     for label, source_path in targets.items():
@@ -317,24 +443,30 @@ def _restore_from_backups(
 
 def _write_commit_sidecar(
     *,
+    account_id: str,
     execution_date: str,
     preview_json_path: Path,
     candidate_payloads: list[dict[str, Any]],
     committed_rows: list[dict[str, Any]],
     backup_paths: dict[str, Path | None],
+    reports_dir: Path,
 ) -> dict[str, Path]:
     compact_date = execution_date.replace("-", "")
-    reports_dir = paper_reports_dir()
     json_path = reports_dir / f"manual_execution_import_commit_{compact_date}.json"
     markdown_path = reports_dir / f"manual_execution_import_commit_{compact_date}.md"
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {
+        "account_id": account_id,
         "execution_date": execution_date,
         "preview_json_path": str(preview_json_path),
         "backup_paths": {key: (None if path is None else str(path)) for key, path in backup_paths.items()},
         "committed_rows": [
             {
+                "account_id": candidate.get("account_id"),
                 "canonical_key": candidate.get("canonical_key"),
+                "legacy_canonical_key": candidate.get("legacy_canonical_key"),
+                "legacy_key_compatible": bool(candidate.get("legacy_key_compatible")),
                 "page_id": candidate.get("page_id"),
                 "symbol": candidate.get("symbol"),
                 "side": candidate.get("side"),
@@ -345,6 +477,7 @@ def _write_commit_sidecar(
                 "broker": candidate.get("broker"),
                 "validation_status": candidate.get("validation_status"),
                 "validation_issues": candidate.get("validation_issues", []),
+                "commit_status": "COMMITTED",
                 "committed_trade_id": str(row.get("trade_id") or "").strip(),
             }
             for candidate, row in zip(candidate_payloads, committed_rows)
@@ -363,7 +496,9 @@ def _write_commit_sidecar(
         lines.extend(
             [
                 f"- {item['symbol']} {item['side']} {item['quantity']} @ {item['actual_price']}",
+                f"  - account_id: {item['account_id']}",
                 f"  - canonical_key: {item['canonical_key']}",
+                f"  - legacy_canonical_key: {item['legacy_canonical_key'] or '-'}",
                 f"  - page_id: {item['page_id']}",
                 f"  - trade_id: {item['committed_trade_id']}",
                 f"  - commission: {item['commission']}",
@@ -374,3 +509,37 @@ def _write_commit_sidecar(
         )
     markdown_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
     return {"json": json_path, "markdown": markdown_path}
+
+
+def _resolve_execution_writer_paths(
+    *,
+    execution_date: str,
+    account_paths: PaperAccountPaths | None,
+) -> dict[str, Path]:
+    if account_paths is None or account_paths.account_id == "paper_default":
+        return {
+            "paper_execution_log": paper_execution_log_path(),
+            "paper_account_snapshot": paper_account_snapshot_path(),
+            "paper_position_snapshot": paper_position_snapshot_path(),
+            "paper_state": paper_current_state_snapshot_path(execution_date),
+            "reports_dir": paper_reports_dir(),
+            "archive_dir": PAPER_TEST_DIR / "archive",
+            "backup_dir": dev_backups_dir(),
+        }
+
+    targets = {
+        "paper_execution_log": account_paths.execution_log_path,
+        "paper_account_snapshot": account_paths.account_snapshot_path,
+        "paper_position_snapshot": account_paths.position_snapshot_path,
+        "paper_state": account_paths.current_state_snapshot_path(execution_date),
+        "reports_dir": account_paths.reports_dir,
+        "archive_dir": account_paths.root / "archive",
+        "backup_dir": account_paths.root / "archive" / "dev_backups",
+    }
+    for path in targets.values():
+        assert_non_default_writer_target(
+            path,
+            account_id=account_paths.account_id,
+            account_root=account_paths.root,
+        )
+    return targets

@@ -1,0 +1,18 @@
+{
+  "schema_version": "paper_account_profiles.v1",
+  "default_account_id": "paper_default",
+  "accounts": [
+    {
+      "account_id": "paper_default",
+      "display_name": "Paper Default",
+      "currency": "USD",
+      "initial_cash": 100000.0,
+      "account_type": "paper",
+      "is_default": true,
+      "strategy_profile": null,
+      "universe_profile": null,
+      "benchmark_profile": null,
+      "notion_profile": null
+    }
+  ]
+}

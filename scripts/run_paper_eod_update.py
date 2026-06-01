@@ -9,6 +9,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.execution_logger import parse_journal_from_markdown, map_journal_to_trades
+from core.paper_account_guard import assert_non_default_writer_target
+from core.paper_account_paths import PaperAccountPaths
 from core.paper_account_snapshot import (
     build_paper_account_snapshot_row,
     save_paper_account_snapshot,
@@ -53,6 +55,32 @@ def build_paper_eod_paths(date_str: str, plan_path: str | Path | None = None) ->
     }
     for key in ("paper_state", "paper_execution_log", "paper_account_snapshot", "paper_position_snapshot"):
         assert_paper_path(outputs[key], PAPER_TEST_DIR)
+    return outputs
+
+
+def build_account_aware_paper_eod_paths(
+    date_str: str,
+    account_paths: PaperAccountPaths,
+    plan_path: str | Path | None = None,
+) -> dict[str, Path]:
+    clean_date = _normalize_date(date_str)
+    input_report = Path(plan_path) if plan_path is not None else account_paths.daily_action_plan_path(clean_date)
+    outputs = {
+        "input_report": input_report,
+        "paper_state": account_paths.current_state_snapshot_path(clean_date),
+        "paper_execution_log": account_paths.execution_log_path,
+        "paper_account_snapshot": account_paths.account_snapshot_path,
+        "paper_position_snapshot": account_paths.position_snapshot_path,
+        "archive_dir": account_paths.root / "archive",
+    }
+    for key, path in outputs.items():
+        if key == "input_report":
+            continue
+        assert_non_default_writer_target(
+            path,
+            account_id=account_paths.account_id,
+            account_root=account_paths.root,
+        )
     return outputs
 
 
@@ -124,8 +152,18 @@ def _preview_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-def load_paper_execution_rows(log_path: Path) -> list[dict[str, Any]]:
-    assert_paper_path(log_path, PAPER_TEST_DIR)
+def load_paper_execution_rows(
+    log_path: Path,
+    account_paths: PaperAccountPaths | None = None,
+) -> list[dict[str, Any]]:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        assert_non_default_writer_target(
+            log_path,
+            account_id=account_paths.account_id,
+            account_root=account_paths.root,
+        )
+    else:
+        assert_paper_path(log_path, PAPER_TEST_DIR)
     if not log_path.exists():
         return []
 
@@ -137,8 +175,9 @@ def build_paper_account_preview_from_log(
     log_path: Path,
     initial_cash: float = 100000.0,
     currency: str = "USD",
+    account_paths: PaperAccountPaths | None = None,
 ) -> PaperAccountState:
-    trade_rows = load_paper_execution_rows(log_path)
+    trade_rows = load_paper_execution_rows(log_path, account_paths=account_paths)
     return build_paper_state_from_trades(
         trade_rows,
         initial_cash=initial_cash,
@@ -151,8 +190,13 @@ def run_paper_eod_dry_run(
     allow_empty_journal: bool = False,
     commit: bool = False,
     plan_path: str | Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> int:
-    paths = build_paper_eod_paths(date_str, plan_path=plan_path)
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        paths = build_account_aware_paper_eod_paths(date_str, account_paths, plan_path=plan_path)
+    else:
+        paths = build_paper_eod_paths(date_str, plan_path=plan_path)
+        paths["archive_dir"] = PAPER_TEST_DIR / "archive"
     report_exists = paths["input_report"].exists()
     parser_mode = "not_run"
     journal_rows: list[dict[str, Any]] = []
@@ -210,15 +254,24 @@ def run_paper_eod_dry_run(
 
     if report_exists and parser_mode in {"strict", "fallback_preview"}:
         paper_trade_previews, preview_warnings = build_paper_trade_previews(journal_rows)
+        allowed_root = (
+            account_paths.root
+            if account_paths is not None and account_paths.account_id != "paper_default"
+            else None
+        )
         rows_to_append, append_warnings = append_paper_execution_log(
             paper_trade_previews,
             paths["paper_execution_log"],
             commit=commit,
+            allowed_root=allowed_root,
         )
 
     paper_log_exists = paths["paper_execution_log"].exists()
     try:
-        paper_account_state = build_paper_account_preview_from_log(paths["paper_execution_log"])
+        paper_account_state = build_paper_account_preview_from_log(
+            paths["paper_execution_log"],
+            account_paths=account_paths,
+        )
     except ValueError as exc:
         account_preview_error = str(exc)
 
@@ -228,7 +281,8 @@ def run_paper_eod_dry_run(
                 paper_account_state,
                 date_str,
                 paths["paper_state"],
-                PAPER_TEST_DIR / "archive",
+                paths["archive_dir"],
+                account_paths=account_paths,
             )
         except Exception as exc:
             paper_state_save_error = str(exc)
@@ -278,7 +332,8 @@ def run_paper_eod_dry_run(
             snapshot_save_result = save_paper_account_snapshot(
                 snapshot_row,
                 paths["paper_account_snapshot"],
-                PAPER_TEST_DIR / "archive",
+                paths["archive_dir"],
+                account_paths=account_paths,
             )
         except Exception as exc:
             snapshot_save_error = str(exc)
@@ -294,7 +349,8 @@ def run_paper_eod_dry_run(
                 position_snapshot_rows,
                 date_str,
                 paths["paper_position_snapshot"],
-                PAPER_TEST_DIR / "archive",
+                paths["archive_dir"],
+                account_paths=account_paths,
             )
         except Exception as exc:
             position_snapshot_save_error = str(exc)

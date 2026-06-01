@@ -7,6 +7,8 @@ from core.paper_status import (
     WORKFLOW_COMMITTED,
     WORKFLOW_NO_PLAN,
     WORKFLOW_PLAN_READY,
+    WORKFLOW_REVIEW_DONE,
+    WORKFLOW_REVIEW_PARTIAL,
     WORKFLOW_REVIEW_READY,
     format_paper_status,
     paper_status_to_json,
@@ -78,6 +80,7 @@ def test_review_ready_when_reports_template_and_validation_pass_exist(tmp_path):
     )
     status = run_paper_status("20260520", paper_root=root)
     assert status["workflow_status"] == WORKFLOW_REVIEW_READY
+    assert status["review_progress_status"] == "NOT_STARTED"
 
 
 def test_execution_log_zero_rows_for_date_is_not_error(tmp_path):
@@ -126,3 +129,80 @@ def test_format_status_contains_next_command(tmp_path):
     status = run_paper_status("20260520", paper_root=root)
     text = format_paper_status(status)
     assert "next_recommended_command" in text
+
+
+def test_review_partial_when_some_template_rows_answered_and_log_exists(tmp_path):
+    root = _build_root(tmp_path)
+    _write(root / "daily_action_plan_20260520.md", "# plan\n")
+    _write(root / "paper_current_state_20260520.json", "{}\n")
+    _write(
+        root / "paper_account_snapshot.csv",
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols\n"
+        "2026-05-20,100,200,3,2,AAPL|MSFT\n",
+    )
+    _write(root / "paper_position_snapshot.csv", "snapshot_date,symbol\n2026-05-20,AAPL\n")
+    _write(root / "reports" / "paper_daily_review_summary.md", "# summary\n")
+    _write(root / "reports" / "paper_performance_summary.md", "# perf\n")
+    _write(
+        root / "reviews" / "paper_manual_review_log_template.csv",
+        "review_date,symbol,question_id,manual_answer,review_status\n"
+        "2026-05-21,AAPL,Q1,filled,reviewed\n"
+        "2026-05-21,AAPL,Q2,,pending\n"
+        "2026-05-21,AAPL,Q3,,pending\n"
+        "2026-05-21,AAPL,Q4,,pending\n",
+    )
+    _write(
+        root / "reviews" / "paper_manual_review_log.csv",
+        "review_date,symbol,question_id,manual_answer,review_status\n"
+        "2026-05-21,AAPL,Q1,filled,reviewed\n",
+    )
+    _write(
+        root / "reviews" / "paper_manual_review_log_validation_report.md",
+        "# Paper Manual Review Log Validation Report\n\n- Validation result: PASS\n",
+    )
+    status = run_paper_status("20260520", paper_root=root)
+    assert status["workflow_status"] == WORKFLOW_REVIEW_PARTIAL
+    assert status["review_answered_row_count"] == 1
+    assert status["review_pending_row_count"] == 3
+    assert status["review_progress_status"] == "PARTIAL"
+    assert status["next_recommended_command"] == "complete pending review rows then paper.py review-append"
+
+
+def test_review_done_when_all_template_rows_answered_and_log_exists(tmp_path):
+    root = _build_root(tmp_path)
+    _write(root / "daily_action_plan_20260520.md", "# plan\n")
+    _write(root / "paper_current_state_20260520.json", "{}\n")
+    _write(
+        root / "paper_account_snapshot.csv",
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols\n"
+        "2026-05-20,100,200,3,2,AAPL|MSFT\n",
+    )
+    _write(root / "paper_position_snapshot.csv", "snapshot_date,symbol\n2026-05-20,AAPL\n")
+    _write(root / "reports" / "paper_daily_review_summary.md", "# summary\n")
+    _write(root / "reports" / "paper_performance_summary.md", "# perf\n")
+    _write(
+        root / "reviews" / "paper_manual_review_log_template.csv",
+        "review_date,symbol,question_id,manual_answer,review_status\n"
+        "2026-05-21,AAPL,Q1,filled-1,reviewed\n"
+        "2026-05-21,AAPL,Q2,filled-2,reviewed\n"
+        "2026-05-21,AAPL,Q3,filled-3,reviewed\n"
+        "2026-05-21,AAPL,Q4,filled-4,reviewed\n",
+    )
+    _write(
+        root / "reviews" / "paper_manual_review_log.csv",
+        "review_date,symbol,question_id,manual_answer,review_status\n"
+        "2026-05-21,AAPL,Q1,filled-1,reviewed\n"
+        "2026-05-21,AAPL,Q2,filled-2,reviewed\n"
+        "2026-05-21,AAPL,Q3,filled-3,reviewed\n"
+        "2026-05-21,AAPL,Q4,filled-4,reviewed\n",
+    )
+    _write(
+        root / "reviews" / "paper_manual_review_log_validation_report.md",
+        "# Paper Manual Review Log Validation Report\n\n- Validation result: PASS\n",
+    )
+    status = run_paper_status("20260520", paper_root=root)
+    assert status["workflow_status"] == WORKFLOW_REVIEW_DONE
+    assert status["review_answered_row_count"] == 4
+    assert status["review_pending_row_count"] == 0
+    assert status["review_progress_status"] == "DONE"
+    assert status["next_recommended_command"] == "no immediate action"

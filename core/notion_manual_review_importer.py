@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from core.notion_client import NotionClient
+from core.notion_account_keys import (
+    build_legacy_manual_review_canonical_key,
+    build_manual_review_canonical_key,
+    normalize_notion_account_id,
+)
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
 from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
@@ -32,6 +37,7 @@ class ManualReviewIssue:
 
 @dataclass
 class ManualReviewCandidate:
+    account_id: str
     page_id: str
     name: str
     review_date: str
@@ -52,6 +58,8 @@ class ManualReviewCandidate:
     synced_at_raw: str | None
     created_at: str
     canonical_key: str = ""
+    legacy_canonical_key: str | None = None
+    legacy_key_compatible: bool = False
     validation_issues: list[ManualReviewIssue] = field(default_factory=list)
 
     @property
@@ -66,6 +74,7 @@ class ManualReviewCandidate:
 
 @dataclass(frozen=True)
 class ManualReviewPreview:
+    account_id: str
     review_date: str
     candidate_count: int
     pass_count: int
@@ -81,6 +90,7 @@ class ManualReviewPreview:
     def to_dict(self) -> dict[str, Any]:
         return {
             "review_date": self.review_date,
+            "account_id": self.account_id,
             "candidate_count": self.candidate_count,
             "pass_count": self.pass_count,
             "warning_count": self.warning_count,
@@ -106,11 +116,13 @@ def build_manual_review_preview(
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
     review_date: str,
+    account_id: str | None = None,
     env: dict[str, str] | None = None,
     reports_dir: Path | None = None,
     existing_log_path: Path | None = None,
     template_path: Path | None = None,
 ) -> ManualReviewPreview:
+    resolved_account_id = normalize_notion_account_id(account_id)
     mapping = get_mapping_section(mapping_root, "manual_reviews")
     data_source_id = get_notion_data_source_id(
         settings,
@@ -123,11 +135,16 @@ def build_manual_review_preview(
         data_source_id=data_source_id,
         mapping=mapping,
         review_date=review_date,
+        account_id=resolved_account_id,
     )
-    candidates = normalize_manual_review_pages(pages=pages, mapping=mapping)
+    candidates = normalize_manual_review_pages(
+        pages=pages,
+        mapping=mapping,
+        account_id=resolved_account_id,
+    )
     for candidate in candidates:
         _validate_candidate_shape(candidate)
-    _assign_canonical_keys(candidates)
+    _assign_canonical_keys(candidates, account_id=resolved_account_id)
     _apply_existing_review_duplicate_validation(
         candidates,
         existing_log_path=existing_log_path or paper_reviews_dir() / "paper_manual_review_log.csv",
@@ -153,6 +170,7 @@ def build_manual_review_preview(
     json_path = output_dir / f"manual_review_import_preview_{compact_date}.json"
     markdown_path = output_dir / f"manual_review_import_preview_{compact_date}.md"
     preview = ManualReviewPreview(
+        account_id=resolved_account_id,
         review_date=review_date,
         candidate_count=len(candidates),
         pass_count=sum(1 for item in candidates if item.validation_status == PASS),
@@ -175,7 +193,28 @@ def fetch_manual_review_pages(
     data_source_id: str,
     mapping: dict[str, str],
     review_date: str,
+    account_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    resolved_account_id = normalize_notion_account_id(account_id)
+    account_id_property = resolve_notion_property_name(mapping, "account_id")
+    if resolved_account_id == "paper_default":
+        account_filter = {
+            "or": [
+                {
+                    "property": account_id_property,
+                    "select": {"equals": resolved_account_id},
+                },
+                {
+                    "property": account_id_property,
+                    "select": {"is_empty": True},
+                },
+            ]
+        }
+    else:
+        account_filter = {
+            "property": account_id_property,
+            "select": {"equals": resolved_account_id},
+        }
     filter_payload = {
         "and": [
             {
@@ -186,6 +225,7 @@ def fetch_manual_review_pages(
                 "property": resolve_notion_property_name(mapping, "import_status"),
                 "select": {"equals": "READY"},
             },
+            account_filter,
         ]
     }
     sorts = [
@@ -205,7 +245,9 @@ def normalize_manual_review_pages(
     *,
     pages: list[dict[str, Any]],
     mapping: dict[str, str],
+    account_id: str | None = None,
 ) -> list[ManualReviewCandidate]:
+    resolved_account_id = normalize_notion_account_id(account_id)
     normalized: list[ManualReviewCandidate] = []
     for page in sorted(
         pages,
@@ -219,6 +261,7 @@ def normalize_manual_review_pages(
         properties = page.get("properties") or {}
         normalized.append(
             ManualReviewCandidate(
+                account_id=resolved_account_id,
                 page_id=str(page.get("id") or "").strip(),
                 name=_extract_title(properties, mapping.get("name", "Name")),
                 review_date=_extract_date(properties, resolve_notion_property_name(mapping, "review_date")),
@@ -278,10 +321,26 @@ def _validate_candidate_shape(candidate: ManualReviewCandidate) -> None:
         )
 
 
-def _assign_canonical_keys(candidates: list[ManualReviewCandidate]) -> None:
+def _assign_canonical_keys(
+    candidates: list[ManualReviewCandidate],
+    *,
+    account_id: str | None = None,
+) -> None:
     seen_keys: set[str] = set()
     for candidate in sorted(candidates, key=lambda item: (item.review_date, item.symbol, item.question_id, item.page_id)):
-        candidate.canonical_key = f"manual_review:{candidate.review_date}:{candidate.symbol}:{candidate.question_id}"
+        candidate.canonical_key = build_manual_review_canonical_key(
+            account_id,
+            candidate.review_date,
+            candidate.symbol,
+            candidate.question_id,
+        )
+        if candidate.account_id == "paper_default":
+            candidate.legacy_canonical_key = build_legacy_manual_review_canonical_key(
+                candidate.review_date,
+                candidate.symbol,
+                candidate.question_id,
+            )
+            candidate.legacy_key_compatible = True
         if candidate.canonical_key in seen_keys:
             candidate.validation_issues.append(
                 ManualReviewIssue(
@@ -441,6 +500,7 @@ def _render_preview_markdown(preview: ManualReviewPreview) -> str:
         f"# Manual Review Import Preview [{preview.review_date}]",
         "",
         "## Summary",
+        f"- Account ID: {preview.account_id}",
         f"- Candidate Rows: {preview.candidate_count}",
         f"- PASS: {preview.pass_count}",
         f"- WARNING: {preview.warning_count}",
@@ -463,7 +523,9 @@ def _render_preview_markdown(preview: ManualReviewPreview) -> str:
         lines.extend(
             [
                 f"### {candidate.symbol} {candidate.question_id}",
+                f"- Account ID: {candidate.account_id}",
                 f"- Canonical Key: {candidate.canonical_key}",
+                f"- Legacy Canonical Key: {candidate.legacy_canonical_key or '-'}",
                 f"- Validation Status: {candidate.validation_status}",
                 f"- Review Status: {candidate.review_status or '-'}",
                 f"- Question: {candidate.question_text}",

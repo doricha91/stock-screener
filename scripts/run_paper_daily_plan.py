@@ -8,6 +8,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.daily_plan_generator import generate_daily_plan
+from core.paper_account_paths import PaperAccountPaths
 from core.paper_state_provider import load_official_paper_state_for_daily_plan
 from core.paths import (
     paper_config_snapshot_archive_dir,
@@ -23,17 +24,31 @@ def _normalize_date_for_db(date_str: str) -> str:
     return datetime.strptime(clean_date, "%Y%m%d").strftime("%Y-%m-%d")
 
 
-def run_paper_daily_plan(date_str: str) -> str:
+def run_paper_daily_plan(date_str: str, account_paths: PaperAccountPaths | None = None) -> str:
     normalized_db_date = _normalize_date_for_db(date_str)
     paper_state = load_official_paper_state_for_daily_plan(normalized_db_date)
-    output_path = paper_daily_action_plan_path(date_str)
+    output_path = (
+        account_paths.daily_action_plan_path(date_str)
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else paper_daily_action_plan_path(date_str)
+    )
+    config_snapshot_output_path = (
+        account_paths.config_snapshot_path(date_str)
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else paper_config_snapshot_path(date_str)
+    )
+    config_snapshot_archive_path = (
+        account_paths.config_snapshot_archive_dir
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else paper_config_snapshot_archive_dir()
+    )
     return generate_daily_plan(
         date_str=normalized_db_date,
         current_state=paper_state,
         output_path=output_path,
         market_state_write_log=False,
-        config_snapshot_path=paper_config_snapshot_path(date_str),
-        config_snapshot_archive_dir=paper_config_snapshot_archive_dir(),
+        config_snapshot_path=config_snapshot_output_path,
+        config_snapshot_archive_dir=config_snapshot_archive_path,
         config_snapshot_source="run_paper_daily_plan",
     )
 

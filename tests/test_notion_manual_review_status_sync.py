@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import sync_notion_review_status as review_sync_script
 from core.notion_client import NotionAPIError
 from core.notion_manual_review_status_sync import (
     ManualReviewStatusSyncError,
@@ -19,6 +20,7 @@ def _mapping_root() -> dict[str, dict[str, str]]:
     return {
         "manual_reviews": {
             "external_key": "External Key",
+            "account_id": "Account ID",
             "validation_status": "Validation Status",
             "validation_message": "Validation Message",
             "import_status": "Import Status",
@@ -33,6 +35,7 @@ def _commit_report_row(
     page_id: str | None = "page-1",
     canonical_key: str | None = "manual_review:2026-05-25:AAPL:Q001",
     append_status: str = "APPENDED",
+    account_id: str | None = None,
     validation_status: str = "WARNING",
     validation_warnings: list[dict] | None = None,
 ) -> dict:
@@ -52,6 +55,7 @@ def _commit_report_row(
             }
         ],
         "append_status": append_status,
+        **({"account_id": account_id} if account_id is not None else {}),
     }
 
 
@@ -89,7 +93,8 @@ def test_summarize_validation_warnings_returns_ok_when_empty():
 def test_build_manual_review_status_properties_matches_contract():
     props = build_manual_review_status_properties(
         mapping=_mapping_root()["manual_reviews"],
-        canonical_key="manual_review:2026-05-25:AAPL:Q001",
+        account_id="paper_default",
+        canonical_key="manual_review:paper_default:2026-05-25:AAPL:Q001",
         validation_status="WARNING",
         validation_warnings=[
             {"code": "missing_source_template_key", "message": "Source Template Key is blank."},
@@ -99,13 +104,15 @@ def test_build_manual_review_status_properties_matches_contract():
     )
     assert set(props.keys()) == {
         "External Key",
+        "Account ID",
         "Validation Status",
         "Validation Message",
         "Import Status",
         "Imported At",
         "Synced At",
     }
-    assert props["External Key"]["rich_text"][0]["text"]["content"] == "manual_review:2026-05-25:AAPL:Q001"
+    assert props["External Key"]["rich_text"][0]["text"]["content"] == "manual_review:paper_default:2026-05-25:AAPL:Q001"
+    assert props["Account ID"]["select"]["name"] == "paper_default"
     assert props["Validation Status"]["select"]["name"] == "WARNING"
     assert props["Import Status"]["select"]["name"] == "COMMITTED"
     assert "missing_source_template_key" in props["Validation Message"]["rich_text"][0]["text"]["content"]
@@ -125,6 +132,7 @@ def test_dry_run_does_not_call_notion_update(tmp_path):
         now=datetime(2026, 5, 26, 21, 0, 0),
     )
     assert result.overall_status == "SUCCESS"
+    assert result.account_id == "paper_default"
     assert result.updated_count == 1
     assert client.calls == []
     assert result.rows[0].status == "DRY_RUN"
@@ -148,6 +156,7 @@ def test_non_dry_run_updates_only_status_fields(tmp_path):
     props = client.calls[0]["properties"]
     assert set(props.keys()) == {
         "External Key",
+        "Account ID",
         "Validation Status",
         "Validation Message",
         "Import Status",
@@ -227,3 +236,62 @@ def test_commit_report_date_mismatch_fails(tmp_path):
             commit_report_path=report_path,
             dry_run=True,
         )
+
+
+def test_paper_default_legacy_review_commit_report_is_upgraded_to_account_aware_key(tmp_path):
+    report_path = tmp_path / "commit.json"
+    _write_report(report_path, [_commit_report_row(canonical_key="manual_review:2026-05-25:AAPL:Q001")])
+    result = sync_manual_review_status(
+        client=FakeClient(),
+        mapping_root=_mapping_root(),
+        review_date="2026-05-25",
+        commit_report_path=report_path,
+        dry_run=True,
+    )
+    row = result.rows[0]
+    assert row.account_id == "paper_default"
+    assert row.canonical_key == "manual_review:paper_default:2026-05-25:AAPL:Q001"
+    assert row.legacy_canonical_key == "manual_review:2026-05-25:AAPL:Q001"
+    assert row.legacy_key_compatible is True
+
+
+def test_non_default_legacy_only_review_key_fails(tmp_path):
+    report_path = tmp_path / "commit.json"
+    _write_report(
+        report_path,
+        [_commit_report_row(canonical_key="manual_review:2026-05-25:AAPL:Q001", account_id="paper_growth")],
+    )
+    result = sync_manual_review_status(
+        client=FakeClient(),
+        mapping_root=_mapping_root(),
+        review_date="2026-05-25",
+        commit_report_path=report_path,
+        dry_run=True,
+        account_id="paper_growth",
+    )
+    assert result.overall_status == "FAILED"
+    assert result.rows[0].status == "FAILED"
+    assert "Legacy canonical_key" in result.rows[0].message
+
+
+def test_cli_account_id_mismatch_fails(monkeypatch, tmp_path, capsys):
+    report_path = tmp_path / "commit.json"
+    _write_report(report_path, [_commit_report_row(account_id="paper_growth")])
+    monkeypatch.setattr(review_sync_script, "load_notion_property_mapping", lambda: _mapping_root())
+    monkeypatch.setattr(review_sync_script, "load_notion_settings", lambda allow_missing=True: object())
+    monkeypatch.setattr(review_sync_script, "get_notion_data_source_id", lambda *args, **kwargs: "ds-manual-reviews")
+    exit_code = review_sync_script.main(
+        [
+            "--date",
+            "2026-05-25",
+            "--commit-report",
+            str(report_path),
+            "--account-id",
+            "paper_default",
+            "--dry-run",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "does not match commit report account_id" in captured.out

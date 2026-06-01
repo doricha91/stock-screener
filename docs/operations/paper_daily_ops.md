@@ -252,3 +252,28 @@
 
 - 기존 문서에 남아 있던 구버전 section과 최신 addendum의 병존
   - 이번 리팩토링으로 canonical 본문에서는 제거하고, historical note로만 남긴다.
+## 11. PAPER15 Multi-account Policy Addendum
+
+Current PAPER15 closeout policy:
+
+- `init-account` is allowed only for non-default accounts
+- `paper_default` init is forbidden
+- `paper_default` keeps the legacy `outputs/paper_test` policy for now
+- non-default local roots must stay under `outputs/paper_accounts/{account_id}`
+- `paper_sandbox` rehearsal validated:
+  - plan
+  - eod dry-run
+  - Manual Execution commit
+  - reports
+  - review-template
+  - review-validate
+  - review-append
+  - local status `REVIEW_PARTIAL`
+- strategy/universe/profile remains a follow-up item
+
+Still forbidden:
+
+- multi-account bulk export
+- `paper_default` actual export for new multi-account Daily Ops Status flow
+- cloud runner execution
+- wrapper CLI automation

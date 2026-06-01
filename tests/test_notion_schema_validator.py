@@ -6,8 +6,10 @@ from core.notion_schema_validator import (
     WARNING,
     build_expected_schema,
     validate_data_source_schema,
+    validate_selected_data_sources,
     validation_results_to_json,
 )
+from core.notion_settings import NotionSettings
 
 
 def _mapping() -> dict[str, dict[str, str]]:
@@ -15,6 +17,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "weekly_reports": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "period.actual_start": "Period Start",
             "period.actual_end": "Period End",
             "latest_snapshot_date": "Latest Snapshot Date",
@@ -36,6 +39,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "benchmark_reports": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "latest_snapshot_date": "Latest Snapshot Date",
             "run_mode": "Run Mode",
             "official_run": "Official Run",
@@ -59,6 +63,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "account_snapshots": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "snapshot_date": "Snapshot Date",
             "initial_cash": "Initial Cash",
             "cash": "Cash",
@@ -77,6 +82,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "daily_plans": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "plan_date": "Plan Date",
             "regime": "Regime",
             "confirmed_trade_count": "Confirmed Trade Count",
@@ -90,6 +96,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         },
         "manual_executions": {
             "name": "Name",
+            "account_id": "Account ID",
             "execution_date": "Execution Date",
             "symbol": "Symbol",
             "side": "Side",
@@ -112,6 +119,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "manual_reviews": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "review_date": "Review Date",
             "symbol": "Symbol",
             "question_id": "Question ID",
@@ -131,6 +139,7 @@ def _mapping() -> dict[str, dict[str, str]]:
         "daily_review_summaries": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "review_date": "Review Date",
             "review_status": "Review Status",
             "availability_status": "Availability Status",
@@ -147,6 +156,37 @@ def _mapping() -> dict[str, dict[str, str]]:
             "schema_version": "Schema Version",
             "synced_at": "Synced At",
             "sync_status": "Sync Status",
+        },
+        "daily_ops_status": {
+            "name": "Name",
+            "external_key": "External Key",
+            "account_id": "Account ID",
+            "status_date": "Status Date",
+            "workflow_status": "Workflow Status",
+            "review_progress_status": "Review Progress Status",
+            "review_completion_ratio": "Review Completion Ratio",
+            "next_recommended_command": "Next Recommended Command",
+            "blocking_reason": "Blocking Reason",
+            "plan_exists": "Plan Exists",
+            "current_state_exists": "Current State Exists",
+            "account_snapshot_exists": "Account Snapshot Exists",
+            "position_snapshot_exists": "Position Snapshot Exists",
+            "execution_log_rows_for_date": "Execution Log Rows For Date",
+            "reports_ready": "Reports Ready",
+            "daily_review_summary_exists": "Daily Review Summary Exists",
+            "performance_summary_exists": "Performance Summary Exists",
+            "review_template_exists": "Review Template Exists",
+            "review_template_row_count": "Review Template Row Count",
+            "review_validation_result": "Review Validation Result",
+            "manual_review_log_exists": "Manual Review Log Exists",
+            "manual_review_log_row_count": "Manual Review Log Row Count",
+            "review_answered_row_count": "Review Answered Row Count",
+            "review_pending_row_count": "Review Pending Row Count",
+            "last_status_checked_at": "Last Status Checked At",
+            "sync_status": "Sync Status",
+            "synced_at": "Synced At",
+            "schema_version": "Schema Version",
+            "source_root": "Source Root",
         },
     }
 
@@ -167,6 +207,7 @@ def _weekly_schema(*, coverage_options=None, overall_options=None, sync_options=
         "properties": {
             "Name": _property("Name", "title"),
             "External Key": _property("External Key", "rich_text"),
+            "Account ID": _property("Account ID", "select", options=["paper_default"]),
             "Period Start": _property("Period Start", "date"),
             "Period End": _property("Period End", "date"),
             "Latest Snapshot Date": _property("Latest Snapshot Date", "date"),
@@ -193,6 +234,7 @@ def _daily_plan_schema(*, sync_options=None) -> dict:
         "properties": {
             "Name": _property("Name", "title"),
             "External Key": _property("External Key", "rich_text"),
+            "Account ID": _property("Account ID", "select", options=["paper_default"]),
             "Plan Date": _property("Plan Date", "date"),
             "Regime": _property("Regime", "select", options=["BULL", "BEAR", "PANIC"]),
             "Confirmed Trade Count": _property("Confirmed Trade Count", "number"),
@@ -212,6 +254,7 @@ def _manual_execution_schema(*, broker_type="select", currency_options=None) -> 
     return {
         "properties": {
             "Name": _property("Name", "title"),
+            "Account ID": _property("Account ID", "select", options=["paper_default"]),
             "Execution Date": _property("Execution Date", "date"),
             "Symbol": _property("Symbol", "rich_text"),
             "Side": _property("Side", "select", options=["BUY", "SELL"]),
@@ -239,6 +282,7 @@ def _daily_review_schema(*, review_options=None, availability_options=None, sync
         "properties": {
             "Name": _property("Name", "title"),
             "External Key": _property("External Key", "rich_text"),
+            "Account ID": _property("Account ID", "select", options=["paper_default"]),
             "Review Date": _property("Review Date", "date"),
             "Review Status": _property("Review Status", "select", options=review_options or ["PASS", "PASS_WITH_WARNINGS", "FAIL", "NO_ACTIVITY"]),
             "Availability Status": _property("Availability Status", "select", options=availability_options or ["AVAILABLE", "NO_COMMIT_REPORT", "NO_MANUAL_EXECUTIONS", "PARTIAL", "UNKNOWN"]),
@@ -274,6 +318,7 @@ def _manual_review_schema(*, follow_up_type="select", review_tag_type="select", 
         "properties": {
             "Name": _property("Name", "title"),
             "External Key": _property("External Key", "rich_text"),
+            "Account ID": _property("Account ID", "select", options=["paper_default"]),
             "Review Date": _property("Review Date", "date"),
             "Symbol": _property("Symbol", "rich_text"),
             "Question ID": _property("Question ID", "rich_text"),
@@ -293,6 +338,65 @@ def _manual_review_schema(*, follow_up_type="select", review_tag_type="select", 
     }
 
 
+def _daily_ops_status_schema(*, workflow_options=None, review_progress_options=None, sync_options=None) -> dict:
+    return {
+        "properties": {
+            "Name": _property("Name", "title"),
+            "External Key": _property("External Key", "rich_text"),
+            "Account ID": _property("Account ID", "select", options=["paper_default"]),
+            "Status Date": _property("Status Date", "date"),
+            "Workflow Status": _property(
+                "Workflow Status",
+                "select",
+                options=workflow_options or [
+                    "NO_PLAN",
+                    "PLAN_READY",
+                    "COMMITTED",
+                    "REVIEW_READY",
+                    "REVIEW_PARTIAL",
+                    "REVIEW_DONE",
+                    "UNKNOWN_OR_INCOMPLETE",
+                ],
+            ),
+            "Review Progress Status": _property(
+                "Review Progress Status",
+                "select",
+                options=review_progress_options or [
+                    "NOT_STARTED",
+                    "READY",
+                    "PARTIAL",
+                    "DONE",
+                    "UNKNOWN",
+                    "NOT_APPLICABLE",
+                ],
+            ),
+            "Review Completion Ratio": _property("Review Completion Ratio", "number"),
+            "Next Recommended Command": _property("Next Recommended Command", "rich_text"),
+            "Blocking Reason": _property("Blocking Reason", "rich_text"),
+            "Plan Exists": _property("Plan Exists", "checkbox"),
+            "Current State Exists": _property("Current State Exists", "checkbox"),
+            "Account Snapshot Exists": _property("Account Snapshot Exists", "checkbox"),
+            "Position Snapshot Exists": _property("Position Snapshot Exists", "checkbox"),
+            "Execution Log Rows For Date": _property("Execution Log Rows For Date", "number"),
+            "Reports Ready": _property("Reports Ready", "checkbox"),
+            "Daily Review Summary Exists": _property("Daily Review Summary Exists", "checkbox"),
+            "Performance Summary Exists": _property("Performance Summary Exists", "checkbox"),
+            "Review Template Exists": _property("Review Template Exists", "checkbox"),
+            "Review Template Row Count": _property("Review Template Row Count", "number"),
+            "Review Validation Result": _property("Review Validation Result", "select", options=["PASS", "FAIL"]),
+            "Manual Review Log Exists": _property("Manual Review Log Exists", "checkbox"),
+            "Manual Review Log Row Count": _property("Manual Review Log Row Count", "number"),
+            "Review Answered Row Count": _property("Review Answered Row Count", "number"),
+            "Review Pending Row Count": _property("Review Pending Row Count", "number"),
+            "Last Status Checked At": _property("Last Status Checked At", "date"),
+            "Sync Status": _property("Sync Status", "select", options=sync_options or ["DRY_RUN", "SYNCED", "FAILED", "SKIPPED"]),
+            "Synced At": _property("Synced At", "date"),
+            "Schema Version": _property("Schema Version", "rich_text"),
+            "Source Root": _property("Source Root", "rich_text"),
+        }
+    }
+
+
 def test_expected_schema_is_built_for_all_targets():
     schema = build_expected_schema(_mapping())
     assert set(schema.keys()) == {
@@ -303,6 +407,7 @@ def test_expected_schema_is_built_for_all_targets():
         "manual_executions",
         "manual_reviews",
         "daily_review_summaries",
+        "daily_ops_status",
     }
 
 
@@ -315,6 +420,20 @@ def test_validate_schema_passes_when_all_required_properties_match():
     )
     assert result.status == PASS
     assert result.issues == []
+
+
+def test_account_id_missing_is_warning_for_weekly_reports():
+    schema = _weekly_schema()
+    schema["properties"].pop("Account ID")
+    result = validate_data_source_schema(
+        target="weekly_reports",
+        data_source_id="ds-weekly",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == WARNING
+    assert any(issue.property_name == "Account ID" for issue in result.issues)
+    assert any(issue.code == "recommended_property_missing" for issue in result.issues)
 
 
 def test_missing_property_is_fail():
@@ -417,6 +536,19 @@ def test_manual_execution_schema_passes_when_required_properties_match():
     assert result.issues == []
 
 
+def test_manual_execution_account_id_missing_is_warning():
+    schema = _manual_execution_schema()
+    schema["properties"].pop("Account ID")
+    result = validate_data_source_schema(
+        target="manual_executions",
+        data_source_id="ds-manual",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == WARNING
+    assert any(issue.property_name == "Account ID" for issue in result.issues)
+
+
 def test_manual_execution_optional_broker_accepts_rich_text():
     result = validate_data_source_schema(
         target="manual_executions",
@@ -497,6 +629,19 @@ def test_manual_review_schema_passes_when_required_properties_match():
     assert result.issues == []
 
 
+def test_manual_review_account_id_missing_is_warning():
+    schema = _manual_review_schema()
+    schema["properties"].pop("Account ID")
+    result = validate_data_source_schema(
+        target="manual_reviews",
+        data_source_id="ds-manual-review",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == WARNING
+    assert any(issue.property_name == "Account ID" for issue in result.issues)
+
+
 def test_manual_review_optional_types_accept_checkbox_and_multi_select():
     result = validate_data_source_schema(
         target="manual_reviews",
@@ -529,3 +674,52 @@ def test_manual_review_missing_select_options_is_warning():
     )
     assert result.status == WARNING
     assert any(issue.code == "missing_select_options" for issue in result.issues)
+
+
+def test_daily_ops_status_schema_passes_when_required_properties_match():
+    result = validate_data_source_schema(
+        target="daily_ops_status",
+        data_source_id="ds-daily-ops",
+        actual_schema=_daily_ops_status_schema(),
+        mapping_root=_mapping(),
+    )
+    assert result.status == PASS
+    assert result.issues == []
+
+
+def test_daily_ops_status_missing_select_options_is_warning():
+    result = validate_data_source_schema(
+        target="daily_ops_status",
+        data_source_id="ds-daily-ops",
+        actual_schema=_daily_ops_status_schema(
+            workflow_options=["REVIEW_DONE"],
+            review_progress_options=["DONE"],
+            sync_options=["SYNCED"],
+        ),
+        mapping_root=_mapping(),
+    )
+    assert result.status == WARNING
+    assert any(issue.code == "missing_select_options" for issue in result.issues)
+
+
+def test_daily_ops_status_missing_data_source_id_is_warning_and_skipped():
+    class _FakeClient:
+        def get_data_source_schema(self, data_source_id: str) -> dict:
+            raise AssertionError(f"unexpected schema fetch for {data_source_id}")
+
+    settings = NotionSettings(
+        enabled=False,
+        token_env="NOTION_TOKEN",
+        data_sources={},
+    )
+    results = validate_selected_data_sources(
+        client=_FakeClient(),
+        settings=settings,
+        mapping_root=_mapping(),
+        targets=["daily_ops_status"],
+        env={},
+    )
+    assert len(results) == 1
+    assert results[0].target == "daily_ops_status"
+    assert results[0].status == WARNING
+    assert any(issue.code == "missing_data_source_id" for issue in results[0].issues)

@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_paths import PaperAccountPaths
 from core.paths import market_db_path, paper_account_snapshot_path, paper_reports_dir
 
 SCHEMA_VERSION = "paper_benchmark_comparison.v1"
@@ -145,8 +146,9 @@ def build_paper_benchmark_comparison_summary(
     *,
     paper_root: Path | None = None,
     market_db: Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
-    root = Path(paper_root) if paper_root is not None else paper_account_snapshot_path().parent
+    root = account_paths.root if account_paths is not None else (Path(paper_root) if paper_root is not None else paper_account_snapshot_path().parent)
     account_path = root / paper_account_snapshot_path().name
     db_path = Path(market_db) if market_db is not None else Path(market_db_path())
 
@@ -173,6 +175,9 @@ def build_paper_benchmark_comparison_summary(
 
     if len(valid_rows) < 2:
         return {
+            "account_id": account_paths.account_id if account_paths is not None else "paper_default",
+            "account_root": str(root),
+            "legacy_default_used": bool(account_paths.legacy_default_used) if account_paths is not None else False,
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "run_mode": "exploratory",
@@ -342,6 +347,9 @@ def build_paper_benchmark_comparison_summary(
     }
 
     return {
+        "account_id": account_paths.account_id if account_paths is not None else "paper_default",
+        "account_root": str(root),
+        "legacy_default_used": bool(account_paths.legacy_default_used) if account_paths is not None else False,
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "run_mode": "exploratory",
@@ -486,13 +494,17 @@ def generate_paper_benchmark_comparison(
     *,
     paper_root: Path | None = None,
     market_db: Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
-    root = Path(paper_root) if paper_root is not None else paper_account_snapshot_path().parent
+    root = account_paths.root if account_paths is not None else (Path(paper_root) if paper_root is not None else paper_account_snapshot_path().parent)
     summary = build_paper_benchmark_comparison_summary(
         paper_root=root,
         market_db=market_db,
+        account_paths=account_paths,
     )
     reports_dir = root / "reports" if paper_root is not None else paper_reports_dir()
+    if account_paths is not None:
+        reports_dir = root / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     markdown_path = reports_dir / BENCHMARK_MARKDOWN
     json_path = reports_dir / BENCHMARK_JSON

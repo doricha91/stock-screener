@@ -4,12 +4,16 @@ import csv
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_guard import assert_path_under_account_root
 from core.paper_safety import assert_paper_path
 from core.paths import PAPER_TEST_DIR
 
 
-def _read_csv_rows(path: Path, label: str) -> list[dict[str, str]]:
-    assert_paper_path(path, PAPER_TEST_DIR)
+def _read_csv_rows(path: Path, label: str, allowed_root: Path | None = None) -> list[dict[str, str]]:
+    if allowed_root is None:
+        assert_paper_path(path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(path, allowed_root)
     if not path.exists():
         raise FileNotFoundError(f"{label} not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -19,30 +23,33 @@ def _read_csv_rows(path: Path, label: str) -> list[dict[str, str]]:
     return rows
 
 
-def load_paper_account_snapshots(snapshot_path: Path) -> list[dict[str, str]]:
+def load_paper_account_snapshots(snapshot_path: Path, allowed_root: Path | None = None) -> list[dict[str, str]]:
     return sorted(
-        _read_csv_rows(snapshot_path, "paper_account_snapshot.csv"),
+        _read_csv_rows(snapshot_path, "paper_account_snapshot.csv", allowed_root=allowed_root),
         key=lambda row: str(row.get("snapshot_date", "")).strip(),
     )
 
 
-def load_paper_equity_curve(path: Path) -> list[dict[str, str]]:
+def load_paper_equity_curve(path: Path, allowed_root: Path | None = None) -> list[dict[str, str]]:
     return sorted(
-        _read_csv_rows(path, "paper_equity_curve.csv"),
+        _read_csv_rows(path, "paper_equity_curve.csv", allowed_root=allowed_root),
         key=lambda row: str(row.get("snapshot_date", "")).strip(),
     )
 
 
-def load_paper_drawdown(path: Path) -> list[dict[str, str]]:
+def load_paper_drawdown(path: Path, allowed_root: Path | None = None) -> list[dict[str, str]]:
     return sorted(
-        _read_csv_rows(path, "paper_drawdown.csv"),
+        _read_csv_rows(path, "paper_drawdown.csv", allowed_root=allowed_root),
         key=lambda row: str(row.get("snapshot_date", "")).strip(),
     )
 
 
-def load_latest_position_snapshot_rows(path: Path) -> tuple[str, list[dict[str, str]]]:
+def load_latest_position_snapshot_rows(
+    path: Path,
+    allowed_root: Path | None = None,
+) -> tuple[str, list[dict[str, str]]]:
     rows = sorted(
-        _read_csv_rows(path, "paper_position_snapshot.csv"),
+        _read_csv_rows(path, "paper_position_snapshot.csv", allowed_root=allowed_root),
         key=lambda row: str(row.get("snapshot_date", "")).strip(),
     )
     latest_date = str(rows[-1].get("snapshot_date", "")).strip()
@@ -238,7 +245,14 @@ def render_paper_performance_summary_markdown(summary: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_paper_performance_summary(markdown: str, output_path: Path) -> None:
-    assert_paper_path(output_path, PAPER_TEST_DIR)
+def write_paper_performance_summary(
+    markdown: str,
+    output_path: Path,
+    allowed_root: Path | None = None,
+) -> None:
+    if allowed_root is None:
+        assert_paper_path(output_path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(output_path, allowed_root)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown, encoding="utf-8")

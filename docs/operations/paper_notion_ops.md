@@ -429,3 +429,18 @@ status 필드:
 - mobile remote execution
 - GitHub Actions / cloud runner 운영
 - broker/API 연동
+## 10. PAPER15 Multi-account / Daily Ops Status Addendum
+
+Current PAPER15 closeout policy:
+
+- `Daily Ops Status` actual export is validated only for limited `paper_sandbox` create/update
+- schema validator pass is required before actual export
+- `paper_default` actual export for the new Daily Ops Status flow is still forbidden
+- multi-account bulk export is still forbidden
+- `strategy_profile`, `universe_profile`, and `risk_profile` remain follow-up work
+
+Operator guidance:
+
+- use dry-run first
+- use guarded actual export only where explicitly approved
+- keep Notion as presentation layer, not source-of-truth

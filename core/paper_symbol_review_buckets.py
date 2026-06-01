@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_guard import assert_path_under_account_root
 from core.paper_safety import assert_paper_path
 from core.paths import PAPER_TEST_DIR
 
@@ -73,8 +74,14 @@ def _parse_int(value: Any, field_name: str) -> int:
         raise ValueError(f"invalid integer in {field_name}: {value}") from exc
 
 
-def load_paper_symbol_side_by_side_performance_rows(path: Path) -> list[dict[str, str]]:
-    assert_paper_path(path, PAPER_TEST_DIR)
+def load_paper_symbol_side_by_side_performance_rows(
+    path: Path,
+    allowed_root: Path | None = None,
+) -> list[dict[str, str]]:
+    if allowed_root is None:
+        assert_paper_path(path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(path, allowed_root)
     if not path.exists():
         raise FileNotFoundError(path)
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -214,8 +221,15 @@ def _serialize_csv_value(column: str, value: Any) -> Any:
     return value
 
 
-def write_paper_symbol_review_buckets(rows: list[dict[str, Any]], output_path: Path) -> None:
-    assert_paper_path(output_path, PAPER_TEST_DIR)
+def write_paper_symbol_review_buckets(
+    rows: list[dict[str, Any]],
+    output_path: Path,
+    allowed_root: Path | None = None,
+) -> None:
+    if allowed_root is None:
+        assert_paper_path(output_path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(output_path, allowed_root)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=PAPER_SYMBOL_REVIEW_BUCKET_COLUMNS)
@@ -284,7 +298,14 @@ def render_paper_symbol_review_buckets_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_paper_symbol_review_buckets_summary(markdown: str, output_path: Path) -> None:
-    assert_paper_path(output_path, PAPER_TEST_DIR)
+def write_paper_symbol_review_buckets_summary(
+    markdown: str,
+    output_path: Path,
+    allowed_root: Path | None = None,
+) -> None:
+    if allowed_root is None:
+        assert_paper_path(output_path, PAPER_TEST_DIR)
+    else:
+        assert_path_under_account_root(output_path, allowed_root)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(markdown, encoding="utf-8")

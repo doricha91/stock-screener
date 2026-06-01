@@ -10,6 +10,7 @@ import pytest
 
 import core.paper_manual_execution_commit as commit_module
 from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS, build_paper_trade_id
+from core.paper_account_paths import build_paper_account_paths
 from core.paper_manual_execution_commit import (
     MANUAL_EXECUTION_REASON,
     MANUAL_EXECUTION_SOURCE,
@@ -116,6 +117,7 @@ def _execution_row(*, date: str, symbol: str, side: str, shares: int, price: flo
 def _preview_payload(*, date: str, commit_allowed: str, fail_count: int, warning_count: int, candidates: list[dict]) -> dict:
     return {
         "execution_date": date,
+        "account_id": "paper_default",
         "candidate_count": len(candidates),
         "pass_count": sum(1 for item in candidates if item["validation_status"] == "PASS"),
         "warning_count": warning_count,
@@ -309,6 +311,7 @@ def test_warning_preview_commits_with_allow_warnings(commit_env):
         preview_json_path=commit_env["preview_path"],
         allow_warnings=True,
     )
+    assert result.account_id == "paper_default"
     assert result.committed_row_count == 1
     assert result.current_state_written is True
     with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
@@ -319,6 +322,12 @@ def test_warning_preview_commits_with_allow_warnings(commit_env):
     assert current_state["absolute_cash"] == 900.0
     assert commit_env["current_state_dates"] == ["2026-05-25"]
     sidecar = json.loads(Path(result.commit_json_path).read_text(encoding="utf-8"))
+    assert sidecar["account_id"] == "paper_default"
+    assert sidecar["committed_rows"][0]["account_id"] == "paper_default"
+    assert sidecar["committed_rows"][0]["commit_status"] == "COMMITTED"
+    assert sidecar["committed_rows"][0]["canonical_key"] == "manual_execution:paper_default:2026-05-25:AAPL:BUY:01"
+    assert sidecar["committed_rows"][0]["legacy_canonical_key"] == "manual_execution:2026-05-25:AAPL:BUY:01"
+    assert sidecar["committed_rows"][0]["legacy_key_compatible"] is True
     assert sidecar["committed_rows"][0]["commission"] == 0.0
     assert sidecar["committed_rows"][0]["currency"] == "USD"
     assert sidecar["committed_rows"][0]["broker"] is None
@@ -479,3 +488,49 @@ def test_current_state_save_failure_rolls_back(commit_env, monkeypatch):
         rows = list(csv.DictReader(handle))
     assert rows == []
     assert not commit_env["current_state_path"].exists()
+
+
+def test_non_default_preview_commit_writes_under_account_root(tmp_path, monkeypatch):
+    account_root = tmp_path / "paper_accounts" / "paper_growth"
+    account_paths = build_paper_account_paths(
+        "paper_growth",
+        account_root=account_root,
+        allow_legacy_default=False,
+        create=True,
+    )
+    monkeypatch.setattr(commit_module, "market_db_path", lambda: str(tmp_path / "unused_market.db"))
+    monkeypatch.setattr(commit_module, "value_paper_account_state", _fake_valuation)
+
+    preview_path = tmp_path / "manual_execution_preview_non_default.json"
+    _write_csv(account_paths.execution_log_path, PAPER_EXECUTION_LOG_COLUMNS, [])
+    _write_csv(account_paths.account_snapshot_path, list(_account_row().keys()), [_account_row()])
+    _write_csv(account_paths.position_snapshot_path, list(_position_row(snapshot_date="2026-05-24", symbol="AAPL", shares="0").keys()), [])
+
+    payload = _preview_payload(
+        date="2026-05-25",
+        commit_allowed="true",
+        fail_count=0,
+        warning_count=0,
+        candidates=[_candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)],
+    )
+    payload["account_id"] = "paper_growth"
+    payload["candidates"][0]["account_id"] = "paper_growth"
+    payload["candidates"][0]["canonical_key"] = "manual_execution:paper_growth:2026-05-25:AAPL:BUY:01"
+    preview_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = commit_manual_execution_preview(
+        execution_date="2026-05-25",
+        preview_json_path=preview_path,
+        account_paths=account_paths,
+    )
+
+    assert result.account_id == "paper_growth"
+    sidecar = json.loads(Path(result.commit_json_path).read_text(encoding="utf-8"))
+    row = sidecar["committed_rows"][0]
+    assert row["account_id"] == "paper_growth"
+    assert row["canonical_key"] == "manual_execution:paper_growth:2026-05-25:AAPL:BUY:01"
+    assert row["legacy_canonical_key"] is None
+    assert row["legacy_key_compatible"] is False
+    assert Path(result.commit_json_path).is_relative_to(account_paths.reports_dir.resolve())
+    assert account_paths.execution_log_path.exists()
+    assert account_paths.current_state_snapshot_path("20260525").exists()

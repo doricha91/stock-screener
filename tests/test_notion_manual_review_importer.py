@@ -10,6 +10,7 @@ from core.notion_manual_review_importer import (
     FAIL,
     WARNING,
     build_manual_review_preview,
+    fetch_manual_review_pages,
     normalize_manual_review_pages,
 )
 from core.notion_settings import NotionSettings
@@ -29,6 +30,7 @@ def _mapping_root() -> dict[str, dict[str, str]]:
         "manual_reviews": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "review_date": "Review Date",
             "symbol": "Symbol",
             "question_id": "Question ID",
@@ -62,6 +64,7 @@ def _page(
     reviewer_note: str | None = "Looks good",
     import_status: str = "READY",
     source_template_key: str | None = "template:2026-05-25",
+    account_id: str | None = "paper_default",
 ) -> dict:
     def rich_text(value: str | None) -> list[dict]:
         return [] if value in {None, ""} else [{"plain_text": value}]
@@ -91,6 +94,7 @@ def _page(
         "properties": {
             "Name": {"type": "title", "title": [{"plain_text": f"{symbol} {question_id}"}]},
             "External Key": {"type": "rich_text", "rich_text": []},
+            "Account ID": {"type": "select", "select": None if account_id is None else {"name": account_id}},
             "Review Date": {"type": "date", "date": {"start": review_date}},
             "Symbol": {"type": "rich_text", "rich_text": [{"plain_text": symbol}]},
             "Question ID": {"type": "rich_text", "rich_text": [{"plain_text": question_id}]},
@@ -159,6 +163,7 @@ def test_normalize_manual_review_pages_handles_checkbox_and_multi_select():
     ]
     candidates = normalize_manual_review_pages(pages=pages, mapping=_mapping_root()["manual_reviews"])
     candidate = candidates[0]
+    assert candidate.account_id == "paper_default"
     assert candidate.symbol == "AAPL"
     assert candidate.review_status == "reviewed"
     assert candidate.follow_up_needed == "true"
@@ -190,18 +195,24 @@ def test_preview_generates_reports_and_queries_ready_rows(monkeypatch, tmp_path)
         mapping_root=_mapping_root(),
         review_date="2026-05-25",
     )
+    assert preview.account_id == "paper_default"
     assert preview.candidate_count == 1
     assert preview.pass_count == 1
     assert preview.append_allowed == "true"
     payload = json.loads(Path(preview.json_path).read_text(encoding="utf-8"))
+    assert payload["account_id"] == "paper_default"
     assert payload["review_date"] == "2026-05-25"
     assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["legacy_canonical_key"]
     markdown = Path(preview.markdown_path).read_text(encoding="utf-8")
     assert "Manual Review Import Preview" in markdown
+    assert "Account ID: paper_default" in markdown
     assert "AAPL review_loss_1" in markdown
     filters = client.calls[0]["filter_payload"]["and"]
     assert filters[0]["date"]["equals"] == "2026-05-25"
     assert filters[1]["select"]["equals"] == "READY"
+    assert filters[2]["or"][0]["select"]["equals"] == "paper_default"
+    assert filters[2]["or"][1]["select"]["is_empty"] is True
 
 
 def test_missing_manual_answer_is_fail(monkeypatch, tmp_path):
@@ -329,3 +340,72 @@ def test_commit_mode_returns_not_implemented(capsys):
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "Preview JSON not found" in captured.out
+
+
+def test_non_default_review_query_filters_exact_account_id():
+    client = FakeClient([])
+    fetch_manual_review_pages(
+        client=client,
+        data_source_id="ds-manual-reviews",
+        mapping=_mapping_root()["manual_reviews"],
+        review_date="2026-05-25",
+        account_id="paper_growth",
+    )
+    filters = client.calls[0]["filter_payload"]["and"]
+    assert filters[2]["property"] == "Account ID"
+    assert filters[2]["select"]["equals"] == "paper_growth"
+
+
+def test_account_aware_review_canonical_key_is_generated_for_non_default():
+    pages = [
+        _page(
+            page_id="page-1",
+            review_date="2026-05-25",
+            symbol="aapl",
+            question_id="review_loss_1",
+            question="질문",
+            manual_answer="답변",
+            account_id="paper_growth",
+        )
+    ]
+    candidates = normalize_manual_review_pages(
+        pages=pages,
+        mapping=_mapping_root()["manual_reviews"],
+        account_id="paper_growth",
+    )
+    importer._assign_canonical_keys(candidates, account_id="paper_growth")
+    assert candidates[0].canonical_key == "manual_review:paper_growth:2026-05-25:AAPL:review_loss_1"
+    assert candidates[0].legacy_canonical_key is None
+    assert candidates[0].legacy_key_compatible is False
+
+
+def test_invalid_account_id_fails_for_review_preview(monkeypatch, tmp_path):
+    _seed_review_files(tmp_path)
+    monkeypatch.setattr(importer, "paper_reviews_dir", lambda: tmp_path)
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "reports")
+    with pytest.raises(ValueError):
+        build_manual_review_preview(
+            client=FakeClient([]),
+            settings=_settings(),
+            mapping_root=_mapping_root(),
+            review_date="2026-05-25",
+            account_id="Paper Default",
+        )
+
+
+def test_cli_blocks_non_default_review_commit(capsys):
+    exit_code = review_script.main(
+        [
+            "--date",
+            "2026-05-25",
+            "--commit",
+            "--json",
+            "--preview-json",
+            "missing.json",
+            "--account-id",
+            "paper_growth",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "blocked" in captured.out.lower()

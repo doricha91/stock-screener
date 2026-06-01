@@ -10,9 +10,11 @@ from core.notion_manual_execution_importer import (
     FAIL,
     WARNING,
     build_manual_execution_preview,
+    fetch_manual_execution_pages,
     normalize_manual_execution_pages,
 )
 from core.notion_settings import NotionSettings
+from scripts import import_notion_executions as execution_script
 
 
 def _settings() -> NotionSettings:
@@ -28,6 +30,7 @@ def _mapping_root() -> dict[str, dict[str, str]]:
         "manual_executions": {
             "name": "Name",
             "external_key": "External Key",
+            "account_id": "Account ID",
             "execution_date": "Execution Date",
             "plan_date": "Plan Date",
             "symbol": "Symbol",
@@ -63,6 +66,7 @@ def _page(
     broker: str | None = None,
     plan_date: str | None = "2026-05-25",
     linked_daily_plan_key: str | None = "daily_plan:2026-05-25",
+    account_id: str | None = "paper_default",
 ) -> dict:
     properties = {
         "Name": {"type": "title", "title": [{"plain_text": f"{symbol} {side}"}]},
@@ -80,6 +84,7 @@ def _page(
         },
         "Plan Date": {"type": "date", "date": None if not plan_date else {"start": plan_date}},
         "External Key": {"type": "rich_text", "rich_text": []},
+        "Account ID": {"type": "select", "select": None if account_id is None else {"name": account_id}},
         "Validation Status": {"type": "select", "select": None},
         "Validation Message": {"type": "rich_text", "rich_text": []},
         "Import Status": {"type": "select", "select": None},
@@ -151,8 +156,12 @@ def test_normalize_manual_execution_pages_applies_defaults_and_warnings():
             linked_daily_plan_key=None,
         )
     ]
-    candidates = normalize_manual_execution_pages(pages=pages, mapping=_mapping_root()["manual_executions"])
+    candidates = normalize_manual_execution_pages(
+        pages=pages,
+        mapping=_mapping_root()["manual_executions"],
+    )
     candidate = candidates[0]
+    assert candidate.account_id == "paper_default"
     assert candidate.symbol == "GEN"
     assert candidate.side == "BUY"
     assert candidate.commission == 0.0
@@ -205,6 +214,7 @@ def test_preview_generates_reports_and_filters_ready_rows(monkeypatch, tmp_path)
         mapping_root=_mapping_root(),
         execution_date="2026-05-25",
     )
+    assert preview.account_id == "paper_default"
     assert preview.candidate_count == 2
     assert preview.fail_count == 0
     assert preview.commit_allowed == "true"
@@ -212,9 +222,13 @@ def test_preview_generates_reports_and_filters_ready_rows(monkeypatch, tmp_path)
     assert preview.projected_cash_end == pytest.approx(1053.5)
     assert preview.projected_position_impact == {"F": 2, "GEN": -3}
     payload = json.loads(Path(preview.json_path).read_text(encoding="utf-8"))
+    assert payload["account_id"] == "paper_default"
     assert payload["candidate_count"] == 2
+    assert payload["candidates"][0]["account_id"] == "paper_default"
+    assert payload["candidates"][0]["legacy_canonical_key"]
     markdown = Path(preview.markdown_path).read_text(encoding="utf-8")
     assert "Manual Execution Import Preview" in markdown
+    assert "Account ID: paper_default" in markdown
     assert "GEN SELL 3" in markdown
     assert "F BUY 2" in markdown
 
@@ -296,6 +310,8 @@ def test_preview_only_queries_ready_rows_for_requested_date(monkeypatch, tmp_pat
     filters = client.calls[0]["filter_payload"]["and"]
     assert filters[0]["date"]["equals"] == "2026-05-25"
     assert filters[1]["select"]["equals"] == "READY"
+    assert filters[2]["or"][0]["select"]["equals"] == "paper_default"
+    assert filters[2]["or"][1]["select"]["is_empty"] is True
     assert preview.commit_allowed == "true"
     assert preview.warning_count == 0
 
@@ -331,3 +347,73 @@ def test_missing_optional_fields_produce_warning_commit_state(monkeypatch, tmp_p
     assert preview.commit_allowed == "true_with_warnings"
     assert preview.warning_count == 1
     assert preview.candidates[0].validation_status == WARNING
+
+
+def test_non_default_preview_filters_exact_account_id():
+    client = FakeClient([])
+    fetch_manual_execution_pages(
+        client=client,
+        data_source_id="ds-manual",
+        mapping=_mapping_root()["manual_executions"],
+        execution_date="2026-05-25",
+        account_id="paper_growth",
+    )
+    filters = client.calls[0]["filter_payload"]["and"]
+    assert filters[2]["property"] == "Account ID"
+    assert filters[2]["select"]["equals"] == "paper_growth"
+
+
+def test_account_aware_canonical_key_is_generated_for_non_default():
+    pages = [
+        _page(
+            page_id="page-1",
+            execution_date="2026-05-25",
+            symbol="aapl",
+            side="buy",
+            quantity=1,
+            actual_price=100.0,
+            account_id="paper_growth",
+        )
+    ]
+    candidates = normalize_manual_execution_pages(
+        pages=pages,
+        mapping=_mapping_root()["manual_executions"],
+        account_id="paper_growth",
+    )
+    importer._assign_canonical_keys(candidates, account_id="paper_growth")
+    assert candidates[0].canonical_key == "manual_execution:paper_growth:2026-05-25:AAPL:BUY:01"
+    assert candidates[0].legacy_canonical_key is None
+    assert candidates[0].legacy_key_compatible is False
+
+
+def test_invalid_account_id_fails_for_preview(monkeypatch, tmp_path):
+    _seed_ledgers(tmp_path)
+    monkeypatch.setattr(importer, "paper_account_snapshot_path", lambda: tmp_path / "paper_account_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_position_snapshot_path", lambda: tmp_path / "paper_position_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "reports")
+    with pytest.raises(ValueError):
+        build_manual_execution_preview(
+            client=FakeClient([]),
+            settings=_settings(),
+            mapping_root=_mapping_root(),
+            execution_date="2026-05-25",
+            account_id="Paper Default",
+        )
+
+
+def test_cli_blocks_non_default_commit(capsys):
+    exit_code = execution_script.main(
+        [
+            "--date",
+            "2026-05-25",
+            "--commit",
+            "--preview-json",
+            "missing.json",
+            "--account-id",
+            "paper_growth",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "blocked" in captured.out.lower()

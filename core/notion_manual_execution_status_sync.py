@@ -12,6 +12,11 @@ from core.notion_client import (
     notion_rich_text,
     notion_select,
 )
+from core.notion_account_keys import (
+    build_legacy_manual_execution_canonical_key,
+    build_manual_execution_canonical_key,
+    normalize_notion_account_id,
+)
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 
 
@@ -21,8 +26,11 @@ class ManualExecutionStatusSyncError(RuntimeError):
 
 @dataclass(frozen=True)
 class ManualExecutionStatusRowResult:
+    account_id: str
     page_id: str | None
     canonical_key: str | None
+    legacy_canonical_key: str | None
+    legacy_key_compatible: bool
     committed_trade_id: str | None
     status: str
     message: str
@@ -30,8 +38,11 @@ class ManualExecutionStatusRowResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "account_id": self.account_id,
             "page_id": self.page_id,
             "canonical_key": self.canonical_key,
+            "legacy_canonical_key": self.legacy_canonical_key,
+            "legacy_key_compatible": self.legacy_key_compatible,
             "committed_trade_id": self.committed_trade_id,
             "status": self.status,
             "message": self.message,
@@ -41,6 +52,7 @@ class ManualExecutionStatusRowResult:
 
 @dataclass(frozen=True)
 class ManualExecutionStatusSyncResult:
+    account_id: str
     execution_date: str
     commit_report_path: str
     dry_run: bool
@@ -54,6 +66,7 @@ class ManualExecutionStatusSyncResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "account_id": self.account_id,
             "execution_date": self.execution_date,
             "commit_report_path": self.commit_report_path,
             "dry_run": self.dry_run,
@@ -74,10 +87,12 @@ def sync_manual_execution_status(
     execution_date: str,
     commit_report_path: Path,
     dry_run: bool,
+    account_id: str | None = None,
     data_source_check: str = "not_checked",
     now: datetime | None = None,
 ) -> ManualExecutionStatusSyncResult:
     payload = _load_commit_report(commit_report_path)
+    resolved_account_id = normalize_notion_account_id(account_id)
     report_date = str(payload.get("execution_date") or "").strip()
     if report_date != execution_date:
         raise ManualExecutionStatusSyncError(
@@ -99,6 +114,7 @@ def sync_manual_execution_status(
                 mapping=mapping,
                 row=row,
                 dry_run=dry_run,
+                account_id=resolved_account_id,
                 sync_timestamp=sync_timestamp,
             )
         )
@@ -109,6 +125,7 @@ def sync_manual_execution_status(
     overall_status = _overall_status(row_results)
 
     return ManualExecutionStatusSyncResult(
+        account_id=resolved_account_id,
         execution_date=execution_date,
         commit_report_path=str(commit_report_path),
         dry_run=dry_run,
@@ -138,11 +155,23 @@ def _sync_one_row(
     mapping: dict[str, str],
     row: dict[str, Any],
     dry_run: bool,
+    account_id: str,
     sync_timestamp: str,
 ) -> ManualExecutionStatusRowResult:
     page_id = _clean_text(row.get("page_id"))
-    canonical_key = _clean_text(row.get("canonical_key"))
+    raw_canonical_key = _clean_text(row.get("canonical_key"))
     committed_trade_id = _clean_text(row.get("committed_trade_id"))
+    normalized = _normalize_execution_canonical_key(
+        account_id=account_id,
+        canonical_key=raw_canonical_key,
+        execution_date=_clean_text(row.get("execution_date")) or _clean_text(row.get("date")),
+        symbol=_clean_text(row.get("symbol")),
+        side=_clean_text(row.get("side")),
+    )
+    canonical_key = normalized["canonical_key"]
+    legacy_canonical_key = normalized["legacy_canonical_key"]
+    legacy_key_compatible = normalized["legacy_key_compatible"]
+    canonical_error = normalized["error"]
 
     missing: list[str] = []
     if not committed_trade_id:
@@ -154,6 +183,7 @@ def _sync_one_row(
 
     property_keys = [
         "external_key",
+        "account_id",
         "validation_status",
         "validation_message",
         "import_status",
@@ -165,16 +195,33 @@ def _sync_one_row(
 
     if missing:
         return ManualExecutionStatusRowResult(
+            account_id=account_id,
             page_id=page_id,
             canonical_key=canonical_key,
+            legacy_canonical_key=legacy_canonical_key,
+            legacy_key_compatible=legacy_key_compatible,
             committed_trade_id=committed_trade_id,
             status="SKIPPED",
             message=f"Missing required commit report field(s): {', '.join(missing)}.",
             updated_properties=updated_properties,
         )
 
+    if canonical_error:
+        return ManualExecutionStatusRowResult(
+            account_id=account_id,
+            page_id=page_id,
+            canonical_key=canonical_key,
+            legacy_canonical_key=legacy_canonical_key,
+            legacy_key_compatible=legacy_key_compatible,
+            committed_trade_id=committed_trade_id,
+            status="FAILED",
+            message=canonical_error,
+            updated_properties=updated_properties,
+        )
+
     properties = build_manual_execution_status_properties(
         mapping=mapping,
+        account_id=account_id,
         canonical_key=canonical_key,
         validation_status=_clean_text(row.get("validation_status")) or "PASS",
         validation_issues=row.get("validation_issues", []),
@@ -183,8 +230,11 @@ def _sync_one_row(
 
     if dry_run:
         return ManualExecutionStatusRowResult(
+            account_id=account_id,
             page_id=page_id,
             canonical_key=canonical_key,
+            legacy_canonical_key=legacy_canonical_key,
+            legacy_key_compatible=legacy_key_compatible,
             committed_trade_id=committed_trade_id,
             status="DRY_RUN",
             message="Dry-run only. No Notion page update performed.",
@@ -198,8 +248,11 @@ def _sync_one_row(
         client.update_page(page_id, properties)
     except NotionAPIError as exc:
         return ManualExecutionStatusRowResult(
+            account_id=account_id,
             page_id=page_id,
             canonical_key=canonical_key,
+            legacy_canonical_key=legacy_canonical_key,
+            legacy_key_compatible=legacy_key_compatible,
             committed_trade_id=committed_trade_id,
             status="FAILED",
             message=str(exc),
@@ -207,8 +260,11 @@ def _sync_one_row(
         )
 
     return ManualExecutionStatusRowResult(
+        account_id=account_id,
         page_id=page_id,
         canonical_key=canonical_key,
+        legacy_canonical_key=legacy_canonical_key,
+        legacy_key_compatible=legacy_key_compatible,
         committed_trade_id=committed_trade_id,
         status="UPDATED",
         message="Notion Manual Execution status synced.",
@@ -219,6 +275,7 @@ def _sync_one_row(
 def build_manual_execution_status_properties(
     *,
     mapping: dict[str, str],
+    account_id: str,
     canonical_key: str,
     validation_status: str,
     validation_issues: list[dict[str, Any]] | None,
@@ -229,12 +286,83 @@ def build_manual_execution_status_properties(
 
     return {
         resolve_notion_property_name(mapping, "external_key"): notion_rich_text(canonical_key),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(account_id),
         resolve_notion_property_name(mapping, "validation_status"): notion_select(validation_status_name),
         resolve_notion_property_name(mapping, "validation_message"): notion_rich_text(validation_message),
         resolve_notion_property_name(mapping, "import_status"): notion_select("COMMITTED"),
         resolve_notion_property_name(mapping, "imported_at"): notion_rich_text(sync_timestamp),
         resolve_notion_property_name(mapping, "synced_at"): notion_rich_text(sync_timestamp),
         resolve_notion_property_name(mapping, "status"): notion_select("IMPORTED"),
+    }
+
+
+def _normalize_execution_canonical_key(
+    *,
+    account_id: str,
+    canonical_key: str | None,
+    execution_date: str | None,
+    symbol: str | None,
+    side: str | None,
+) -> dict[str, Any]:
+    legacy_canonical_key = canonical_key
+    if not canonical_key:
+        return {
+            "canonical_key": None,
+            "legacy_canonical_key": None,
+            "legacy_key_compatible": False,
+            "error": None,
+        }
+
+    parts = canonical_key.split(":")
+    if len(parts) == 6 and parts[0] == "manual_execution":
+        return {
+            "canonical_key": canonical_key,
+            "legacy_canonical_key": None,
+            "legacy_key_compatible": False,
+            "error": None,
+        }
+    if len(parts) == 5 and parts[0] == "manual_execution":
+        if account_id != "paper_default":
+            return {
+                "canonical_key": canonical_key,
+                "legacy_canonical_key": canonical_key,
+                "legacy_key_compatible": False,
+                "error": "Legacy canonical_key is not allowed for non-default account status sync.",
+            }
+        exec_date = execution_date or parts[1]
+        exec_symbol = (symbol or parts[2] or "").upper()
+        exec_side = (side or parts[3] or "").upper()
+        try:
+            sequence = int(parts[4])
+        except ValueError:
+            return {
+                "canonical_key": canonical_key,
+                "legacy_canonical_key": canonical_key,
+                "legacy_key_compatible": True,
+                "error": "Legacy manual execution canonical_key sequence is invalid.",
+            }
+        return {
+            "canonical_key": build_manual_execution_canonical_key(
+                account_id,
+                exec_date,
+                exec_symbol,
+                exec_side,
+                sequence,
+            ),
+            "legacy_canonical_key": build_legacy_manual_execution_canonical_key(
+                exec_date,
+                exec_symbol,
+                exec_side,
+                sequence,
+            ),
+            "legacy_key_compatible": True,
+            "error": None,
+        }
+    return {
+        "canonical_key": canonical_key,
+        "legacy_canonical_key": legacy_canonical_key,
+        "legacy_key_compatible": False,
+        "error": None,
     }
 
 

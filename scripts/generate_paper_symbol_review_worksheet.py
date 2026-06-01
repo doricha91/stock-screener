@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.paper_account_paths import PaperAccountPaths  # noqa: E402
 from core.paper_symbol_review_worksheet import (  # noqa: E402
     build_paper_symbol_review_worksheet,
     load_paper_symbol_review_bucket_rows,
@@ -18,15 +19,20 @@ from core.paper_symbol_review_worksheet import (  # noqa: E402
 from core.paths import paper_reports_dir  # noqa: E402
 
 
-def generate_paper_symbol_review_worksheet() -> dict:
-    reports_dir = paper_reports_dir()
+def generate_paper_symbol_review_worksheet(account_paths: PaperAccountPaths | None = None) -> dict:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        reports_dir = account_paths.reports_dir
+        allowed_root = account_paths.root
+    else:
+        reports_dir = paper_reports_dir()
+        allowed_root = None
     input_path = reports_dir / "paper_symbol_review_buckets.csv"
     markdown_output_path = reports_dir / "paper_symbol_review_worksheet.md"
     csv_output_path = reports_dir / "paper_symbol_review_worksheet.csv"
 
-    input_rows = load_paper_symbol_review_bucket_rows(input_path)
+    input_rows = load_paper_symbol_review_bucket_rows(input_path, allowed_root=allowed_root)
     symbol_rows, question_rows, summary_data, warnings = build_paper_symbol_review_worksheet(input_rows)
-    write_paper_symbol_review_worksheet_csv(question_rows, csv_output_path)
+    write_paper_symbol_review_worksheet_csv(question_rows, csv_output_path, allowed_root=allowed_root)
     summary = summarize_paper_symbol_review_worksheet(
         summary_data,
         warnings,
@@ -35,7 +41,7 @@ def generate_paper_symbol_review_worksheet() -> dict:
         csv_output_path=csv_output_path,
     )
     markdown = render_paper_symbol_review_worksheet_summary(summary, symbol_rows)
-    write_paper_symbol_review_worksheet_markdown(markdown, markdown_output_path)
+    write_paper_symbol_review_worksheet_markdown(markdown, markdown_output_path, allowed_root=allowed_root)
     return {
         "input_path": input_path,
         "markdown_output_path": markdown_output_path,

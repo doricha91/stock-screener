@@ -316,71 +316,71 @@ This addendum was added during PAPER14-3 closeout.
 
 ## Weekly Reports: property meaning and UI display
 
-| Property | Meaning | Notion display |
+| Property | 의미 | Notion display |
 | --- | --- | --- |
-| Name | Report title | Title |
-| External Key | Upsert key | Rich text |
-| Period Start | Report coverage start | Date |
-| Period End | Report coverage end | Date |
-| Latest Snapshot Date | Latest snapshot included in the report | Date |
-| Coverage Status | Coverage state: `FULL`, `PARTIAL`, `EMPTY` | Select |
-| Overall Status | Validation summary: `PASS`, `PASS_WITH_WARNINGS`, `FAIL` | Select |
-| Snapshot Count | Number of snapshots in range | Integer number |
-| End Equity | Account equity at period end | Money display |
-| Equity Change % | Period equity delta as raw decimal | Percent display |
-| Cash Ratio | End cash ratio as raw decimal | Percent display |
-| Trade Count | Number of trades in range | Integer number |
-| Gap Count | Number of detected gaps | Integer number |
-| High Gap Count | Number of high-severity gaps | Integer number |
-| Markdown Path | Source markdown artifact path | Rich text |
-| JSON Path | Source JSON artifact path | Rich text |
-| Schema Version | Source schema version | Rich text |
-| Synced At | Export timestamp stored as text | Rich text |
-| Sync Status | Export sync state, currently `SYNCED` | Select |
+| Name | 주간 보고서 제목 | Title |
+| External Key | 중복 생성 방지 및 업데이트 기준 키 | Rich text |
+| Period Start | 주간 보고서 대상 기간의 시작일 | Date |
+| Period End | 주간 보고서 대상 기간의 종료일 | Date |
+| Latest Snapshot Date | 보고서에 포함된 최신 계좌 snapshot 날짜 | Date |
+| Coverage Status | 주간 보고서에 필요한 데이터가 얼마나 채워졌는지 나타내는 상태: `FULL`, `PARTIAL`, `EMPTY` | Select |
+| Overall Status | 주간 보고서 전체 검증 결과: `PASS`, `PASS_WITH_WARNINGS`, `FAIL` | Select |
+| Snapshot Count | 대상 기간에 포함된 계좌 snapshot 개수 | Integer number |
+| End Equity | 기간 종료 시점의 계좌 총 평가금액 | Money display |
+| Equity Change % | 대상 기간 중 계좌 평가금액 변화율, raw decimal 값 | Percent display |
+| Cash Ratio | 기간 종료 시점의 현금 비중, raw decimal 값 | Percent display |
+| Trade Count | 대상 기간 내 거래 수 | Integer number |
+| Gap Count | 주간 운영 중 비어 있거나 누락된 기록의 수 | Integer number |
+| High Gap Count | 그중 중요도가 높은 누락 기록의 수 | Integer number |
+| Markdown Path | 원본 Markdown 보고서 파일 경로 | Rich text |
+| JSON Path | 원본 JSON 데이터 파일 경로 | Rich text |
+| Schema Version | 원본 데이터의 schema version | Rich text |
+| Synced At | Notion으로 내보낸 시각을 텍스트로 저장 | Rich text |
+| Sync Status | Notion 동기화 상태, 현재는 `SYNCED` | Select |
 
 ## Benchmark Reports: property meaning and UI display
 
-| Property | Meaning | Notion display |
+| Property | 의미 | Notion display |
 | --- | --- | --- |
-| Name | Benchmark report title | Title |
-| External Key | Upsert key | Rich text |
-| Latest Snapshot Date | Comparison date | Date |
-| Run Mode | Current run mode such as `EXPLORATORY` | Select |
-| Official Run | `TRUE` / `FALSE` select, not checkbox | Select |
-| Availability Status | `AVAILABLE` / `INSUFFICIENT_DATA` / `UNKNOWN` | Select |
-| Paper Return | Paper return as raw decimal | Percent display |
-| SPY Return | SPY return as raw decimal | Percent display |
-| QQQ Return | QQQ return as raw decimal | Percent display |
-| CASH Return | CASH return as raw decimal | Percent display |
-| Excess vs SPY | Paper excess return vs SPY | Percent display |
-| Excess vs QQQ | Paper excess return vs QQQ | Percent display |
-| Excess vs CASH | Paper excess return vs CASH | Percent display |
-| Paper MDD | Paper max drawdown as raw decimal | Percent display |
-| SPY MDD | SPY max drawdown as raw decimal | Percent display |
-| QQQ MDD | QQQ max drawdown as raw decimal | Percent display |
-| Markdown Path | Source markdown artifact path | Rich text |
-| JSON Path | Source JSON artifact path | Rich text |
-| Schema Version | Source schema version | Rich text |
-| Synced At | Export timestamp stored as text | Rich text |
-| Sync Status | Export sync state, currently `SYNCED` | Select |
+| Name | benchmark 비교 보고서 제목 | Title |
+| External Key | 중복 생성 방지 및 업데이트 기준 키 | Rich text |
+| Latest Snapshot Date | 비교 기준이 된 최신 계좌 snapshot 날짜 | Date |
+| Run Mode | benchmark 실행 모드, 예: `EXPLORATORY` | Select |
+| Official Run | 공식 성과 반영 여부를 `TRUE` / `FALSE` 선택값으로 표시, checkbox 아님 | Select |
+| Availability Status | benchmark 비교값 산출 가능 상태: `AVAILABLE` / `INSUFFICIENT_DATA` / `UNKNOWN` | Select |
+| Paper Return | paper 계좌 수익률, raw decimal 값 | Percent display |
+| SPY Return | SPY benchmark 수익률, raw decimal 값 | Percent display |
+| QQQ Return | QQQ benchmark 수익률, raw decimal 값 | Percent display |
+| CASH Return | 현금 보유 기준 수익률, raw decimal 값 | Percent display |
+| Excess vs SPY | SPY 대비 paper 계좌 초과수익률 | Percent display |
+| Excess vs QQQ | QQQ 대비 paper 계좌 초과수익률 | Percent display |
+| Excess vs CASH | 현금 보유 대비 paper 계좌 초과수익률 | Percent display |
+| Paper MDD | paper 계좌 최대낙폭, raw decimal 값 | Percent display |
+| SPY MDD | SPY 최대낙폭, raw decimal 값 | Percent display |
+| QQQ MDD | QQQ 최대낙폭, raw decimal 값 | Percent display |
+| Markdown Path | 원본 Markdown 보고서 파일 경로 | Rich text |
+| JSON Path | 원본 JSON 데이터 파일 경로 | Rich text |
+| Schema Version | 원본 데이터의 schema version | Rich text |
+| Synced At | Notion으로 내보낸 시각을 텍스트로 저장 | Rich text |
+| Sync Status | Notion 동기화 상태, 현재는 `SYNCED` | Select |
 
 ## Account Snapshots: property meaning and UI display
 
-| Property | Meaning | Notion display |
+| Property | 의미 | Notion display |
 | --- | --- | --- |
-| Name | Account snapshot title | Title |
-| External Key | Upsert key | Rich text |
-| Snapshot Date | Snapshot date | Date |
-| Initial Cash | Initial cash baseline | Money display |
-| Cash | Current cash | Money display |
-| Total Equity Market Value | Equity using market valuation | Money display |
-| Total Equity Cost Basis | Equity using cost basis | Money display |
-| Unrealized PnL | Unrealized PnL | Money display |
-| Cash Ratio Market Value | Cash ratio on market-value basis as raw decimal | Percent display |
-| Cash Ratio Cost Basis | Cash ratio on cost-basis basis as raw decimal | Percent display |
-| Position Count | Number of open positions | Integer number |
-| Symbols | Pipe-joined symbol text | Rich text |
-| Valuation Status | `SUCCESS`, `FAILED`, `NOT_RUN`, `UNKNOWN`, `PARTIAL` | Select |
-| Valuation Price Date | Date used for valuation pricing | Date |
-| Synced At | Export timestamp stored as text | Rich text |
-| Sync Status | Export sync state, currently `SYNCED` | Select |
+| Name | 계좌 snapshot 제목 | Title |
+| External Key | 중복 생성 방지 및 업데이트 기준 키 | Rich text |
+| Snapshot Date | 계좌 snapshot 기준일 | Date |
+| Initial Cash | paper 계좌의 초기 현금 기준액 | Money display |
+| Cash | 현재 현금 잔액 | Money display |
+| Total Equity Market Value | 시장가 기준 총 계좌 평가금액 | Money display |
+| Total Equity Cost Basis | 매입원가 기준 총 계좌 평가금액 | Money display |
+| Unrealized PnL | 현재 보유 포지션의 미실현 손익 | Money display |
+| Cash Ratio Market Value | 시장가 기준 총자산 대비 현금 비중, raw decimal 값 | Percent display |
+| Cash Ratio Cost Basis | 매입원가 기준 총자산 대비 현금 비중, raw decimal 값 | Percent display |
+| Position Count | 현재 보유 중인 포지션 수 | Integer number |
+| Symbols | 보유 종목 티커를 `|`로 연결한 텍스트 | Rich text |
+| Valuation Status | 평가가격 산출 상태: `SUCCESS`, `FAILED`, `NOT_RUN`, `UNKNOWN`, `PARTIAL` | Select |
+| Valuation Price Date | 평가금액 계산에 사용한 가격 기준일 | Date |
+| Synced At | Notion으로 내보낸 시각을 텍스트로 저장 | Rich text |
+| Sync Status | Notion 동기화 상태, 현재는 `SYNCED` | Select |

@@ -173,6 +173,9 @@ def test_top_level_json_schema_is_stable(tmp_path):
     _seed_base_dataset(root)
     payload = build_paper_weekly_status_summary(days=2, paper_root=root)
     assert set(payload.keys()) == {
+        "account_id",
+        "account_root",
+        "legacy_default_used",
         "schema_version",
         "generated_at",
         "period",
