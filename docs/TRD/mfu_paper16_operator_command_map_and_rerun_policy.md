@@ -1,41 +1,41 @@
-# PAPER16-2 Operator Command Map And Rerun Policy
+# PAPER16-2 Operator Command Map 및 Rerun Policy
 
-## Purpose
+## 목적
 
-Define the Daily Ops Status operator command map, actual export rerun policy, and manual Notion view cleanup procedure after the PAPER16-1 dashboard design.
+PAPER16-1 dashboard 설계를 기반으로 Daily Ops Status의 운영자 command map, actual export rerun policy, 수동 Notion view 정리 절차를 정의한다.
 
-This is a documentation-only MFU. It does not modify Python code, does not create or edit Notion views, does not run Notion actual write/export, and does not modify outputs/paper source-of-truth artifacts.
+이번 MFU는 문서 전용이다. Python 코드를 수정하지 않고, Notion view를 생성/수정하지 않으며, Notion actual write/export를 실행하지 않고, outputs/paper source-of-truth 산출물을 변경하지 않는다.
 
-## Scope / Non-scope
+## 범위 / 비범위
 
-Scope:
+범위:
 
-- operator actions for `workflow_status`, `review_progress_status`, and `sync_status`
-- allowed and forbidden local commands by status
-- actual export and status sync rerun policy
-- source-of-truth rollback policy
-- manual Notion view setup procedure
+- `workflow_status`, `review_progress_status`, `sync_status`별 운영자 행동
+- 상태별 허용/금지 로컬 명령
+- actual export 및 status sync rerun policy
+- source-of-truth rollback 금지 정책
+- 수동 Notion view 설정 절차
 - PAPER16-3 readiness checklist
 
-Non-scope:
+비범위:
 
-- new status implementation
-- new CLI or wrapper CLI implementation
+- 신규 status 구현
+- 신규 CLI 또는 wrapper CLI 구현
 - Notion actual write/export
-- Notion DB or view create/update
+- Notion DB 또는 view create/update
 - multi-account bulk export
 - `paper_default` actual export
-- broker/API, cloud runner, Alert, Replay, Schema Drift, Universe, or Strategy work
+- broker/API, cloud runner, Alert, Replay, Schema Drift, Universe, Strategy 작업
 
-## Source-of-truth Rule
+## Source-of-truth 원칙
 
-CSV, JSON, Markdown, and SQLite remain source-of-truth. Notion is an input, review, staging, and presentation layer.
+CSV, JSON, Markdown, SQLite가 source-of-truth다. Notion은 input, review, staging, presentation layer다.
 
-If local commit/append succeeds and Notion sync/export fails, do not rollback local source-of-truth. Rerun the Notion sync/export path against the same source-of-truth report, `account_id`, `status_date`, and `External Key`.
+로컬 commit/append가 성공한 뒤 Notion sync/export가 실패하더라도 local source-of-truth를 rollback하지 않는다. 동일한 source-of-truth report, `account_id`, `status_date`, `External Key` 기준으로 Notion sync/export 경로만 재시도한다.
 
-## Current CLI Reference
+## 현재 CLI 기준
 
-Confirmed local commands:
+확인된 로컬 명령:
 
 - `python scripts\paper.py status --account-id <account_id> --json`
 - `python scripts\paper.py plan --date <YYYYMMDD> --account-id <account_id>`
@@ -47,126 +47,126 @@ Confirmed local commands:
 - `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --dry-run --json`
 - `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --confirm-actual --json`
 
-Current Daily Ops Status actual export guard:
+현재 Daily Ops Status actual export guard:
 
-- `--daily-ops-status` requires `--dry-run` or `--confirm-actual`
-- `--daily-ops-status` cannot be combined with other export targets
-- actual Daily Ops Status export is limited to `account_id=paper_sandbox`
+- `--daily-ops-status`에는 `--dry-run` 또는 `--confirm-actual`이 필요하다.
+- `--daily-ops-status`는 다른 export target과 함께 사용할 수 없다.
+- actual Daily Ops Status export는 현재 `account_id=paper_sandbox`로 제한된다.
 
 ## Operator Command Map
 
 ### Workflow Status
 
-| Status Area | Status Value | Classification | Meaning | Allowed Action | Forbidden Action | Next Recommended Command | Notes |
+| Status Area | Status Value | Classification | 의미 | 허용 Action | 금지 Action | Next Recommended Command | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| workflow_status | `NO_PLAN` | current | Daily plan is missing. | Generate plan for the account/date. | Commit, review append, actual export as done. | `python scripts\paper.py plan --date <YYYYMMDD> --account-id <account_id>` | For non-default accounts, confirm the account root is expected. |
-| workflow_status | `PLAN_READY` | current | Plan exists, but same-date state/snapshot is missing. | Run EOD dry-run or complete execution flow. | Treat as committed or reviewed. | `python scripts\paper.py eod --date <YYYYMMDD> --account-id <account_id> --dry-run` | Actual execution commit is a separate guarded workflow. |
-| workflow_status | `COMMITTED` | current | Source-of-truth was updated, but reports/review are not ready. | Generate reports and review template. | Mark review done. | `python scripts\paper.py reports --account-id <account_id>` then `python scripts\paper.py review-template --account-id <account_id>` | If reports fail, inspect missing snapshot/log artifacts. |
-| workflow_status | `REVIEW_READY` | current | Reports and validation are ready; review append is pending. | Complete review input and run review append when ready. | Mark closeout complete before append. | `python scripts\paper.py review-append --account-id <account_id>` | If manual review fields are incomplete, update the review input first. |
-| workflow_status | `REVIEW_PARTIAL` | current | Some review rows are appended but pending rows remain. | Complete pending review rows, validate, append remaining rows. | Treat day as fully closed. | `python scripts\paper.py review-validate --account-id <account_id>` then `python scripts\paper.py review-append --account-id <account_id>` | Closeout is not complete while pending rows remain. |
-| workflow_status | `REVIEW_DONE` | current | Review rows are complete. | Confirm Daily Ops Status dry-run/actual export if allowed. | Re-run append without verifying idempotency. | `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --dry-run --json` | Actual export remains guarded and paper_sandbox-only in current stage. |
-| workflow_status | `UNKNOWN_OR_INCOMPLETE` | current | Status cannot be classified safely. | Inspect local artifacts and blocking reason. | Commit, append, or actual export as success. | `python scripts\paper.py status --account-id <account_id> --json` | Resolve missing artifacts before proceeding. |
+| workflow_status | `NO_PLAN` | current | daily plan이 없다. | 해당 account/date의 plan 생성. | commit, review append, 완료 상태로 actual export. | `python scripts\paper.py plan --date <YYYYMMDD> --account-id <account_id>` | non-default 계좌는 의도한 account root인지 확인한다. |
+| workflow_status | `PLAN_READY` | current | plan은 있지만 같은 날짜 state/snapshot이 없다. | EOD dry-run 또는 execution flow 확인. | committed/reviewed로 취급. | `python scripts\paper.py eod --date <YYYYMMDD> --account-id <account_id> --dry-run` | actual execution commit은 별도 guarded workflow다. |
+| workflow_status | `COMMITTED` | current | source-of-truth는 갱신됐지만 reports/review가 준비되지 않았다. | reports 생성 및 review template 준비. | review done으로 표시. | `python scripts\paper.py reports --account-id <account_id>` 이후 `python scripts\paper.py review-template --account-id <account_id>` | reports 실패 시 snapshot/log artifact 누락을 확인한다. |
+| workflow_status | `REVIEW_READY` | current | reports와 validation이 준비됐고 review append가 남아 있다. | review 입력을 완료하고 준비되면 review append 실행. | append 전 closeout 완료 처리. | `python scripts\paper.py review-append --account-id <account_id>` | manual review field가 불완전하면 먼저 입력을 보완한다. |
+| workflow_status | `REVIEW_PARTIAL` | current | 일부 review row는 append됐지만 pending row가 남아 있다. | pending row 완료, validation, 남은 row append. | 해당 날짜를 완전히 닫힌 것으로 취급. | `python scripts\paper.py review-validate --account-id <account_id>` 이후 `python scripts\paper.py review-append --account-id <account_id>` | pending row가 남아 있으면 closeout 완료가 아니다. |
+| workflow_status | `REVIEW_DONE` | current | review row가 완료됐다. | 허용된 경우 Daily Ops Status dry-run/actual export 확인. | idempotency 확인 없이 review append 재실행. | `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --dry-run --json` | actual export는 현재 paper_sandbox 전용 guard다. |
+| workflow_status | `UNKNOWN_OR_INCOMPLETE` | current | 상태를 안전하게 분류할 수 없다. | local artifact와 blocking reason 확인. | commit, append, actual export를 성공 상태로 진행. | `python scripts\paper.py status --account-id <account_id> --json` | 누락 artifact를 해결한 뒤 진행한다. |
 
 ### Review Progress Status
 
-| Status Area | Status Value | Classification | Meaning | Allowed Action | Forbidden Action | Next Recommended Command | Notes |
+| Status Area | Status Value | Classification | 의미 | 허용 Action | 금지 Action | Next Recommended Command | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| review_progress_status | `NOT_STARTED` | current | Review has not been answered/appended. | Fill review rows and validate. | Mark review complete. | `python scripts\paper.py review-validate --account-id <account_id>` | Append only after valid review input exists. |
-| review_progress_status | `PARTIAL` | current | Some review rows are complete, pending rows remain. | Complete pending rows and append remaining valid rows. | Closeout as done. | `python scripts\paper.py review-validate --account-id <account_id>` | Matches `REVIEW_PARTIAL` operating state. |
-| review_progress_status | `DONE` | current | Review progress is complete. | Confirm status/export presentation. | Re-append without checking duplicate risk. | `python scripts\paper.py status --account-id <account_id> --json` | Use Daily Ops Status export only if target/account is allowed. |
-| review_progress_status | `NOT_APPLICABLE` | current | Review progress is not relevant yet. | Follow workflow status. | Force review append. | Use workflow-specific command. | Usually upstream plan/commit/report state is not ready. |
-| review_progress_status | `UNKNOWN` | candidate/future | Progress cannot be determined. | Inspect template/log consistency. | Commit/append/export as success. | `python scripts\paper.py status --account-id <account_id> --json` | Treat as blocking until understood. |
-| review_progress_status | `READY` | candidate/future | Potential future validated-ready state. | Follow future SOP once implemented. | Assume complete. | TBD | Not currently a stable local status semantic. |
+| review_progress_status | `NOT_STARTED` | current | review가 answer/append되지 않았다. | review row 작성 및 validation. | review complete 표시. | `python scripts\paper.py review-validate --account-id <account_id>` | valid review input 이후에만 append한다. |
+| review_progress_status | `PARTIAL` | current | 일부 review row는 완료됐고 pending row가 남아 있다. | pending row 완료 및 남은 valid row append. | closeout 완료 처리. | `python scripts\paper.py review-validate --account-id <account_id>` | `REVIEW_PARTIAL` 운영 상태와 대응된다. |
+| review_progress_status | `DONE` | current | review 진행이 완료됐다. | status/export presentation 확인. | duplicate risk 확인 없이 re-append. | `python scripts\paper.py status --account-id <account_id> --json` | Daily Ops Status export는 허용된 target/account에서만 실행한다. |
+| review_progress_status | `NOT_APPLICABLE` | current | 아직 review progress가 적용될 단계가 아니다. | workflow status를 따른다. | review append 강제 실행. | workflow별 명령 사용. | 보통 upstream plan/commit/report가 준비되지 않은 상태다. |
+| review_progress_status | `UNKNOWN` | candidate/future | 진행도를 판단할 수 없다. | template/log 정합성 확인. | commit/append/export 성공 상태 처리. | `python scripts\paper.py status --account-id <account_id> --json` | 이해될 때까지 blocking으로 취급한다. |
+| review_progress_status | `READY` | candidate/future | validated-ready 상태 표현을 위한 future 후보. | future SOP 확정 후 따른다. | 완료로 가정. | TBD | 현재 안정적인 local status semantic은 아니다. |
 
 ### Sync Status
 
-| Status Area | Status Value | Classification | Meaning | Allowed Action | Forbidden Action | Next Recommended Command | Notes |
+| Status Area | Status Value | Classification | 의미 | 허용 Action | 금지 Action | Next Recommended Command | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| sync_status | `DRY_RUN` | current | Payload was generated without Notion write. | Inspect payload; run actual only if allowed. | Assume Notion row is updated. | `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --confirm-actual --json` | Actual is guarded and paper_sandbox-only. |
-| sync_status | `SYNCED` | current | Notion presentation row was created/updated. | Compare visible fields with local status if needed. | Treat Notion as source-of-truth. | `python scripts\paper.py status --account-id <account_id> --json` | Source-of-truth remains local. |
-| sync_status | `FAILED` | current/operator concept | Export/sync failed or a failure summary was generated. | Fix schema/mapping/client issue and rerun same External Key. | Rollback local ledger/review state. | If a documented schema/mapping validator command exists, run it first; otherwise inspect schema/mapping manually, then rerun dry-run. | For Daily Ops Status, actual rerun must remain guarded. |
-| sync_status | `SKIPPED` | candidate/future | Sync was intentionally skipped. | Confirm skip reason. | Bulk rerun blindly. | TBD | Keep until future exporter emits it consistently. |
-| sync_status | `NOT_SYNCED` | candidate/future | Notion row has not been synced yet. | Dry-run first; actual only if allowed. | Bulk actual export. | `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --dry-run --json` | Not currently a mapped option in code; use as operator concept only. |
-| sync_status | `SYNC_FAILED` | candidate/future | Alias-style operator label for sync failure. | Treat the same as `FAILED`. | Rollback source-of-truth. | Inspect schema/mapping first, then rerun dry-run before actual retry. | Prefer mapped value `FAILED` in Notion select options. |
+| sync_status | `DRY_RUN` | current | Notion write 없이 payload만 생성됐다. | payload 확인, 허용된 경우에만 actual 실행. | Notion row가 갱신됐다고 가정. | `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --confirm-actual --json` | actual은 paper_sandbox 전용 guard다. |
+| sync_status | `SYNCED` | current | Notion presentation row가 create/update됐다. | 필요하면 local status와 표시 필드를 비교. | Notion을 source-of-truth로 취급. | `python scripts\paper.py status --account-id <account_id> --json` | source-of-truth는 여전히 local이다. |
+| sync_status | `FAILED` | current/operator concept | export/sync 실패 또는 failure summary가 생성됐다. | schema/mapping/client 문제를 해결하고 같은 External Key로 재시도. | local ledger/review state rollback. | 문서화된 schema/mapping validator 명령이 있으면 먼저 실행하고, 없으면 schema/mapping을 수동 점검한 뒤 dry-run을 재실행한다. | Daily Ops Status actual rerun은 계속 guarded 상태여야 한다. |
+| sync_status | `SKIPPED` | candidate/future | sync를 의도적으로 생략했다. | skip reason 확인. | bulk rerun. | TBD | future exporter가 안정적으로 emit할 때까지 후보로 둔다. |
+| sync_status | `NOT_SYNCED` | candidate/future | Notion row가 아직 sync되지 않았다. | dry-run 먼저 실행, 허용된 경우에만 actual 실행. | bulk actual export. | `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --dry-run --json` | 현재 code mapping option은 아니며 operator concept로만 사용한다. |
+| sync_status | `SYNC_FAILED` | candidate/future | sync failure를 부르는 operator label이다. | `FAILED`와 동일하게 취급. | source-of-truth rollback. | schema/mapping을 먼저 점검하고, actual retry 전에 dry-run을 재실행한다. | Notion select option에서는 mapped value `FAILED`를 우선 사용한다. |
 
 ## Blocking / Warning Policy
 
-- `FAIL`, `FAILED`, or a concrete `Blocking Reason` blocks commit, append, and actual export until the cause is resolved.
-- `WARNING` blocks commit/append/export by default unless the specific command has a documented explicit allow option.
-- `REVIEW_PARTIAL` blocks full closeout because pending review rows remain.
-- `REVIEW_DONE` allows review closeout interpretation, but does not by itself prove Notion presentation is synced.
-- `SYNC_FAILED` / `FAILED` does not invalidate successful local commit/append.
-- `External Key` must not be manually edited in Notion outside a future migration procedure.
+- `FAIL`, `FAILED`, 구체적인 `Blocking Reason`은 원인이 해결될 때까지 commit, append, actual export를 막는다.
+- `WARNING`은 해당 명령에 명시적인 allow option이 문서화돼 있지 않으면 기본적으로 commit/append/export를 막는다.
+- `REVIEW_PARTIAL`은 pending review row가 남아 있으므로 full closeout을 막는다.
+- `REVIEW_DONE`은 review closeout으로 해석 가능하지만, Notion presentation이 sync됐다는 뜻은 아니다.
+- `SYNC_FAILED` / `FAILED`는 성공한 local commit/append를 무효화하지 않는다.
+- future migration procedure가 아닌 한 Notion에서 `External Key`를 수동 수정하지 않는다.
 
 ## Actual Export / Sync Rerun Policy
 
-General policy:
+일반 정책:
 
-- Always run dry-run before actual export.
-- Actual write/export requires an explicit confirm flag or a documented approved command.
-- If schema/property mismatch is suspected, stop actual export. Run a documented schema/mapping validator command if one exists; otherwise inspect schema/mapping manually before rerunning dry-run.
-- Prefer idempotent update by the same `External Key`.
-- Do not run multi-account bulk export until duplicate row audit and bulk policy are complete.
-- Do not run `paper_default` actual export for new multi-account Daily Ops Status flows.
+- actual export 전에는 항상 dry-run을 먼저 실행한다.
+- actual write/export는 명시적 confirm flag 또는 문서화된 승인 명령이 있을 때만 허용한다.
+- schema/property mismatch가 의심되면 actual export를 중단한다. 문서화된 schema/mapping validator 명령이 있으면 실행하고, 없으면 schema/mapping을 수동 점검한 뒤 dry-run을 재실행한다.
+- 동일 `External Key` 기준 idempotent update를 우선한다.
+- duplicate row audit과 bulk policy가 완료되기 전에는 multi-account bulk export를 실행하지 않는다.
+- 신규 multi-account Daily Ops Status 흐름에서 `paper_default` actual export는 실행하지 않는다.
 
-Daily Ops Status current policy:
+Daily Ops Status 현재 정책:
 
-- validated actual target: `paper_sandbox`
-- validated key example: `daily_ops_status:paper_sandbox:2026-05-20`
-- dry-run command: `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --dry-run --json`
-- guarded actual command: `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --confirm-actual --json`
+- 검증된 actual target: `paper_sandbox`
+- 검증된 key 예: `daily_ops_status:paper_sandbox:2026-05-20`
+- dry-run 명령: `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --dry-run --json`
+- guarded actual 명령: `python scripts\export_paper_to_notion.py --daily-ops-status --account-id paper_sandbox --confirm-actual --json`
 
 Manual Execution / Manual Review status sync:
 
-- If local commit/append report exists and source-of-truth update succeeded, Notion status sync failure is presentation-layer failure.
-- Rerun status sync from the same commit/append report.
-- Do not regenerate or rewrite the local ledger/review log just because Notion sync failed.
-- Use `--dry-run` first where the sync script supports it.
+- local commit/append report가 있고 source-of-truth update가 성공했다면, Notion status sync 실패는 presentation-layer 실패다.
+- 같은 commit/append report에서 status sync를 재실행한다.
+- Notion sync 실패만으로 local ledger/review log를 재생성하거나 rewrite하지 않는다.
+- sync script가 `--dry-run`을 지원하면 먼저 dry-run을 사용한다.
 
 Duplicate safety:
 
-- If an actual export might have created a duplicate row, stop bulk reruns.
-- Use `External Key`, `Account ID`, and `Status Date` to inspect the candidate duplicate manually.
-- Defer duplicate row cleanup to a future duplicate row audit procedure.
+- actual export가 duplicate row를 만들었을 가능성이 있으면 bulk rerun을 중단한다.
+- `External Key`, `Account ID`, `Status Date`로 candidate duplicate를 수동 점검한다.
+- duplicate row cleanup은 future duplicate row audit procedure로 넘긴다.
 
-## Manual Notion View Cleanup Procedure
+## 수동 Notion View 정리 절차
 
-This procedure is for the user after Codex completes this MFU. Codex does not perform these Notion UI operations.
+이 절차는 Codex 작업 완료 후 사용자가 직접 Notion에서 수행한다. Codex는 Notion UI 작업을 하지 않는다.
 
-1. Open the existing `Daily Ops Status` DB.
-2. Do not create a new DB.
-3. If using a linked database, confirm it points to the same `Daily Ops Status` DB.
-4. Do not duplicate the database as a separate DB.
-5. Create or rename views exactly:
+1. 기존 `Daily Ops Status` DB를 연다.
+2. 새 DB를 만들지 않는다.
+3. linked database를 사용하는 경우 같은 `Daily Ops Status` DB를 바라보는지 확인한다.
+4. database duplicate로 별도 DB를 만들지 않는다.
+5. view 이름을 정확히 아래와 같이 만들거나 rename한다.
    - `Today Ops`
    - `By Account`
    - `Needs Action`
    - `Recent Sync`
    - `Review Closeout`
-6. Apply the filters, sorting, grouping, visible fields, and hidden fields from `mfu_paper16_daily_ops_status_dashboard_design.md`.
-7. Keep `External Key`, `Account ID`, `Status Date`, `Workflow Status`, `Review Progress Status`, and `Sync Status` visible in at least one troubleshooting view.
-8. Hide internal/debug fields only at the view layer; do not delete properties.
-9. Do not manually edit `External Key`.
-10. After cleanup, compare view names and visible fields against this SOP and the PAPER16-1 dashboard design.
+6. `mfu_paper16_daily_ops_status_dashboard_design.md`에 정의된 filter, sort, group, visible fields, hidden fields를 적용한다.
+7. `External Key`, `Account ID`, `Status Date`, `Workflow Status`, `Review Progress Status`, `Sync Status`는 최소 하나의 troubleshooting view에서 보이게 둔다.
+8. internal/debug field는 view layer에서만 숨기고 property 자체를 삭제하지 않는다.
+9. `External Key`를 수동 수정하지 않는다.
+10. 정리 후 view 이름과 표시 필드가 SOP 및 PAPER16-1 dashboard design과 일치하는지 비교한다.
 
 ## PAPER16-3 Readiness Checklist
 
-PAPER16-3 can check manual Notion screen consistency after the user completes the view cleanup.
+사용자가 view 정리를 완료하면 PAPER16-3에서 Notion 화면 정합성을 점검할 수 있다.
 
-Checklist:
+체크리스트:
 
-- `Today Ops` exists and shows selected-date account status.
-- `By Account` groups or sorts rows by account history.
-- `Needs Action` surfaces non-done workflow rows and failed sync rows.
-- `Recent Sync` shows `External Key`, `Sync Status`, and `Synced At`.
-- `Review Closeout` shows review progress and pending counts.
-- No duplicate Daily Ops Status DB was created.
-- `External Key` was not manually edited.
-- `paper_default` actual export remains disabled.
-- No multi-account bulk export was run.
+- `Today Ops`가 존재하고 selected-date account status를 보여준다.
+- `By Account`가 account history를 group 또는 sort로 보여준다.
+- `Needs Action`이 done이 아닌 workflow row와 failed sync row를 보여준다.
+- `Recent Sync`가 `External Key`, `Sync Status`, `Synced At`을 보여준다.
+- `Review Closeout`이 review progress와 pending count를 보여준다.
+- duplicate Daily Ops Status DB가 만들어지지 않았다.
+- `External Key`가 수동 수정되지 않았다.
+- `paper_default` actual export가 여전히 비활성이다.
+- multi-account bulk export가 실행되지 않았다.
 
 ## Risks / Open Questions
 
-- `NOT_SYNCED`, `SYNC_FAILED`, and `READY` are operator concepts or future candidates, not fully stable emitted values in all current code paths.
-- Status-specific commands should be refined once more than one non-default account is operating.
-- Existing SOP files contain legacy encoding artifacts; this MFU adds only minimal addenda.
+- `NOT_SYNCED`, `SYNC_FAILED`, `READY`는 operator concept 또는 future candidate이며, 현재 모든 코드 경로에서 안정적으로 emit되는 값은 아니다.
+- 두 개 이상의 non-default 계좌가 운영되면 상태별 명령을 한 번 더 정교화해야 한다.
+- 기존 SOP 파일에는 legacy encoding artifact가 남아 있다. 이번 MFU는 전체 재작성 대신 최소 addendum만 추가한다.
