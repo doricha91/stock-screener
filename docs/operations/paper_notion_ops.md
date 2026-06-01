@@ -444,3 +444,25 @@ Operator guidance:
 - use dry-run first
 - use guarded actual export only where explicitly approved
 - keep Notion as presentation layer, not source-of-truth
+
+## 11. PAPER16-1 Daily Ops Status Dashboard Addendum
+
+PAPER16-1 defines recommended manual Notion views for `Daily Ops Status`.
+
+- Codex does not create or modify Notion views in this step
+- Notion actual write/export is not executed in this step
+- initial manual cleanup should focus on `paper_sandbox`
+- `paper_default` actual export and multi-account bulk export remain forbidden
+- `External Key`, `Account ID`, `Status Date`, `Workflow Status`, `Review Progress Status`, and `Sync Status` should stay visible in at least one troubleshooting view
+
+## 12. PAPER16-2 Command Map / Rerun Policy Addendum
+
+PAPER16-2 documents Daily Ops Status command selection, sync/export rerun policy, and manual view cleanup procedure.
+
+- `External Key` must not be manually edited
+- Notion sync/export failure is presentation-layer failure when local source-of-truth commit/append succeeded
+- local source-of-truth rollback is forbidden for Notion sync/export failure alone
+- retry actual export only with documented guarded commands and the same External Key
+- do not create a duplicate Daily Ops Status DB when cleaning views
+- manual views should be named `Today Ops`, `By Account`, `Needs Action`, `Recent Sync`, and `Review Closeout`
+- PAPER16-3 may verify that the manually cleaned Notion views match the SOP

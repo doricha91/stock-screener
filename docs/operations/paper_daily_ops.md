@@ -277,3 +277,25 @@ Still forbidden:
 - `paper_default` actual export for new multi-account Daily Ops Status flow
 - cloud runner execution
 - wrapper CLI automation
+
+## 12. PAPER16-1 Daily Ops Status Dashboard Addendum
+
+PAPER16-1 is a dashboard design step only.
+
+- recommended Notion views are documented for manual setup
+- Codex does not create or modify Notion views in this step
+- Notion actual write/export is not executed in this step
+- Daily Ops Status remains presentation layer only
+- CSV / JSON / Markdown / SQLite remain source-of-truth
+
+## 13. PAPER16-2 Command Map / Rerun Policy Addendum
+
+PAPER16-2 fixes the operator command map and rerun policy for Daily Ops Status.
+
+- use workflow_status / review_progress_status / sync_status to choose the next local command
+- run dry-run before any allowed actual export
+- do not rollback source-of-truth after Notion sync/export failure if local commit or append already succeeded
+- rerun Notion sync/export against the same account_id, status date, report, and External Key
+- actual Daily Ops Status export remains guarded and paper_sandbox-only until a later policy expands it
+- manual Notion view cleanup is performed by the user after this documentation step
+- PAPER16-3 can check the manually cleaned Notion views against the SOP
