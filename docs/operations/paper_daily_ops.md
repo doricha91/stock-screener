@@ -269,6 +269,7 @@ Current PAPER15 closeout policy:
   - review-validate
   - review-append
   - local status `REVIEW_PARTIAL`
+- Daily Ops Status limited actual create/update was validated during PAPER15 for `paper_sandbox`; closeout and consistency-check documentation work does not run additional Notion actual write/export
 - strategy/universe/profile remains a follow-up item
 
 Still forbidden:

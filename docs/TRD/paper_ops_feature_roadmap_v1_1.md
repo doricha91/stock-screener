@@ -8,6 +8,7 @@ Version 1.1 roadmap for paper operations after the PAPER15 multi-account foundat
 - foundation completion is marked explicitly
 - convenience layers remain lower priority than operational safety
 - strategy/universe/profile work is not a PAPER15 blocker
+- CSV/JSON/Markdown/SQLite remain source-of-truth; Notion remains input, review, staging, and presentation layer
 
 ## 0. Multi-account Foundation
 
@@ -16,6 +17,7 @@ Status: completed as foundation
 Completed scope:
 
 - account-aware path resolver
+- non-default account root/config foundation
 - non-default writer routing
 - `paper_sandbox` rehearsal
 - review workflow local semantics
@@ -123,7 +125,13 @@ Before full universe expansion, formalize:
 - `benchmark_id`
 - account boundary for universe selection
 
-Universe expansion should not happen before account profile boundary is defined.
+Universe expansion should not happen before the account/profile boundary is defined.
+
+Timing criteria:
+
+- PAPER15 does not implement strategy, universe, or risk profiles as official per-account config
+- define the account/profile boundary before Universe Change Preview
+- formalize `universe_id` and `benchmark_id` during Universe expansion
 
 ## 5. Strategy Expansion
 
@@ -160,6 +168,18 @@ Candidate strategy profile variables:
 - `trailing_stop_multiplier`
 - regime-specific overrides
 
+Candidate run-level variables:
+
+- run date
+- dry-run / actual
+- `run_mode`
+- `official_run`
+
+Timing criteria:
+
+- formalize `strategy_profile_id` and `risk_profile_id` before strategy expansion
+- profile implementation is a prerequisite for Universe/Strategy expansion, but not a PAPER15 closeout blocker
+
 ## Priority Classification
 
 ### P0 Immediate Safety
@@ -178,8 +198,8 @@ Candidate strategy profile variables:
 
 ### P2 Follow-up Roadmap
 
-- account profile boundary
-- `strategy_profile_id`, `universe_profile`, `risk_profile_id`
+- account/profile boundary, explicitly not a PAPER15 completed feature
+- `strategy_profile_id`, `universe_id`, `risk_profile_id`
 - prepare/preview account-aware audit
 - duplicate row audit
 - `paper_default` root convergence
@@ -201,6 +221,6 @@ Candidate strategy profile variables:
 3. alert / monitoring report
 4. replay / same-date diff harness
 5. schema drift operationalization
-6. account profile boundary formalization
+6. account/profile boundary formalization
 7. universe expansion
 8. strategy expansion

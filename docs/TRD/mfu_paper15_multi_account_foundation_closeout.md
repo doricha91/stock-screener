@@ -18,11 +18,13 @@ Out of scope:
 - broker/API
 - cloud runner
 
+This closeout and consistency-check documentation work does not run additional Notion actual write/export, does not modify outputs/paper source-of-truth files, and does not perform any new operational actual run.
+
 ## Completed MFUs Summary
 
 PAPER15 completed and verified the following foundation areas:
 
-- non-default account profile, path resolver, and account-aware root policy
+- non-default account root/config foundation, path resolver, and account-aware root policy
 - read-only and writer `--account-id` support
 - writer guard and path safety
 - non-default local writer path routing
@@ -33,7 +35,7 @@ PAPER15 completed and verified the following foundation areas:
 - Daily Ops Status DB design
 - Daily Ops Status mapping/schema
 - Daily Ops Status dry-run exporter
-- Daily Ops Status actual create/update for `paper_sandbox`
+- Daily Ops Status limited actual create/update validated during PAPER15 for one `paper_sandbox` row
 - `init-account` bootstrap command
 
 ## Verified Flows
@@ -72,6 +74,8 @@ Current verified key:
 
 - `daily_ops_status:paper_sandbox:2026-05-20`
 
+Daily Ops Status limited actual create/update was already validated during PAPER15 for `paper_sandbox`; this closeout documentation work does not execute additional Notion actual write/export.
+
 ## init-account Summary
 
 `init-account` now provides the official bootstrap path for a new non-default account.
@@ -89,7 +93,7 @@ Default behavior is dry-run. Actual creation requires `--confirm-create`.
 
 ## Current Limitations
 
-- strategy/universe/risk profile is not yet implemented as an official per-account config model
+- strategy/universe/risk profiles are not yet implemented as official per-account config models
 - `paper_default` still uses legacy `outputs/paper_test` policy
 - `init-account` actual workspace create smoke was not performed for a formal production account
 - CLI wrapper / GUI / cloud runner are not implemented
@@ -97,7 +101,7 @@ Default behavior is dry-run. Actual creation requires `--confirm-create`.
 
 ## Deferred Items
 
-- account profile boundary formalization for `strategy_profile_id`, `universe_id`, `risk_profile_id`
+- account/profile boundary formalization for `strategy_profile_id`, `universe_id`, and `risk_profile_id` as a P2 follow-up, not a PAPER15 completed feature
 - prepare/preview account-aware audit
 - duplicate Notion row audit
 - `paper_default` root convergence
@@ -115,7 +119,7 @@ Reason:
 - Daily Ops Status dry-run and actual limited export were validated
 - bootstrap path exists for new non-default onboarding
 
-PAPER15 is not blocked by higher-level account profile strategy expansion, CLI wrapper convenience, or automation layers.
+PAPER15 is not blocked by higher-level strategy/universe/risk profile expansion, CLI wrapper convenience, or automation layers.
 
 ## Follow-up Roadmap
 

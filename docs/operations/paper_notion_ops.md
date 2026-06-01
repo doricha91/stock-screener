@@ -433,7 +433,8 @@ status 필드:
 
 Current PAPER15 closeout policy:
 
-- `Daily Ops Status` actual export is validated only for limited `paper_sandbox` create/update
+- `Daily Ops Status` actual export was validated during PAPER15 only for limited `paper_sandbox` create/update
+- closeout and consistency-check documentation work does not run additional Notion actual write/export
 - schema validator pass is required before actual export
 - `paper_default` actual export for the new Daily Ops Status flow is still forbidden
 - multi-account bulk export is still forbidden
