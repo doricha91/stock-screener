@@ -31,6 +31,15 @@ class NotionDuplicateAuditError(RuntimeError):
     pass
 
 
+def _mask_identifier(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 4:
+        return "****"
+    return f"****{text[-4:]}"
+
+
 @dataclass(frozen=True)
 class DuplicateAuditResult:
     target: str
@@ -59,7 +68,7 @@ class DuplicateAuditResult:
             "recommended_action": self.recommended_action,
             "write_executed": False,
             "expected_page_id": self.expected_page_id,
-            "data_source_id": self.data_source_id,
+            "data_source_id": _mask_identifier(self.data_source_id),
             "external_key_property": self.external_key_property,
             "error": self.error,
         }

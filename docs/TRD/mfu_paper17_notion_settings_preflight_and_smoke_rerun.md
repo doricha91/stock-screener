@@ -1,4 +1,4 @@
-# PAPER17-5 Notion Settings Preflight and Duplicate Audit Read-only Smoke Rerun
+# PAPER17-5/6 Notion Settings Preflight and Duplicate Audit Read-only Smoke Rerun
 
 ## 1. Purpose
 
@@ -12,24 +12,26 @@ PAPER17-4A added the `daily_ops_status` duplicate audit dry-run implementation.
 
 PAPER17-4B attempted the first read-only smoke and stopped with `settings_error` because `config/notion_settings.json` was missing. No Notion API read and no Notion write/export/sync occurred.
 
+PAPER17-6 aligned the duplicate audit CLI with the project convention that Notion settings may come from `.env` / environment variables.
+
 ## 3. Required Settings
 
-The audit CLI loads Notion settings through `load_notion_settings(allow_missing=False)`.
+The audit CLI now loads Notion settings through `load_notion_settings(allow_missing=True)`.
 
 Required local settings:
 
 | Setting | Source | Current preflight result |
 | --- | --- | --- |
-| Notion settings file | `config/notion_settings.json` | not present |
-| Token env var name | `token_env`, default `NOTION_TOKEN` | `NOTION_TOKEN` not set |
-| Daily Ops Status data source id | `data_sources.daily_ops_status` or override env | `NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID` not set |
+| Notion settings file | `config/notion_settings.json` | optional for env-only duplicate audit |
+| Token env var name | `token_env`, default `NOTION_TOKEN` | set for successful smoke |
+| Daily Ops Status data source id | `data_sources.daily_ops_status` or override env | `NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID` set for successful smoke |
 | Property mapping | `config/notion_property_mapping.example.json` / active mapping loader | `daily_ops_status.external_key = External Key` exists |
 
 Secret values were not printed or recorded.
 
 ## 4. Supported Configuration Paths
 
-The supported settings path is:
+Supported settings-file path:
 
 ```text
 config/notion_settings.json
@@ -65,6 +67,13 @@ The Notion token is read from the environment variable named by `token_env`; by 
 NOTION_TOKEN
 ```
 
+For env-only duplicate audit smoke, both variables are required:
+
+```text
+NOTION_TOKEN
+NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID
+```
+
 ## 5. Secret Safety Policy
 
 - Do not commit `config/notion_settings.json`.
@@ -78,14 +87,14 @@ NOTION_TOKEN
 
 | Check | Result |
 | --- | --- |
-| `config/notion_settings.json` exists | no |
-| `NOTION_TOKEN` is set | no |
-| `NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID` is set | no |
+| `config/notion_settings.json` exists | not required for env-only path |
+| `NOTION_TOKEN` is set | yes for successful smoke |
+| `NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID` is set | yes for successful smoke |
 | CLI help shows write/confirm option | no |
 | CLI supports only `daily_ops_status` target | yes |
 | Mapping has Daily Ops Status External Key property | yes |
 
-Because settings are missing, actual export remains forbidden and the read-only smoke cannot reach Notion query/read.
+The first sandboxed retry hit a Notion transport error. After a user-approved read-only network retry, the smoke reached Notion query/read and returned one matching row.
 
 ## 7. Read-only Smoke Command
 
@@ -95,49 +104,45 @@ python scripts\dev\audit_notion_duplicates.py --target daily_ops_status --accoun
 
 ## 8. Smoke Result
 
-The smoke was rerun and stopped safely with `settings_error`.
+The PAPER17-6 smoke was rerun with env-based settings and reached Notion query/read. It returned one matching row.
 
 ```json
 {
   "target": "daily_ops_status",
   "account_id": "paper_sandbox",
   "status_date": "2026-05-20",
-  "external_key": "",
-  "match_count": 0,
-  "page_ids": [],
-  "classification": "settings_error",
-  "recommended_action": "stop_actual_settings_error",
+  "external_key": "daily_ops_status:paper_sandbox:2026-05-20",
+  "match_count": 1,
+  "page_ids": ["****4292"],
+  "classification": "update_candidate",
+  "recommended_action": "safe_to_update_after_required_preflight",
   "write_executed": false
 }
 ```
 
-The omitted error text stated that `config/notion_settings.json` is missing.
+The page ID is masked in this document. The CLI also masks `data_source_id` in JSON output.
 
 ## 9. Interpretation
 
-`settings_error` means the duplicate audit did not reach Notion query/read. This is the correct safe failure mode when the local Notion settings are absent.
+`update_candidate` means exactly one Daily Ops Status row exists for `daily_ops_status:paper_sandbox:2026-05-20`.
 
-No actual export can be considered until:
+This is not actual export approval. Actual export remains gated until:
 
-- local Notion settings are configured,
-- the token environment variable is present,
-- Daily Ops Status data source ID is configured,
 - schema/property preflight is clean,
 - duplicate audit returns a non-blocking result,
 - the Command Gate SOP preflight passes.
 
 ## 10. Remaining Limitations
 
-- This rerun did not perform Notion API read because settings are missing.
-- The duplicate status for `daily_ops_status:paper_sandbox:2026-05-20` is still unknown.
+- This rerun covered only `daily_ops_status / paper_sandbox / 2026-05-20`.
 - This preflight does not replace schema validation.
 - This preflight does not validate Notion view/filter drift.
 - This preflight is not actual export approval.
 - `write_executed=false` remained true for the smoke result.
 
-## 11. PAPER17-6 Recommendation
+## 11. PAPER17-7 Recommendation
 
-PAPER17-6 should define a dedicated Notion settings preflight command or operator checklist that reports:
+PAPER17-7 should define a dedicated Notion settings preflight command or operator checklist that reports:
 
 - settings file presence,
 - token env var presence,
@@ -145,4 +150,4 @@ PAPER17-6 should define a dedicated Notion settings preflight command or operato
 - active mapping availability,
 - secret-safe masked status only.
 
-After that, rerun the same read-only duplicate audit smoke once. Do not proceed to actual export until the duplicate audit and all Command Gate checks pass.
+Do not proceed to actual export until duplicate audit, schema preflight, External Key review, and all Command Gate checks pass.

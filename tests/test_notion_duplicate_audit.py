@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from core.notion_client import NotionAPIError
 from core.notion_duplicate_audit import (
     CLASS_CREATE_CANDIDATE,
     CLASS_DUPLICATE_BLOCKER,
@@ -52,6 +53,24 @@ class _FakeClient:
         raise AssertionError("duplicate audit must not call upsert_page_by_external_key")
 
 
+class _CliFakeClient(_FakeClient):
+    created_tokens: list[str] = []
+
+    def __init__(self, token: str):
+        super().__init__(["page-env"])
+        self.__class__.created_tokens.append(token)
+
+
+class _CliQueryErrorClient:
+    def __init__(self, token: str):
+        self.token = token
+
+    def query_by_external_key(self, data_source_id: str, external_key: str, external_key_property: str):
+        raise NotionAPIError(
+            f"Notion API request failed: POST /data_sources/{data_source_id}/query -> transport error"
+        )
+
+
 def test_resolve_daily_ops_status_external_key():
     account_id, status_date, external_key, matches = resolve_daily_ops_status_audit_key(
         account_id="paper_sandbox",
@@ -75,6 +94,8 @@ def test_zero_matches_create_candidate():
     assert result.recommended_action == "safe_to_create_after_required_preflight"
     assert result.write_executed is False
     assert result.to_dict()["write_executed"] is False
+    assert result.to_dict()["data_source_id"].startswith("****")
+    assert result.to_dict()["data_source_id"] != result.data_source_id
 
 
 def test_one_match_update_candidate():
@@ -168,3 +189,78 @@ def test_external_key_requires_date_for_consistency_check():
 def test_invalid_date_fails():
     with pytest.raises(NotionDuplicateAuditError):
         resolve_daily_ops_status_audit_key(account_id="paper_sandbox", status_date="2026/05/20")
+
+
+def test_cli_uses_env_settings_without_settings_file(monkeypatch, capsys):
+    _CliFakeClient.created_tokens.clear()
+    monkeypatch.setenv("NOTION_TOKEN", "secret-token-value")
+    monkeypatch.setenv("NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID", "secret-ds-value")
+    monkeypatch.setattr(audit_notion_duplicates, "NotionClient", _CliFakeClient)
+
+    exit_code = audit_notion_duplicates.main(
+        [
+            "--target",
+            DAILY_OPS_STATUS_AUDIT_TARGET,
+            "--account-id",
+            "paper_sandbox",
+            "--date",
+            "2026-05-20",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "secret-token-value" not in output
+    assert "secret-ds-value" not in output
+    assert '"data_source_id": "****alue"' in output
+    assert '"write_executed": false' in output
+    assert _CliFakeClient.created_tokens == ["secret-token-value"]
+
+
+def test_cli_missing_env_settings_returns_settings_error(monkeypatch, capsys):
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+    monkeypatch.delenv("NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID", raising=False)
+
+    exit_code = audit_notion_duplicates.main(
+        [
+            "--target",
+            DAILY_OPS_STATUS_AUDIT_TARGET,
+            "--account-id",
+            "paper_sandbox",
+            "--date",
+            "2026-05-20",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert '"classification": "settings_error"' in output
+    assert '"write_executed": false' in output
+
+
+def test_cli_query_error_does_not_expose_secret_values(monkeypatch, capsys):
+    monkeypatch.setenv("NOTION_TOKEN", "secret-token-value")
+    monkeypatch.setenv("NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID", "secret-ds-value")
+    monkeypatch.setattr(audit_notion_duplicates, "NotionClient", _CliQueryErrorClient)
+
+    exit_code = audit_notion_duplicates.main(
+        [
+            "--target",
+            DAILY_OPS_STATUS_AUDIT_TARGET,
+            "--account-id",
+            "paper_sandbox",
+            "--date",
+            "2026-05-20",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert '"classification": "query_error"' in output
+    assert "secret-token-value" not in output
+    assert "secret-ds-value" not in output
+    assert "/data_sources/****/query" in output
+    assert '"write_executed": false' in output

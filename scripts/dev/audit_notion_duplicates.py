@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+import re
 import sys
 
 from dotenv import load_dotenv
@@ -21,6 +23,19 @@ from core.notion_mapping import load_notion_property_mapping  # noqa: E402
 from core.notion_settings import NotionSettingsError, get_notion_token, load_notion_settings  # noqa: E402
 
 load_dotenv()
+
+
+def _safe_error_message(exc: Exception) -> str:
+    message = str(exc)
+    sensitive_values = [
+        os.environ.get("NOTION_TOKEN") or "",
+        os.environ.get("NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID") or "",
+    ]
+    for value in sensitive_values:
+        value = value.strip()
+        if value:
+            message = message.replace(value, "****")
+    return re.sub(r"(/data_sources/)[^/\s]+", r"\1****", message)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--date is required when --external-key is provided so account/date consistency can be checked")
 
     try:
-        settings = load_notion_settings(allow_missing=False)
+        settings = load_notion_settings(allow_missing=True)
         mapping_root = load_notion_property_mapping()
         client = NotionClient(get_notion_token(settings))
         result = audit_daily_ops_status_duplicate(
@@ -72,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(exc, NotionAPIError)
             else "stop_actual_settings_error",
             "write_executed": False,
-            "error": str(exc),
+            "error": _safe_error_message(exc),
         }
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))

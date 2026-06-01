@@ -2,38 +2,39 @@
 
 ## Purpose
 
-PAPER17-4A는 `daily_ops_status` actual export 전에 특정 `account_id` / `status_date` / `External Key` 기준으로 Notion row 매칭 상태를 read-only로 확인하는 duplicate audit dry-run interface를 추가한다.
+PAPER17-4A adds a read-only duplicate audit interface for the Notion `daily_ops_status` target.
 
-이 audit은 actual 실행 여부를 단독으로 결정하지 않는다. Command Gate SOP의 전체 preflight 중 duplicate risk 확인 단계만 담당한다.
+The audit checks the Notion row match state for a single `account_id` / `status_date` / `External Key` before any guarded actual export is considered. It is one preflight step only and does not approve actual export by itself.
 
 ## Scope
 
-Scope:
+In scope:
 
-- target은 `daily_ops_status` 하나로 제한한다.
-- Notion row query/read만 수행한다.
-- External Key 기준 match count를 분류한다.
-- JSON 결과에 `write_executed=false`를 항상 포함한다.
-- unit test는 fake client만 사용한다.
+- `daily_ops_status` only.
+- External Key format: `daily_ops_status:{account_id}:{status_date}`.
+- Read-only Notion query by External Key.
+- Classification of zero, one, or multiple matching rows.
+- JSON output with `write_executed=false`.
+- Fake-client unit tests.
 
-Non-scope:
+Out of scope:
 
-- Notion write
-- actual export/sync
-- duplicate cleanup
-- schema/view drift 자동 점검
-- detail exporter duplicate audit
-- Manual Execution/Review status sync duplicate audit
+- Notion write.
+- Actual export/sync.
+- Duplicate cleanup.
+- Schema/view drift automation.
+- Detail exporter duplicate audit.
+- Manual Execution/Review status sync duplicate audit.
 
 ## CLI
 
-권장 CLI:
+Recommended command:
 
 ```cmd
 python scripts\dev\audit_notion_duplicates.py --target daily_ops_status --account-id paper_sandbox --date 2026-05-20 --json
 ```
 
-선택 옵션:
+Optional arguments:
 
 ```cmd
 --external-key daily_ops_status:paper_sandbox:2026-05-20
@@ -41,31 +42,58 @@ python scripts\dev\audit_notion_duplicates.py --target daily_ops_status --accoun
 --json
 ```
 
-정책:
+Policy:
 
-- `--target`은 `daily_ops_status`만 허용한다.
-- `--account-id`는 필수다.
-- `--date` 또는 `--external-key`가 필요하다.
-- `--external-key`가 제공되면 `--date`도 요구해 account/date/key 정합성을 확인한다.
-- actual/write 관련 옵션은 없다.
+- `--target` must be `daily_ops_status`.
+- `--account-id` is required.
+- `--date` or `--external-key` is required.
+- If `--external-key` is provided, `--date` is also required so account/date/key consistency can be checked.
+- No actual/write option is available.
+- No `--confirm-actual` option is available.
+
+## Settings Contract
+
+The duplicate audit CLI supports both settings-file and environment-variable based configuration.
+
+Supported paths:
+
+- `config/notion_settings.json` with `data_sources.daily_ops_status`.
+- `.env` / environment variables.
+
+Required environment variables for env-only operation:
+
+```text
+NOTION_TOKEN
+NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID
+```
+
+`config/notion_settings.json` is optional for this CLI when both environment variables are present.
+
+Secret handling:
+
+- Do not commit `.env`.
+- Do not commit `config/notion_settings.json`.
+- Do not print the Notion token.
+- Do not print the full data source ID.
+- JSON output masks `data_source_id`.
 
 ## Input Contract
 
-입력:
+Inputs:
 
 - `target`: `daily_ops_status`
 - `account_id`: audited account id
-- `date`: `YYYY-MM-DD` 또는 `YYYYMMDD`
-- `external_key`: optional, 제공 시 expected key와 일치해야 함
-- `expected_page_id`: optional, update rerun에서 예상 page 검증용
+- `date`: `YYYY-MM-DD` or `YYYYMMDD`
+- `external_key`: optional, but must match account/date when provided
+- `expected_page_id`: optional, for update rerun consistency checks
 
-External Key 형식:
+External Key format:
 
 ```text
 daily_ops_status:{account_id}:{status_date}
 ```
 
-예:
+Example:
 
 ```text
 daily_ops_status:paper_sandbox:2026-05-20
@@ -73,7 +101,7 @@ daily_ops_status:paper_sandbox:2026-05-20
 
 ## Output Contract
 
-JSON 출력 최소 필드:
+Minimum JSON fields:
 
 ```json
 {
@@ -85,11 +113,12 @@ JSON 출력 최소 필드:
   "page_ids": ["..."],
   "classification": "update_candidate",
   "recommended_action": "safe_to_update_after_required_preflight",
-  "write_executed": false
+  "write_executed": false,
+  "data_source_id": "****abcd"
 }
 ```
 
-classification 후보:
+Classification values:
 
 - `create_candidate`
 - `update_candidate`
@@ -98,7 +127,7 @@ classification 후보:
 - `settings_error`
 - `query_error`
 
-recommended_action 후보:
+Recommended action values:
 
 - `safe_to_create_after_required_preflight`
 - `safe_to_update_after_required_preflight`
@@ -108,8 +137,6 @@ recommended_action 후보:
 - `stop_actual_query_error`
 
 ## Classification Rules
-
-판정 규칙:
 
 | Condition | Classification | Recommended Action |
 | --- | --- | --- |
@@ -121,23 +148,21 @@ recommended_action 후보:
 | settings load/data source id error | `settings_error` | `stop_actual_settings_error` |
 | Notion query error | `query_error` | `stop_actual_query_error` |
 
-모든 결과는 `write_executed=false`를 포함한다.
+All results must include `write_executed=false`.
 
 ## Read-only Safety Policy
 
-Read-only safety:
-
-- `query_by_external_key`만 사용한다.
-- `create_page`를 호출하지 않는다.
-- `update_page`를 호출하지 않는다.
-- `upsert_page_by_external_key`를 호출하지 않는다.
-- status sync actual을 실행하지 않는다.
-- export actual을 실행하지 않는다.
-- Notion property나 row를 수정하지 않는다.
+- The implementation calls `query_by_external_key` only.
+- It must not call `create_page`.
+- It must not call `update_page`.
+- It must not call `upsert_page_by_external_key`.
+- It must not run status sync actual.
+- It must not run export actual.
+- It must not modify Notion rows or properties.
 
 ## Example Outputs
 
-0건:
+Zero matches:
 
 ```json
 {
@@ -149,7 +174,7 @@ Read-only safety:
 }
 ```
 
-1건:
+One match:
 
 ```json
 {
@@ -161,7 +186,7 @@ Read-only safety:
 }
 ```
 
-2건 이상:
+Two or more matches:
 
 ```json
 {
@@ -175,35 +200,34 @@ Read-only safety:
 
 ## Test Coverage
 
-Unit test coverage:
+Unit tests cover:
 
-- External Key 생성/정규화
-- 0건 -> `create_candidate`
-- 1건 -> `update_candidate`
-- 2건 이상 -> `duplicate_blocker`
-- expected_page_id mismatch -> `manual_review_required`
-- account/date/external_key mismatch -> `manual_review_required`
-- `write_executed=false`
-- unsupported target CLI failure
+- External Key generation and date normalization.
+- `0` matches -> `create_candidate`.
+- `1` match -> `update_candidate`.
+- `2+` matches -> `duplicate_blocker`.
+- expected_page_id mismatch -> `manual_review_required`.
+- account/date/external_key mismatch -> `manual_review_required`.
+- `write_executed=false`.
+- unsupported target CLI failure.
+- env-only settings path using `NOTION_TOKEN` and `NOTION_DAILY_OPS_STATUS_DATA_SOURCE_ID`.
+- secret raw values are not printed in CLI JSON output.
 
 Tests use fake clients and do not call the Notion API.
 
 ## Remaining Limitations
 
-Limitations:
+- This audit is limited to `daily_ops_status`.
+- Duplicate audit does not replace schema validation.
+- Schema validation does not replace duplicate audit.
+- Audit pass alone does not allow actual export.
+- Full Command Gate SOP preflight is still required before any guarded actual export.
+- Duplicate cleanup is not implemented.
 
-- 이번 audit은 `daily_ops_status` 한정이다.
-- duplicate audit은 schema validation을 대체하지 않는다.
-- schema validation은 duplicate audit을 대체하지 않는다.
-- audit PASS만으로 actual 실행이 허용되는 것은 아니다.
-- Command Gate SOP의 전체 preflight를 통과해야 actual 후보가 될 수 있다.
-- 실제 Notion read smoke는 이번 기본 검증에서 실행하지 않는다.
+## PAPER17-7 Recommendation
 
-## PAPER17-4B Recommendation
+Next steps:
 
-PAPER17-4B 추천:
-
-- 실제 Notion read-only smoke를 별도 승인하에 1회 수행한다.
-- `paper_sandbox` / `2026-05-20` 기준 duplicate audit 결과를 기록한다.
-- 이후 detail exporter target으로 audit 범위를 확장할지 결정한다.
-- actual export rerun은 계속 별도 승인 대상으로 둔다.
+- Add a dedicated secret-safe settings preflight command or checklist.
+- Consider masking page IDs in operator-facing output if needed.
+- Keep actual export blocked unless duplicate audit, schema preflight, External Key review, and explicit operator approval all pass.
