@@ -11,18 +11,76 @@ if str(ROOT) not in sys.path:
 
 from core.paper_alert_report import (  # noqa: E402
     build_paper_alert_report,
+    compact_alert_report_date,
+    normalize_alert_report_date,
     write_paper_alert_report,
 )
 
 
-def _load_json(path: str | None) -> dict:
+def _load_json(path: str | None, *, source_name: str) -> tuple[dict, dict | None]:
     if not path:
-        return {}
-    with Path(path).open("r", encoding="utf-8-sig") as handle:
-        payload = json.load(handle)
+        return {}, {
+            "source": source_name,
+            "status": "missing",
+            "source_path": "",
+            "message": f"{source_name} JSON source was not provided.",
+        }
+    source_path = Path(path)
+    if not source_path.exists():
+        return {}, {
+            "source": source_name,
+            "status": "missing",
+            "source_path": str(source_path),
+            "message": f"{source_name} JSON source file does not exist.",
+        }
+    try:
+        with source_path.open("r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError as exc:
+        return {}, {
+            "source": source_name,
+            "status": "malformed",
+            "source_path": str(source_path),
+            "message": f"{source_name} JSON source could not be parsed: {exc.msg}.",
+        }
     if not isinstance(payload, dict):
-        raise ValueError(f"JSON input must contain an object: {path}")
-    return payload
+        return {}, {
+            "source": source_name,
+            "status": "malformed",
+            "source_path": str(source_path),
+            "message": f"{source_name} JSON source must contain an object.",
+        }
+    return payload, None
+
+
+def _resolve_source_path(
+    *,
+    explicit_path: str | None,
+    source_root: str | None,
+    source_name: str,
+    report_date: str,
+) -> str | None:
+    if explicit_path:
+        return explicit_path
+    if not source_root:
+        return None
+    root = Path(source_root)
+    date_key = compact_alert_report_date(report_date)
+    if source_name == "daily_ops_status":
+        candidates = (
+            root / f"daily_ops_status_{date_key}.json",
+            root / "daily_ops_status.json",
+        )
+    else:
+        candidates = (
+            root / f"daily_ops_actual_preflight_{date_key}.json",
+            root / f"preflight_daily_ops_status_actual_{date_key}.json",
+            root / "preflight.json",
+        )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return str(candidates[0])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--daily-ops-status-json", help="Path to a Daily Ops Status payload JSON file.")
     parser.add_argument("--preflight-json", help="Path to a PAPER17 Daily Ops actual preflight JSON file.")
     parser.add_argument(
+        "--source-root",
+        help="Optional directory for account/date source resolution when explicit JSON paths are omitted.",
+    )
+    parser.add_argument(
         "--output-dir",
         help="Directory for JSON/Markdown output. Defaults to the account alerts directory.",
     )
@@ -56,17 +118,32 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    daily_ops_payload = _load_json(args.daily_ops_status_json)
-    preflight_payload = _load_json(args.preflight_json)
+    report_date = normalize_alert_report_date(args.date)
+    daily_ops_path = _resolve_source_path(
+        explicit_path=args.daily_ops_status_json,
+        source_root=args.source_root,
+        source_name="daily_ops_status",
+        report_date=report_date,
+    )
+    preflight_path = _resolve_source_path(
+        explicit_path=args.preflight_json,
+        source_root=args.source_root,
+        source_name="daily_ops_actual_preflight",
+        report_date=report_date,
+    )
+    daily_ops_payload, daily_ops_event = _load_json(daily_ops_path, source_name="daily_ops_status")
+    preflight_payload, preflight_event = _load_json(preflight_path, source_name="daily_ops_actual_preflight")
+    source_events = [event for event in (daily_ops_event, preflight_event) if event is not None]
     report = build_paper_alert_report(
         account_id=args.account_id,
-        report_date=args.date,
+        report_date=report_date,
         phase=args.phase,
         actual_intent=args.actual_intent,
         daily_ops_status=daily_ops_payload,
         preflight=preflight_payload,
-        daily_ops_source_path=args.daily_ops_status_json or "",
-        preflight_source_path=args.preflight_json or "",
+        source_events=source_events,
+        daily_ops_source_path=daily_ops_path or "",
+        preflight_source_path=preflight_path or "",
     )
     paths = write_paper_alert_report(report, output_dir=args.output_dir)
     summary = {

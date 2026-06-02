@@ -28,6 +28,7 @@ SEVERITY_ORDER = (
 
 CATEGORY_DAILY_OPS_STATUS = "DAILY_OPS_STATUS"
 CATEGORY_DAILY_OPS_PREFLIGHT = "DAILY_OPS_PREFLIGHT"
+CATEGORY_ALERT_SOURCE = "ALERT_SOURCE"
 
 
 def normalize_alert_report_date(date_str: str) -> str:
@@ -95,6 +96,7 @@ def build_paper_alert_report(
     actual_intent: bool = False,
     daily_ops_status: dict[str, Any] | None = None,
     preflight: dict[str, Any] | None = None,
+    source_events: list[dict[str, Any]] | None = None,
     daily_ops_source_path: str = "",
     preflight_source_path: str = "",
 ) -> dict[str, Any]:
@@ -104,6 +106,16 @@ def build_paper_alert_report(
         raise ValueError("phase must be closeout")
 
     items: list[AlertItem] = []
+    for event in source_events or []:
+        items.extend(
+            _items_from_source_event(
+                event,
+                account_id=resolved_account_id,
+                status_date=resolved_date,
+                phase=phase,
+                actual_intent=actual_intent,
+            )
+        )
     if daily_ops_status:
         items.extend(
             _items_from_daily_ops_status(
@@ -323,7 +335,109 @@ def _items_from_daily_ops_status(
                 source_path=source_path,
             )
         )
+    review_progress = str(
+        payload.get("review_progress_status") or payload.get("Review Progress Status") or ""
+    ).upper()
+    pending_count = _safe_int(
+        payload.get("review_pending_row_count")
+        if "review_pending_row_count" in payload
+        else payload.get("Review Pending Row Count")
+    )
+    if review_progress in {"PARTIAL", "NOT_STARTED", "READY", "UNKNOWN"} or pending_count > 0:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_NEEDS_REVIEW,
+                category=CATEGORY_DAILY_OPS_STATUS,
+                account_id=account_id,
+                status_date=status_date,
+                title="Daily Ops review is incomplete",
+                message="Daily Ops Status indicates review work is pending or incomplete.",
+                recommended_action="Complete or validate review closeout before treating the day as done.",
+                evidence={
+                    "review_progress_status": review_progress,
+                    "review_pending_row_count": pending_count,
+                },
+                source="daily_ops_status",
+                source_path=source_path,
+            )
+        )
+    validation_result = str(
+        payload.get("review_validation_result") or payload.get("Review Validation Result") or ""
+    ).upper()
+    if validation_result in {"FAIL", "FAILED"}:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_DAILY_OPS_STATUS,
+                account_id=account_id,
+                status_date=status_date,
+                title="Daily Ops review validation failed",
+                message="Review validation failure blocks closeout.",
+                recommended_action="Inspect review validation output before any further actual/sync step.",
+                evidence={"review_validation_result": validation_result},
+                source="daily_ops_status",
+                source_path=source_path,
+            )
+        )
     return items
+
+
+def _items_from_source_event(
+    event: dict[str, Any],
+    *,
+    account_id: str,
+    status_date: str,
+    phase: str,
+    actual_intent: bool,
+) -> list[AlertItem]:
+    source_name = str(event.get("source") or "unknown_source")
+    status = str(event.get("status") or "").lower()
+    source_path = str(event.get("source_path") or "")
+    message = str(event.get("message") or "")
+    if status not in {"missing", "malformed"}:
+        return []
+
+    if status == "malformed":
+        severity = SEVERITY_BLOCKING
+        title = f"{source_name} source is malformed"
+        recommended_action = "Stop and fix the source JSON before generating operator decisions."
+        suppressed = False
+        reason = ""
+    elif source_name == "daily_ops_status" and phase == "closeout":
+        severity = SEVERITY_NEEDS_REVIEW
+        title = "Daily Ops Status source is missing"
+        recommended_action = "Provide the Daily Ops Status source or confirm why it is unavailable at closeout."
+        suppressed = False
+        reason = ""
+    elif source_name == "daily_ops_actual_preflight" and actual_intent:
+        severity = SEVERITY_NEEDS_REVIEW
+        title = "Daily Ops actual preflight source is missing"
+        recommended_action = "Generate preflight before any actual export approval."
+        suppressed = False
+        reason = ""
+    else:
+        severity = SEVERITY_INFO
+        title = f"{source_name} source is missing"
+        recommended_action = "No action unless this source is required for the current operator intent."
+        suppressed = True
+        reason = "source_missing_actual_intent=false"
+
+    return [
+        AlertItem(
+            severity=severity,
+            category=CATEGORY_ALERT_SOURCE,
+            account_id=account_id,
+            status_date=status_date,
+            title=title,
+            message=message or f"{source_name} source status={status}.",
+            recommended_action=recommended_action,
+            evidence={"source": source_name, "status": status, "phase": phase, "actual_intent": actual_intent},
+            source=source_name,
+            source_path=source_path,
+            suppressed_in_markdown=suppressed,
+            suppression_reason=reason,
+        )
+    ]
 
 
 def _items_from_preflight(
@@ -457,6 +571,15 @@ def _has_expected_page_missing_warning(payload: dict[str, Any]) -> bool:
         if "expected_page_id" in str(check.get("message", "")).lower():
             return True
     return False
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        if value in (None, ""):
+            return 0
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _preflight_blocking_message(overall: str, schema_result: str, duplicate_classification: str) -> str:

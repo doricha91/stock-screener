@@ -7,6 +7,7 @@ from core.paper_alert_report import (
     SEVERITY_BLOCKING,
     SEVERITY_INFO,
     SEVERITY_NEEDS_REVIEW,
+    SEVERITY_SYNC_FAILED,
     build_paper_alert_report,
     render_paper_alert_report_markdown,
     write_paper_alert_report,
@@ -120,6 +121,92 @@ def test_summary_counts_multiple_sources() -> None:
     }
 
 
+def test_daily_ops_sync_failure_becomes_sync_failed() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        daily_ops_status={"account_id": "paper_sandbox", "sync_status": "SYNC_FAILED"},
+    )
+    assert report["summary"]["sync_failed_count"] == 1
+    assert report["items"][0]["severity"] == SEVERITY_SYNC_FAILED
+
+
+def test_daily_ops_review_partial_becomes_needs_review() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        daily_ops_status={
+            "account_id": "paper_sandbox",
+            "workflow_status": "REVIEW_PARTIAL",
+            "review_progress_status": "PARTIAL",
+            "review_pending_row_count": 3,
+        },
+    )
+    assert report["summary"]["needs_review_count"] == 1
+    assert report["items"][0]["severity"] == SEVERITY_NEEDS_REVIEW
+
+
+def test_daily_ops_missing_source_at_closeout_becomes_needs_review() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        source_events=[
+            {
+                "source": "daily_ops_status",
+                "status": "missing",
+                "message": "daily_ops_status JSON source was not provided.",
+            }
+        ],
+    )
+    assert report["summary"]["needs_review_count"] == 1
+    assert report["items"][0]["category"] == "ALERT_SOURCE"
+
+
+def test_malformed_source_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        source_events=[
+            {
+                "source": "daily_ops_status",
+                "status": "malformed",
+                "source_path": r"C:\secret\broken.json",
+                "message": "daily_ops_status JSON source could not be parsed.",
+            }
+        ],
+    )
+    assert report["summary"]["blocking_count"] == 1
+    assert report["items"][0]["source_path"] == "<redacted_path>"
+
+
+def test_preflight_missing_without_actual_intent_is_suppressed_info() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        actual_intent=False,
+        source_events=[{"source": "daily_ops_actual_preflight", "status": "missing"}],
+    )
+    assert report["summary"]["info_count"] == 1
+    assert report["summary"]["suppressed_info_count"] == 1
+    assert report["items"][0]["suppressed_in_markdown"] is True
+
+
+def test_preflight_missing_with_actual_intent_is_needs_review() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        actual_intent=True,
+        source_events=[{"source": "daily_ops_actual_preflight", "status": "missing"}],
+    )
+    assert report["summary"]["needs_review_count"] == 1
+
+
 def test_report_schema_version_and_markdown() -> None:
     report = _build_report()
     assert report["schema_version"] == ALERT_REPORT_SCHEMA_VERSION
@@ -228,3 +315,36 @@ def test_cli_smoke_generates_reports_in_tmp_path(tmp_path, capsys) -> None:
     assert (tmp_path / "paper_alert_report_20260520.json").exists()
     assert (tmp_path / "paper_alert_report_20260520.md").exists()
     assert "outputs/paper_accounts" not in output["json_path"].replace("\\", "/")
+
+
+def test_cli_source_root_resolves_tmp_path_sources(tmp_path, capsys) -> None:
+    daily_ops_path = tmp_path / "daily_ops_status_20260520.json"
+    preflight_path = tmp_path / "daily_ops_actual_preflight_20260520.json"
+    daily_ops_path.write_text(
+        json.dumps({"account_id": "paper_sandbox", "sync_status": "SYNC_FAILED"}),
+        encoding="utf-8",
+    )
+    preflight_path.write_text(json.dumps(_preflight_payload()), encoding="utf-8")
+    output_dir = tmp_path / "alerts"
+
+    exit_code = alert_report_cli_main(
+        [
+            "--account-id",
+            "paper_sandbox",
+            "--date",
+            "2026-05-20",
+            "--phase",
+            "closeout",
+            "--source-root",
+            str(tmp_path),
+            "--output-dir",
+            str(output_dir),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["summary"]["sync_failed_count"] == 1
+    assert (output_dir / "paper_alert_report_20260520.json").exists()
+    assert (output_dir / "paper_alert_report_20260520.md").exists()
