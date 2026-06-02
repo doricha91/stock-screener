@@ -86,12 +86,26 @@ def _resolve_source_path(
             root / f"manual_execution_import_commit_{date_key}.json",
             root / "manual_execution.json",
         )
-    else:
+    elif source_name == "manual_review":
         candidates = (
             root / f"manual_review_{date_key}.json",
             root / f"manual_review_status_{date_key}.json",
             root / f"manual_review_append_{date_key}.json",
             root / "manual_review.json",
+        )
+    elif source_name == "data_freshness":
+        candidates = (
+            root / f"data_freshness_{date_key}.json",
+            root / f"freshness_{date_key}.json",
+            root / f"market_data_freshness_{date_key}.json",
+            root / "data_freshness.json",
+        )
+    else:
+        candidates = (
+            root / f"same_date_guard_{date_key}.json",
+            root / f"same_date_commit_guard_{date_key}.json",
+            root / f"commit_guard_{date_key}.json",
+            root / "same_date_guard.json",
         )
     for candidate in candidates:
         if candidate.exists():
@@ -120,6 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight-json", help="Path to a PAPER17 Daily Ops actual preflight JSON file.")
     parser.add_argument("--manual-execution-json", help="Path to a Manual Execution high-level status JSON file.")
     parser.add_argument("--manual-review-json", help="Path to a Manual Review high-level status JSON file.")
+    parser.add_argument("--freshness-json", help="Path to a data freshness high-level status JSON file.")
+    parser.add_argument("--same-date-guard-json", help="Path to a same-date commit guard status JSON file.")
     parser.add_argument(
         "--source-root",
         help="Optional directory for account/date source resolution when explicit JSON paths are omitted.",
@@ -171,6 +187,18 @@ def main(argv: list[str] | None = None) -> int:
         source_name="manual_review",
         report_date=report_date,
     )
+    freshness_path = _resolve_source_path(
+        explicit_path=args.freshness_json,
+        source_root=args.source_root,
+        source_name="data_freshness",
+        report_date=report_date,
+    )
+    same_date_guard_path = _resolve_source_path(
+        explicit_path=args.same_date_guard_json,
+        source_root=args.source_root,
+        source_name="same_date_guard",
+        report_date=report_date,
+    )
     manual_execution_payload, manual_execution_event = _load_json(
         manual_execution_path,
         source_name="manual_execution",
@@ -181,9 +209,26 @@ def main(argv: list[str] | None = None) -> int:
         source_name="manual_review",
         report_missing=bool(args.source_root or args.manual_review_json),
     )
+    freshness_payload, freshness_event = _load_json(
+        freshness_path,
+        source_name="data_freshness",
+        report_missing=bool(args.source_root or args.freshness_json),
+    )
+    same_date_guard_payload, same_date_guard_event = _load_json(
+        same_date_guard_path,
+        source_name="same_date_guard",
+        report_missing=bool(args.source_root or args.same_date_guard_json),
+    )
     source_events = [
         event
-        for event in (daily_ops_event, preflight_event, manual_execution_event, manual_review_event)
+        for event in (
+            daily_ops_event,
+            preflight_event,
+            manual_execution_event,
+            manual_review_event,
+            freshness_event,
+            same_date_guard_event,
+        )
         if event is not None
     ]
     report = build_paper_alert_report(
@@ -195,11 +240,15 @@ def main(argv: list[str] | None = None) -> int:
         preflight=preflight_payload,
         manual_execution=manual_execution_payload,
         manual_review=manual_review_payload,
+        freshness=freshness_payload,
+        same_date_guard=same_date_guard_payload,
         source_events=source_events,
         daily_ops_source_path=daily_ops_path or "",
         preflight_source_path=preflight_path or "",
         manual_execution_source_path=manual_execution_path or "",
         manual_review_source_path=manual_review_path or "",
+        freshness_source_path=freshness_path or "",
+        same_date_guard_source_path=same_date_guard_path or "",
     )
     paths = write_paper_alert_report(report, output_dir=args.output_dir)
     summary = {

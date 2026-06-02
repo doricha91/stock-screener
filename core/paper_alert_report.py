@@ -31,6 +31,8 @@ CATEGORY_DAILY_OPS_PREFLIGHT = "DAILY_OPS_PREFLIGHT"
 CATEGORY_ALERT_SOURCE = "ALERT_SOURCE"
 CATEGORY_MANUAL_EXECUTION = "MANUAL_EXECUTION"
 CATEGORY_MANUAL_REVIEW = "MANUAL_REVIEW"
+CATEGORY_DATA_FRESHNESS = "DATA_FRESHNESS"
+CATEGORY_SAME_DATE_GUARD = "SAME_DATE_GUARD"
 
 
 def normalize_alert_report_date(date_str: str) -> str:
@@ -100,11 +102,15 @@ def build_paper_alert_report(
     preflight: dict[str, Any] | None = None,
     manual_execution: dict[str, Any] | None = None,
     manual_review: dict[str, Any] | None = None,
+    freshness: dict[str, Any] | None = None,
+    same_date_guard: dict[str, Any] | None = None,
     source_events: list[dict[str, Any]] | None = None,
     daily_ops_source_path: str = "",
     preflight_source_path: str = "",
     manual_execution_source_path: str = "",
     manual_review_source_path: str = "",
+    freshness_source_path: str = "",
+    same_date_guard_source_path: str = "",
 ) -> dict[str, Any]:
     resolved_account_id = validate_account_id(account_id)
     resolved_date = normalize_alert_report_date(report_date)
@@ -153,6 +159,24 @@ def build_paper_alert_report(
                 status_date=resolved_date,
                 source_path=manual_review_source_path,
                 suppress_pending_review_alert=daily_ops_review_signal,
+            )
+        )
+    if freshness:
+        items.extend(
+            _items_from_data_freshness(
+                freshness,
+                account_id=resolved_account_id,
+                status_date=resolved_date,
+                source_path=freshness_source_path,
+            )
+        )
+    if same_date_guard:
+        items.extend(
+            _items_from_same_date_guard(
+                same_date_guard,
+                account_id=resolved_account_id,
+                status_date=resolved_date,
+                source_path=same_date_guard_source_path,
             )
         )
     if preflight:
@@ -669,6 +693,230 @@ def _items_from_manual_review(
     return items
 
 
+def _items_from_data_freshness(
+    payload: dict[str, Any],
+    *,
+    account_id: str,
+    status_date: str,
+    source_path: str,
+) -> list[AlertItem]:
+    items: list[AlertItem] = []
+    payload_account = str(payload.get("account_id") or payload.get("Account ID") or account_id)
+    if payload_account != account_id:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_DATA_FRESHNESS,
+                account_id=account_id,
+                status_date=status_date,
+                title="Data freshness account mismatch",
+                message=f"payload account_id={payload_account} does not match requested account_id={account_id}.",
+                recommended_action="Stop and inspect the data freshness source payload.",
+                evidence={"payload_account_id": payload_account},
+                source="data_freshness",
+                source_path=source_path,
+            )
+        )
+    freshness_date = _date_field(payload, "status_date", "target_date", "date")
+    if freshness_date and freshness_date != status_date:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_DATA_FRESHNESS,
+                account_id=account_id,
+                status_date=status_date,
+                title="Data freshness date mismatch",
+                message=f"payload date={freshness_date} does not match report_date={status_date}.",
+                recommended_action="Stop and regenerate the freshness source for the requested date.",
+                evidence={"payload_date": freshness_date},
+                source="data_freshness",
+                source_path=source_path,
+            )
+        )
+
+    status = _upper_field(payload, "freshness_status", "data_freshness_status", "market_data_status", "result")
+    stale_symbols = _safe_int(payload.get("stale_symbols_count", payload.get("stale_count")))
+    stale_sources = _safe_int(payload.get("stale_source_count"))
+    max_stale_days = _safe_int(payload.get("max_stale_days"))
+    threshold = _safe_int(payload.get("stale_threshold_days", payload.get("max_allowed_stale_days")))
+
+    if status in {"FAIL", "FAILED"}:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_DATA_FRESHNESS,
+                account_id=account_id,
+                status_date=status_date,
+                title="Data freshness check failed",
+                message="Data freshness source reported FAIL.",
+                recommended_action="Do not proceed with closeout decisions until freshness failure is resolved.",
+                evidence={"freshness_status": status},
+                source="data_freshness",
+                source_path=source_path,
+            )
+        )
+    elif status == "STALE":
+        severity = SEVERITY_BLOCKING if threshold and max_stale_days > threshold else SEVERITY_NEEDS_REVIEW
+        items.append(
+            AlertItem(
+                severity=severity,
+                category=CATEGORY_DATA_FRESHNESS,
+                account_id=account_id,
+                status_date=status_date,
+                title="Data freshness is stale",
+                message="Data freshness source reported stale data.",
+                recommended_action="Inspect stale data before relying on paper ops outputs.",
+                evidence={
+                    "freshness_status": status,
+                    "max_stale_days": max_stale_days,
+                    "stale_threshold_days": threshold,
+                },
+                source="data_freshness",
+                source_path=source_path,
+            )
+        )
+    elif status in {"WARNING", "PASS_WITH_WARNINGS"}:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_NEEDS_REVIEW,
+                category=CATEGORY_DATA_FRESHNESS,
+                account_id=account_id,
+                status_date=status_date,
+                title="Data freshness returned warning",
+                message="Data freshness source reported warnings.",
+                recommended_action="Review freshness warnings before closeout.",
+                evidence={"freshness_status": status},
+                source="data_freshness",
+                source_path=source_path,
+            )
+        )
+
+    if stale_symbols > 0 or stale_sources > 0:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_NEEDS_REVIEW,
+                category=CATEGORY_DATA_FRESHNESS,
+                account_id=account_id,
+                status_date=status_date,
+                title="Data freshness has stale inputs",
+                message="Data freshness source indicates stale symbols or stale sources.",
+                recommended_action="Inspect stale inputs before treating the day as clean.",
+                evidence={
+                    "stale_symbols_count": stale_symbols,
+                    "stale_source_count": stale_sources,
+                },
+                source="data_freshness",
+                source_path=source_path,
+            )
+        )
+    return items
+
+
+def _items_from_same_date_guard(
+    payload: dict[str, Any],
+    *,
+    account_id: str,
+    status_date: str,
+    source_path: str,
+) -> list[AlertItem]:
+    items: list[AlertItem] = []
+    payload_account = str(payload.get("account_id") or payload.get("Account ID") or account_id)
+    if payload_account != account_id:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_SAME_DATE_GUARD,
+                account_id=account_id,
+                status_date=status_date,
+                title="Same-date guard account mismatch",
+                message=f"payload account_id={payload_account} does not match requested account_id={account_id}.",
+                recommended_action="Stop and inspect the same-date guard source payload.",
+                evidence={"payload_account_id": payload_account},
+                source="same_date_guard",
+                source_path=source_path,
+            )
+        )
+    guard_date = _date_field(payload, "status_date", "target_date", "date")
+    if guard_date and guard_date != status_date:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_SAME_DATE_GUARD,
+                account_id=account_id,
+                status_date=status_date,
+                title="Same-date guard date mismatch",
+                message=f"payload date={guard_date} does not match report_date={status_date}.",
+                recommended_action="Stop and regenerate the same-date guard source for the requested date.",
+                evidence={"payload_date": guard_date},
+                source="same_date_guard",
+                source_path=source_path,
+            )
+        )
+
+    status = _upper_field(payload, "same_date_guard_status", "commit_guard_status", "guard_status")
+    blocked = _bool_field(payload, "blocked")
+    block_reason = str(payload.get("block_reason") or "").strip()
+    commit_exists = _bool_field(payload, "same_date_commit_exists")
+    existing_count = _safe_int(payload.get("existing_commit_count"))
+
+    if status in {"BLOCKED", "FAIL", "FAILED"} or blocked:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_SAME_DATE_GUARD,
+                account_id=account_id,
+                status_date=status_date,
+                title="Same-date commit guard blocked operation",
+                message=block_reason or "Same-date guard source reported blocked/fail.",
+                recommended_action="Do not run commit/append/status sync until same-date guard is resolved.",
+                evidence={
+                    "same_date_guard_status": status,
+                    "blocked": blocked,
+                    "block_reason": block_reason,
+                    "existing_commit_count": existing_count,
+                },
+                source="same_date_guard",
+                source_path=source_path,
+            )
+        )
+    elif commit_exists:
+        severity = SEVERITY_BLOCKING if block_reason else SEVERITY_NEEDS_REVIEW
+        items.append(
+            AlertItem(
+                severity=severity,
+                category=CATEGORY_SAME_DATE_GUARD,
+                account_id=account_id,
+                status_date=status_date,
+                title="Same-date commit already exists",
+                message=block_reason or "Same-date guard source indicates an existing same-date commit.",
+                recommended_action="Confirm whether replace/skip is intended before any writer command.",
+                evidence={
+                    "same_date_commit_exists": commit_exists,
+                    "block_reason": block_reason,
+                    "existing_commit_count": existing_count,
+                },
+                source="same_date_guard",
+                source_path=source_path,
+            )
+        )
+    elif status == "WARNING":
+        items.append(
+            AlertItem(
+                severity=SEVERITY_NEEDS_REVIEW,
+                category=CATEGORY_SAME_DATE_GUARD,
+                account_id=account_id,
+                status_date=status_date,
+                title="Same-date commit guard returned warning",
+                message="Same-date guard source reported WARNING.",
+                recommended_action="Review guard warning before writer commands.",
+                evidence={"same_date_guard_status": status},
+                source="same_date_guard",
+                source_path=source_path,
+            )
+        )
+    return items
+
+
 def _items_from_preflight(
     payload: dict[str, Any],
     *,
@@ -816,6 +1064,34 @@ def _upper_field(payload: dict[str, Any], *keys: str) -> str:
         if key in payload and payload.get(key) not in (None, ""):
             return str(payload.get(key)).upper()
     return ""
+
+
+def _date_field(payload: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        if key not in payload or payload.get(key) in (None, ""):
+            continue
+        try:
+            return normalize_alert_report_date(str(payload.get(key)))
+        except ValueError:
+            return str(payload.get(key)).strip()
+    return ""
+
+
+def _bool_field(payload: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        normalized = str(value).strip().lower()
+        if normalized in {"true", "yes", "y", "1", "blocked"}:
+            return True
+        if normalized in {"false", "no", "n", "0", "none", ""}:
+            return False
+    return False
 
 
 def _preflight_blocking_message(overall: str, schema_result: str, duplicate_classification: str) -> str:

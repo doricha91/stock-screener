@@ -211,6 +211,116 @@ def test_manual_review_pending_rows_becomes_needs_review() -> None:
     assert report["summary"]["needs_review_count"] == 1
 
 
+def test_data_freshness_fail_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        freshness={"account_id": "paper_sandbox", "freshness_status": "FAIL"},
+    )
+    assert report["summary"]["blocking_count"] == 1
+    assert report["items"][0]["category"] == "DATA_FRESHNESS"
+
+
+def test_data_freshness_stale_becomes_needs_review() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        freshness={
+            "account_id": "paper_sandbox",
+            "freshness_status": "STALE",
+            "max_stale_days": 1,
+            "stale_threshold_days": 2,
+        },
+    )
+    assert report["summary"]["needs_review_count"] == 1
+
+
+def test_data_freshness_stale_count_becomes_needs_review() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        freshness={"account_id": "paper_sandbox", "stale_symbols_count": 3},
+    )
+    assert report["summary"]["needs_review_count"] == 1
+
+
+def test_malformed_freshness_source_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        source_events=[{"source": "data_freshness", "status": "malformed"}],
+    )
+    assert report["summary"]["blocking_count"] == 1
+
+
+def test_missing_freshness_source_at_closeout_is_suppressed_info() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        source_events=[{"source": "data_freshness", "status": "missing"}],
+    )
+    assert report["summary"]["info_count"] == 1
+    assert report["summary"]["suppressed_info_count"] == 1
+    assert report["items"][0]["suppressed_in_markdown"] is True
+
+
+def test_same_date_guard_blocked_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        same_date_guard={"account_id": "paper_sandbox", "same_date_guard_status": "BLOCKED"},
+    )
+    assert report["summary"]["blocking_count"] == 1
+    assert report["items"][0]["category"] == "SAME_DATE_GUARD"
+
+
+def test_same_date_guard_blocked_boolean_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        same_date_guard={"account_id": "paper_sandbox", "blocked": True},
+    )
+    assert report["summary"]["blocking_count"] == 1
+
+
+def test_same_date_commit_exists_becomes_needs_review() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        same_date_guard={"account_id": "paper_sandbox", "same_date_commit_exists": True},
+    )
+    assert report["summary"]["needs_review_count"] == 1
+
+
+def test_malformed_same_date_guard_source_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        source_events=[{"source": "same_date_guard", "status": "malformed"}],
+    )
+    assert report["summary"]["blocking_count"] == 1
+
+
+def test_missing_same_date_guard_source_at_closeout_is_suppressed_info() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        source_events=[{"source": "same_date_guard", "status": "missing"}],
+    )
+    assert report["summary"]["info_count"] == 1
+    assert report["summary"]["suppressed_info_count"] == 1
+
+
 def test_daily_ops_review_signal_suppresses_manual_review_duplicate_pending() -> None:
     report = build_paper_alert_report(
         account_id="paper_sandbox",
@@ -481,3 +591,44 @@ def test_cli_explicit_manual_json_overrides_source_root(tmp_path, capsys) -> Non
     output = json.loads(capsys.readouterr().out)
     assert output["summary"]["blocking_count"] == 1
     assert output["summary"]["sync_failed_count"] == 0
+
+
+def test_cli_explicit_freshness_json_overrides_source_root(tmp_path, capsys) -> None:
+    (tmp_path / "daily_ops_status_20260520.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "daily_ops_actual_preflight_20260520.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "manual_execution_20260520.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "manual_review_20260520.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "same_date_guard_20260520.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "data_freshness_20260520.json").write_text(
+        json.dumps({"account_id": "paper_sandbox", "freshness_status": "FAIL"}),
+        encoding="utf-8",
+    )
+    explicit_freshness = tmp_path / "explicit_freshness.json"
+    explicit_freshness.write_text(
+        json.dumps({"account_id": "paper_sandbox", "freshness_status": "WARNING"}),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "alerts"
+
+    exit_code = alert_report_cli_main(
+        [
+            "--account-id",
+            "paper_sandbox",
+            "--date",
+            "2026-05-20",
+            "--phase",
+            "closeout",
+            "--source-root",
+            str(tmp_path),
+            "--freshness-json",
+            str(explicit_freshness),
+            "--output-dir",
+            str(output_dir),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["summary"]["blocking_count"] == 0
+    assert output["summary"]["needs_review_count"] == 1
