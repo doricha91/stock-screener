@@ -126,8 +126,8 @@ Initial mapping:
 | duplicate audit `classification=duplicate_blocker` | `BLOCKING` | Multiple matching External Key rows block actual. |
 | account mismatch between input and requested account | `BLOCKING` | Operator must stop and inspect the source payload. |
 | preflight `overall_status=WARNING` and `actual_intent=true` | `NEEDS_REVIEW` | Operator confirmation required. |
-| expected page id warning and `actual_intent=false` | `INFO` | Informational because no actual export is intended. |
-| duplicate audit `classification=update_candidate` and `actual_intent=false` | `INFO` | One matching row exists; no action without actual intent. |
+| expected page id warning and `actual_intent=false` | `INFO` | Preserved in JSON and suppressed to count/reason in Markdown. |
+| duplicate audit `classification=update_candidate` and `actual_intent=false` | `INFO` | Preserved in JSON and suppressed to count/reason in Markdown. |
 | Daily Ops Status sync failure | `SYNC_FAILED` | Do not rollback local source-of-truth. |
 
 Normal completed states are not expanded into a full status board.
@@ -139,6 +139,7 @@ Normal completed states are not expanded into a full status board.
 - expected page id warnings are not promoted to strong alerts.
 - update candidates remain `INFO`.
 - preflight PASS can be summarized as `INFO`.
+- INFO items are preserved in JSON and suppressed to count/reason in Markdown.
 
 `actual_intent=true`:
 
@@ -176,6 +177,7 @@ Markdown output uses this structure:
 ```
 
 The Markdown report prioritizes exception readability. INFO is summarized and does not become a dashboard replacement.
+BLOCKING, NEEDS_REVIEW, and SYNC_FAILED items are expanded with title/message/action. INFO items are not expanded by default; Markdown shows INFO count, suppressed INFO count, and suppression reasons while preserving details in JSON.
 
 ## 10. Redaction Policy
 
@@ -207,7 +209,10 @@ PAPER18-2 test coverage includes:
 - duplicate blocker to `BLOCKING`
 - `actual_intent=true` WARNING to `NEEDS_REVIEW`
 - `actual_intent=false` expected page id warning to `INFO`
+- `actual_intent=false` INFO suppression metadata
 - update candidate to `INFO`
+- Markdown INFO detail suppression
+- fixture-based CLI smoke through a temporary output directory
 - summary count calculation
 - report schema version
 - Markdown rendering

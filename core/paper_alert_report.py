@@ -63,6 +63,8 @@ class AlertItem:
     external_safe: bool = True
     sendable: bool = False
     redacted: bool = True
+    suppressed_in_markdown: bool = False
+    suppression_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +82,8 @@ class AlertItem:
             "external_safe": self.external_safe,
             "sendable": self.sendable,
             "redacted": self.redacted,
+            "suppressed_in_markdown": self.suppressed_in_markdown,
+            "suppression_reason": self.suppression_reason,
         }
 
 
@@ -163,13 +167,13 @@ def render_paper_alert_report_markdown(report: dict[str, Any]) -> str:
         f"- NEEDS_REVIEW: {summary.get('needs_review_count', 0)}",
         f"- SYNC_FAILED: {summary.get('sync_failed_count', 0)}",
         f"- INFO: {summary.get('info_count', 0)}",
+        f"- Suppressed INFO: {summary.get('suppressed_info_count', 0)}",
         "",
     ]
     for severity, title in (
         (SEVERITY_BLOCKING, "Blocking"),
         (SEVERITY_NEEDS_REVIEW, "Needs Review"),
         (SEVERITY_SYNC_FAILED, "Sync Failed"),
-        (SEVERITY_INFO, "Info / Suppressed Summary"),
     ):
         lines.extend([f"## {title}", ""])
         matching = [item for item in report.get("items", []) if item.get("severity") == severity]
@@ -185,6 +189,24 @@ def render_paper_alert_report_markdown(report: dict[str, Any]) -> str:
                 ]
             )
         lines.append("")
+    info_items = [item for item in report.get("items", []) if item.get("severity") == SEVERITY_INFO]
+    suppressed_reasons: dict[str, int] = {}
+    for item in info_items:
+        reason = str(item.get("suppression_reason") or "not_suppressed")
+        if item.get("suppressed_in_markdown"):
+            suppressed_reasons[reason] = suppressed_reasons.get(reason, 0) + 1
+    lines.extend(
+        [
+            "## Info / Suppressed Summary",
+            "",
+            f"- INFO: {len(info_items)}",
+            f"- Suppressed INFO: {sum(suppressed_reasons.values())}",
+            "- INFO details are preserved in JSON.",
+        ]
+    )
+    for reason, count in sorted(suppressed_reasons.items()):
+        lines.append(f"- Suppression reason `{reason}`: {count}")
+    lines.append("")
     lines.extend(
         [
             "## Source Inputs",
@@ -385,6 +407,8 @@ def _items_from_preflight(
                 evidence=_preflight_evidence(payload),
                 source="daily_ops_actual_preflight",
                 source_path=source_path,
+                suppressed_in_markdown=True,
+                suppression_reason="actual_intent=false" if expected_page_missing else "non_actual_warning",
             )
         ]
 
@@ -401,6 +425,8 @@ def _items_from_preflight(
                 evidence=_preflight_evidence(payload),
                 source="daily_ops_actual_preflight",
                 source_path=source_path,
+                suppressed_in_markdown=True,
+                suppression_reason="actual_intent=false",
             )
         ]
 
@@ -417,6 +443,8 @@ def _items_from_preflight(
                 evidence=_preflight_evidence(payload),
                 source="daily_ops_actual_preflight",
                 source_path=source_path,
+                suppressed_in_markdown=True,
+                suppression_reason="preflight_pass_info",
             )
         ]
     return []
@@ -464,4 +492,9 @@ def _summarize_items(items: list[dict[str, Any]]) -> dict[str, int]:
         "needs_review_count": counts[SEVERITY_NEEDS_REVIEW],
         "sync_failed_count": counts[SEVERITY_SYNC_FAILED],
         "info_count": counts[SEVERITY_INFO],
+        "suppressed_info_count": sum(
+            1
+            for item in items
+            if item.get("severity") == SEVERITY_INFO and item.get("suppressed_in_markdown")
+        ),
     }

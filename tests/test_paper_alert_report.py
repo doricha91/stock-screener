@@ -11,6 +11,7 @@ from core.paper_alert_report import (
     render_paper_alert_report_markdown,
     write_paper_alert_report,
 )
+from scripts.dev.generate_paper_alert_report import main as alert_report_cli_main
 
 
 def _preflight_payload(
@@ -81,7 +82,10 @@ def test_actual_intent_warning_becomes_needs_review() -> None:
 def test_non_actual_expected_page_warning_is_info() -> None:
     report = _build_report()
     assert report["summary"]["info_count"] == 1
+    assert report["summary"]["suppressed_info_count"] == 1
     assert report["items"][0]["severity"] == SEVERITY_INFO
+    assert report["items"][0]["suppressed_in_markdown"] is True
+    assert report["items"][0]["suppression_reason"] == "actual_intent=false"
     assert "actual_intent=false" in report["items"][0]["message"]
 
 
@@ -112,6 +116,7 @@ def test_summary_counts_multiple_sources() -> None:
         "needs_review_count": 0,
         "sync_failed_count": 0,
         "info_count": 1,
+        "suppressed_info_count": 1,
     }
 
 
@@ -122,6 +127,7 @@ def test_report_schema_version_and_markdown() -> None:
     markdown = render_paper_alert_report_markdown(report)
     assert "Paper Ops Exception Report" in markdown
     assert "## Info / Suppressed Summary" in markdown
+    assert "- Suppressed INFO: 1" in markdown
 
 
 def test_write_report_uses_account_output_filenames(tmp_path) -> None:
@@ -148,3 +154,77 @@ def test_delivery_is_not_executed() -> None:
     assert report["delivery"]["delivery_executed"] is False
     assert report["delivery"]["delivery_adapter"] is None
     assert all(item["sendable"] is False for item in report["items"])
+
+
+def test_actual_intent_warning_is_not_suppressed_in_markdown() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        actual_intent=True,
+        preflight=_preflight_payload(),
+    )
+    item = report["items"][0]
+    assert item["severity"] == SEVERITY_NEEDS_REVIEW
+    assert item["suppressed_in_markdown"] is False
+    markdown = render_paper_alert_report_markdown(report)
+    assert "Daily Ops actual preflight returned WARNING" in markdown
+
+
+def test_markdown_suppresses_info_details_but_json_preserves_item() -> None:
+    report = _build_report()
+    assert report["items"][0]["title"] == "Daily Ops actual preflight warning suppressed for non-actual run"
+    markdown = render_paper_alert_report_markdown(report)
+    assert "Daily Ops actual preflight warning suppressed for non-actual run" not in markdown
+    assert "INFO details are preserved in JSON." in markdown
+
+
+def test_blocking_needs_review_and_sync_failed_details_remain_in_markdown() -> None:
+    blocking = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        daily_ops_status={"account_id": "paper_sandbox", "sync_status": "SYNC_FAILED"},
+        preflight=_preflight_payload(overall_status="FAIL"),
+    )
+    needs_review = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        actual_intent=True,
+        preflight=_preflight_payload(),
+    )
+    markdown = render_paper_alert_report_markdown(blocking) + render_paper_alert_report_markdown(needs_review)
+    assert "Daily Ops actual preflight returned blocking result" in markdown
+    assert "Daily Ops actual preflight returned WARNING" in markdown
+    assert "Daily Ops Status sync failed" in markdown
+
+
+def test_cli_smoke_generates_reports_in_tmp_path(tmp_path, capsys) -> None:
+    preflight_path = tmp_path / "preflight.json"
+    preflight_path.write_text(json.dumps(_preflight_payload()), encoding="utf-8")
+
+    exit_code = alert_report_cli_main(
+        [
+            "--account-id",
+            "paper_sandbox",
+            "--date",
+            "2026-05-20",
+            "--phase",
+            "closeout",
+            "--preflight-json",
+            str(preflight_path),
+            "--output-dir",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["delivery_executed"] is False
+    assert output["notion_api_called"] is False
+    assert output["notion_write_export_sync_executed"] is False
+    assert (tmp_path / "paper_alert_report_20260520.json").exists()
+    assert (tmp_path / "paper_alert_report_20260520.md").exists()
+    assert "outputs/paper_accounts" not in output["json_path"].replace("\\", "/")
