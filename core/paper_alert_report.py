@@ -29,6 +29,8 @@ SEVERITY_ORDER = (
 CATEGORY_DAILY_OPS_STATUS = "DAILY_OPS_STATUS"
 CATEGORY_DAILY_OPS_PREFLIGHT = "DAILY_OPS_PREFLIGHT"
 CATEGORY_ALERT_SOURCE = "ALERT_SOURCE"
+CATEGORY_MANUAL_EXECUTION = "MANUAL_EXECUTION"
+CATEGORY_MANUAL_REVIEW = "MANUAL_REVIEW"
 
 
 def normalize_alert_report_date(date_str: str) -> str:
@@ -96,9 +98,13 @@ def build_paper_alert_report(
     actual_intent: bool = False,
     daily_ops_status: dict[str, Any] | None = None,
     preflight: dict[str, Any] | None = None,
+    manual_execution: dict[str, Any] | None = None,
+    manual_review: dict[str, Any] | None = None,
     source_events: list[dict[str, Any]] | None = None,
     daily_ops_source_path: str = "",
     preflight_source_path: str = "",
+    manual_execution_source_path: str = "",
+    manual_review_source_path: str = "",
 ) -> dict[str, Any]:
     resolved_account_id = validate_account_id(account_id)
     resolved_date = normalize_alert_report_date(report_date)
@@ -116,13 +122,37 @@ def build_paper_alert_report(
                 actual_intent=actual_intent,
             )
         )
+    daily_ops_review_signal = False
     if daily_ops_status:
+        daily_items = _items_from_daily_ops_status(
+            daily_ops_status,
+            account_id=resolved_account_id,
+            status_date=resolved_date,
+            source_path=daily_ops_source_path,
+        )
+        daily_ops_review_signal = any(
+            item.category == CATEGORY_DAILY_OPS_STATUS
+            and item.title in {"Daily Ops review is incomplete", "Daily Ops review validation failed"}
+            for item in daily_items
+        )
+        items.extend(daily_items)
+    if manual_execution:
         items.extend(
-            _items_from_daily_ops_status(
-                daily_ops_status,
+            _items_from_manual_execution(
+                manual_execution,
                 account_id=resolved_account_id,
                 status_date=resolved_date,
-                source_path=daily_ops_source_path,
+                source_path=manual_execution_source_path,
+            )
+        )
+    if manual_review:
+        items.extend(
+            _items_from_manual_review(
+                manual_review,
+                account_id=resolved_account_id,
+                status_date=resolved_date,
+                source_path=manual_review_source_path,
+                suppress_pending_review_alert=daily_ops_review_signal,
             )
         )
     if preflight:
@@ -440,6 +470,205 @@ def _items_from_source_event(
     ]
 
 
+def _items_from_manual_execution(
+    payload: dict[str, Any],
+    *,
+    account_id: str,
+    status_date: str,
+    source_path: str,
+) -> list[AlertItem]:
+    items: list[AlertItem] = []
+    payload_account = str(payload.get("account_id") or payload.get("Account ID") or account_id)
+    if payload_account != account_id:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_MANUAL_EXECUTION,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Execution account mismatch",
+                message=f"payload account_id={payload_account} does not match requested account_id={account_id}.",
+                recommended_action="Stop and inspect the Manual Execution source payload.",
+                evidence={"payload_account_id": payload_account},
+                source="manual_execution",
+                source_path=source_path,
+            )
+        )
+
+    preview_result = _upper_field(payload, "execution_preview_result", "preview_result", "validation_result")
+    if preview_result in {"FAIL", "FAILED"}:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_MANUAL_EXECUTION,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Execution preview failed",
+                message="Manual Execution preview reported a failed validation/result.",
+                recommended_action="Do not commit or sync Manual Execution rows until preview issues are resolved.",
+                evidence={"execution_preview_result": preview_result},
+                source="manual_execution",
+                source_path=source_path,
+            )
+        )
+    elif preview_result == "WARNING":
+        items.append(
+            AlertItem(
+                severity=SEVERITY_NEEDS_REVIEW,
+                category=CATEGORY_MANUAL_EXECUTION,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Execution preview returned WARNING",
+                message="Manual Execution preview requires operator review.",
+                recommended_action="Inspect preview warnings before commit/status sync.",
+                evidence={"execution_preview_result": preview_result},
+                source="manual_execution",
+                source_path=source_path,
+            )
+        )
+
+    commit_status = _upper_field(payload, "execution_commit_status", "commit_status")
+    if commit_status in {"MISSING", "NOT_COMMITTED"}:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_NEEDS_REVIEW,
+                category=CATEGORY_MANUAL_EXECUTION,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Execution commit is missing",
+                message="Manual Execution source indicates rows were not committed at closeout.",
+                recommended_action="Confirm whether Manual Execution commit is required for this day.",
+                evidence={"execution_commit_status": commit_status},
+                source="manual_execution",
+                source_path=source_path,
+            )
+        )
+
+    sync_status = _upper_field(payload, "execution_sync_status", "sync_status")
+    if sync_status in {"FAILED", "SYNC_FAILED"}:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_SYNC_FAILED,
+                category=CATEGORY_MANUAL_EXECUTION,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Execution sync failed",
+                message="Manual Execution local source may be valid, but Notion status sync failed.",
+                recommended_action="Do not rollback local source-of-truth; rerun only the documented sync path after preflight.",
+                evidence={"execution_sync_status": sync_status},
+                source="manual_execution",
+                source_path=source_path,
+            )
+        )
+
+    pending_count = _safe_int(payload.get("execution_pending_row_count", payload.get("pending_row_count")))
+    if pending_count > 0:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_NEEDS_REVIEW,
+                category=CATEGORY_MANUAL_EXECUTION,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Execution rows are pending",
+                message="Manual Execution source indicates pending rows remain.",
+                recommended_action="Review pending Manual Execution rows before closeout.",
+                evidence={"execution_pending_row_count": pending_count},
+                source="manual_execution",
+                source_path=source_path,
+            )
+        )
+    return items
+
+
+def _items_from_manual_review(
+    payload: dict[str, Any],
+    *,
+    account_id: str,
+    status_date: str,
+    source_path: str,
+    suppress_pending_review_alert: bool,
+) -> list[AlertItem]:
+    items: list[AlertItem] = []
+    payload_account = str(payload.get("account_id") or payload.get("Account ID") or account_id)
+    if payload_account != account_id:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_MANUAL_REVIEW,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Review account mismatch",
+                message=f"payload account_id={payload_account} does not match requested account_id={account_id}.",
+                recommended_action="Stop and inspect the Manual Review source payload.",
+                evidence={"payload_account_id": payload_account},
+                source="manual_review",
+                source_path=source_path,
+            )
+        )
+
+    validation_result = _upper_field(payload, "review_validation_result", "validation_result")
+    if validation_result in {"FAIL", "FAILED"}:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_BLOCKING,
+                category=CATEGORY_MANUAL_REVIEW,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Review validation failed",
+                message="Manual Review validation reported FAIL.",
+                recommended_action="Resolve review validation issues before closeout.",
+                evidence={"review_validation_result": validation_result},
+                source="manual_review",
+                source_path=source_path,
+            )
+        )
+
+    append_status = _upper_field(payload, "review_append_status", "append_status")
+    pending_count = _safe_int(payload.get("review_pending_row_count", payload.get("pending_row_count")))
+    progress_status = _upper_field(payload, "review_progress_status", "progress_status")
+    if not suppress_pending_review_alert and (
+        append_status in {"MISSING", "NOT_APPENDED"}
+        or pending_count > 0
+        or progress_status in {"PARTIAL", "NOT_STARTED", "READY", "UNKNOWN"}
+    ):
+        items.append(
+            AlertItem(
+                severity=SEVERITY_NEEDS_REVIEW,
+                category=CATEGORY_MANUAL_REVIEW,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Review is incomplete",
+                message="Manual Review source indicates append, progress, or pending row work remains.",
+                recommended_action="Complete Manual Review append/validation before closeout.",
+                evidence={
+                    "review_append_status": append_status,
+                    "review_progress_status": progress_status,
+                    "review_pending_row_count": pending_count,
+                },
+                source="manual_review",
+                source_path=source_path,
+            )
+        )
+
+    sync_status = _upper_field(payload, "review_sync_status", "sync_status")
+    if sync_status in {"FAILED", "SYNC_FAILED"}:
+        items.append(
+            AlertItem(
+                severity=SEVERITY_SYNC_FAILED,
+                category=CATEGORY_MANUAL_REVIEW,
+                account_id=account_id,
+                status_date=status_date,
+                title="Manual Review sync failed",
+                message="Manual Review local source may be valid, but Notion status sync failed.",
+                recommended_action="Do not rollback local source-of-truth; rerun only the documented sync path after preflight.",
+                evidence={"review_sync_status": sync_status},
+                source="manual_review",
+                source_path=source_path,
+            )
+        )
+    return items
+
+
 def _items_from_preflight(
     payload: dict[str, Any],
     *,
@@ -580,6 +809,13 @@ def _safe_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _upper_field(payload: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        if key in payload and payload.get(key) not in (None, ""):
+            return str(payload.get(key)).upper()
+    return ""
 
 
 def _preflight_blocking_message(overall: str, schema_result: str, duplicate_classification: str) -> str:

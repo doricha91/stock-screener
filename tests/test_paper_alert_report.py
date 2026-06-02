@@ -148,6 +148,86 @@ def test_daily_ops_review_partial_becomes_needs_review() -> None:
     assert report["items"][0]["severity"] == SEVERITY_NEEDS_REVIEW
 
 
+def test_manual_execution_preview_fail_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        manual_execution={"account_id": "paper_sandbox", "execution_preview_result": "FAIL"},
+    )
+    assert report["summary"]["blocking_count"] == 1
+    assert report["items"][0]["category"] == "MANUAL_EXECUTION"
+
+
+def test_manual_execution_sync_failed_becomes_sync_failed() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        manual_execution={"account_id": "paper_sandbox", "execution_sync_status": "SYNC_FAILED"},
+    )
+    assert report["summary"]["sync_failed_count"] == 1
+    assert report["items"][0]["severity"] == SEVERITY_SYNC_FAILED
+
+
+def test_manual_execution_pending_rows_becomes_needs_review() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        manual_execution={"account_id": "paper_sandbox", "execution_pending_row_count": 2},
+    )
+    assert report["summary"]["needs_review_count"] == 1
+
+
+def test_manual_review_validation_fail_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        manual_review={"account_id": "paper_sandbox", "review_validation_result": "FAIL"},
+    )
+    assert report["summary"]["blocking_count"] == 1
+    assert report["items"][0]["category"] == "MANUAL_REVIEW"
+
+
+def test_manual_review_sync_failed_becomes_sync_failed() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        manual_review={"account_id": "paper_sandbox", "review_sync_status": "SYNC_FAILED"},
+    )
+    assert report["summary"]["sync_failed_count"] == 1
+
+
+def test_manual_review_pending_rows_becomes_needs_review() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        manual_review={"account_id": "paper_sandbox", "review_pending_row_count": 4},
+    )
+    assert report["summary"]["needs_review_count"] == 1
+
+
+def test_daily_ops_review_signal_suppresses_manual_review_duplicate_pending() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        daily_ops_status={
+            "account_id": "paper_sandbox",
+            "review_progress_status": "PARTIAL",
+            "review_pending_row_count": 4,
+        },
+        manual_review={"account_id": "paper_sandbox", "review_pending_row_count": 4},
+    )
+    titles = [item["title"] for item in report["items"]]
+    assert titles.count("Daily Ops review is incomplete") == 1
+    assert "Manual Review is incomplete" not in titles
+
+
 def test_daily_ops_missing_source_at_closeout_becomes_needs_review() -> None:
     report = build_paper_alert_report(
         account_id="paper_sandbox",
@@ -181,6 +261,22 @@ def test_malformed_source_becomes_blocking() -> None:
     )
     assert report["summary"]["blocking_count"] == 1
     assert report["items"][0]["source_path"] == "<redacted_path>"
+
+
+def test_malformed_manual_source_becomes_blocking() -> None:
+    report = build_paper_alert_report(
+        account_id="paper_sandbox",
+        report_date="2026-05-20",
+        phase="closeout",
+        source_events=[
+            {
+                "source": "manual_execution",
+                "status": "malformed",
+                "message": "manual execution JSON source could not be parsed.",
+            }
+        ],
+    )
+    assert report["summary"]["blocking_count"] == 1
 
 
 def test_preflight_missing_without_actual_intent_is_suppressed_info() -> None:
@@ -348,3 +444,40 @@ def test_cli_source_root_resolves_tmp_path_sources(tmp_path, capsys) -> None:
     assert output["summary"]["sync_failed_count"] == 1
     assert (output_dir / "paper_alert_report_20260520.json").exists()
     assert (output_dir / "paper_alert_report_20260520.md").exists()
+
+
+def test_cli_explicit_manual_json_overrides_source_root(tmp_path, capsys) -> None:
+    source_root_manual = tmp_path / "manual_execution_20260520.json"
+    explicit_manual = tmp_path / "explicit_manual_execution.json"
+    source_root_manual.write_text(
+        json.dumps({"account_id": "paper_sandbox", "execution_sync_status": "SYNC_FAILED"}),
+        encoding="utf-8",
+    )
+    explicit_manual.write_text(
+        json.dumps({"account_id": "paper_sandbox", "execution_preview_result": "FAIL"}),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "alerts"
+
+    exit_code = alert_report_cli_main(
+        [
+            "--account-id",
+            "paper_sandbox",
+            "--date",
+            "2026-05-20",
+            "--phase",
+            "closeout",
+            "--source-root",
+            str(tmp_path),
+            "--manual-execution-json",
+            str(explicit_manual),
+            "--output-dir",
+            str(output_dir),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["summary"]["blocking_count"] == 1
+    assert output["summary"]["sync_failed_count"] == 0
