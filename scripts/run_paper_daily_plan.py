@@ -50,6 +50,9 @@ def run_paper_daily_plan(date_str: str, account_paths: PaperAccountPaths | None 
         config_snapshot_path=config_snapshot_output_path,
         config_snapshot_archive_dir=config_snapshot_archive_path,
         config_snapshot_source="run_paper_daily_plan",
+        account_id=account_paths.account_id if account_paths is not None else "paper_default",
+        run_mode="official",
+        official_run=True,
     )
 
 

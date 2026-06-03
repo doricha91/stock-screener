@@ -1,4 +1,5 @@
 # core/daily_plan_generator.py
+import json
 import os
 import sqlite3
 import sys
@@ -48,6 +49,8 @@ WARNING_HIGHEST_PRICE_INCONSISTENT = "WARNING_HIGHEST_PRICE_INCONSISTENT"
 SEVERITY_LOW = "LOW"
 SEVERITY_MEDIUM = "MEDIUM"
 SEVERITY_HIGH = "HIGH"
+
+DAILY_PLAN_JSON_SCHEMA_VERSION = "paper_daily_plan.v1"
 
 
 def _configure_console_encoding() -> None:
@@ -573,6 +576,79 @@ def resolve_daily_plan_output_path(
     return Path(output_path)
 
 
+def resolve_daily_plan_json_sidecar_path(
+    markdown_output_path: str | Path,
+    json_sidecar_path: str | Path | None = None,
+) -> Path:
+    if json_sidecar_path is not None:
+        return Path(json_sidecar_path)
+    return Path(markdown_output_path).with_suffix(".json")
+
+
+def _json_scalar(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return str(value)
+
+
+def normalize_daily_plan_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = {
+        "symbol": _json_scalar(item.get("symbol")),
+        "action": _json_scalar(item.get("type", item.get("action"))),
+        "quantity": _json_scalar(item.get("shares", item.get("quantity"))),
+        "price": _json_scalar(item.get("price")),
+        "warning": _json_scalar(item.get("warning")),
+        "reason": _json_scalar(item.get("reason")),
+        "note": _json_scalar(item.get("note")),
+    }
+    return normalized
+
+
+def build_daily_plan_json_payload(
+    *,
+    account_id: str,
+    plan_date: str,
+    run_mode: str,
+    official_run: bool,
+    action_items: List[Dict[str, Any]],
+    generated_at: str | None = None,
+    fingerprints: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    return {
+        "schema_version": DAILY_PLAN_JSON_SCHEMA_VERSION,
+        "account_id": account_id,
+        "plan_date": plan_date,
+        "run_mode": run_mode,
+        "official_run": bool(official_run),
+        "generated_at": generated_at or datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "items": [normalize_daily_plan_item(item) for item in action_items],
+        "fingerprints": fingerprints or {},
+    }
+
+
+def write_daily_plan_json_sidecar(
+    *,
+    path: str | Path,
+    payload: Dict[str, Any],
+) -> Path:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return output_path
+
+
 def is_buy_signal_candidate(candidate: Dict[str, Any], score_threshold: float) -> bool:
     """Match the backtest buy_signal gate: score >= threshold and rs_val > 0."""
     score = candidate.get("score")
@@ -718,6 +794,11 @@ def generate_daily_plan(
     config_snapshot_path: str | Path | None = None,
     config_snapshot_archive_dir: str | Path | None = None,
     config_snapshot_source: str = "daily_plan_generator",
+    account_id: str = "paper_default",
+    run_mode: str = "exploratory",
+    official_run: bool = False,
+    json_sidecar_path: str | Path | None = None,
+    write_json_sidecar: bool = True,
 ) -> str:
     """
     일일 판단 산출물(Action Plan)을 생성하고 파일로 저장합니다.
@@ -1222,6 +1303,17 @@ def generate_daily_plan(
     
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_content)
+
+    if write_json_sidecar:
+        sidecar_path = resolve_daily_plan_json_sidecar_path(report_path, json_sidecar_path)
+        sidecar_payload = build_daily_plan_json_payload(
+            account_id=account_id,
+            plan_date=plan_date,
+            run_mode=run_mode,
+            official_run=official_run,
+            action_items=action_items,
+        )
+        write_daily_plan_json_sidecar(path=sidecar_path, payload=sidecar_payload)
 
     if config_snapshot_path is not None and config_snapshot_archive_dir is not None:
         save_paper_config_snapshot(
