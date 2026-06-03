@@ -622,7 +622,14 @@ def build_daily_plan_json_payload(
     action_items: List[Dict[str, Any]],
     generated_at: str | None = None,
     fingerprints: Dict[str, Any] | None = None,
+    config_snapshot_path: str | Path | None = None,
+    state_snapshot_path: str | Path | None = None,
 ) -> Dict[str, Any]:
+    resolved_fingerprints = build_daily_plan_fingerprints(
+        fingerprints=fingerprints,
+        config_snapshot_path=config_snapshot_path,
+        state_snapshot_path=state_snapshot_path,
+    )
     return {
         "schema_version": DAILY_PLAN_JSON_SCHEMA_VERSION,
         "account_id": account_id,
@@ -631,8 +638,24 @@ def build_daily_plan_json_payload(
         "official_run": bool(official_run),
         "generated_at": generated_at or datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "items": [normalize_daily_plan_item(item) for item in action_items],
-        "fingerprints": fingerprints or {},
+        "fingerprints": resolved_fingerprints,
     }
+
+
+def build_daily_plan_fingerprints(
+    *,
+    fingerprints: Dict[str, Any] | None = None,
+    config_snapshot_path: str | Path | None = None,
+    state_snapshot_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"generator_version": DAILY_PLAN_JSON_SCHEMA_VERSION}
+    if config_snapshot_path is not None:
+        result["config_snapshot_path"] = str(config_snapshot_path)
+    if state_snapshot_path is not None:
+        result["state_snapshot_path"] = str(state_snapshot_path)
+    if fingerprints:
+        result.update({key: _json_scalar(value) for key, value in fingerprints.items()})
+    return result
 
 
 def write_daily_plan_json_sidecar(
@@ -799,6 +822,8 @@ def generate_daily_plan(
     official_run: bool = False,
     json_sidecar_path: str | Path | None = None,
     write_json_sidecar: bool = True,
+    sidecar_fingerprints: Dict[str, Any] | None = None,
+    state_snapshot_path: str | Path | None = None,
 ) -> str:
     """
     일일 판단 산출물(Action Plan)을 생성하고 파일로 저장합니다.
@@ -1312,6 +1337,9 @@ def generate_daily_plan(
             run_mode=run_mode,
             official_run=official_run,
             action_items=action_items,
+            fingerprints=sidecar_fingerprints,
+            config_snapshot_path=config_snapshot_path,
+            state_snapshot_path=state_snapshot_path,
         )
         write_daily_plan_json_sidecar(path=sidecar_path, payload=sidecar_payload)
 

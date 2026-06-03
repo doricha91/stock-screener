@@ -176,7 +176,7 @@ def test_daily_plan_json_sidecar_is_written_from_structured_action_items(monkeyp
     assert payload["plan_date"] == "2026-05-20"
     assert payload["run_mode"] == "exploratory"
     assert payload["official_run"] is False
-    assert payload["fingerprints"] == {}
+    assert payload["fingerprints"] == {"generator_version": "paper_daily_plan.v1"}
     assert payload["items"] == [
         {
             "symbol": "AAPL",
@@ -221,6 +221,9 @@ def test_daily_plan_json_sidecar_does_not_replace_config_snapshot(monkeypatch, t
     assert json.loads(snapshot_path.read_text(encoding="utf-8")) == {
         "schema_version": "paper_config_snapshot.test"
     }
+    sidecar_payload = json.loads(output_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert sidecar_payload["fingerprints"]["generator_version"] == "paper_daily_plan.v1"
+    assert sidecar_payload["fingerprints"]["config_snapshot_path"] == str(snapshot_path)
 
 
 def test_run_paper_daily_plan_passes_official_sidecar_metadata(monkeypatch, tmp_path: Path):
@@ -249,3 +252,24 @@ def test_run_paper_daily_plan_passes_official_sidecar_metadata(monkeypatch, tmp_
     assert captured["account_id"] == "paper_sandbox"
     assert captured["run_mode"] == "official"
     assert captured["official_run"] is True
+    assert captured["state_snapshot_path"] == account_paths.current_state_snapshot_path("20260520")
+
+
+def test_daily_plan_json_sidecar_records_state_snapshot_path(monkeypatch, tmp_path: Path):
+    _patch_minimal_daily_plan_dependencies(monkeypatch)
+    output_path = tmp_path / "daily_action_plan_20260520.md"
+    state_snapshot_path = tmp_path / "paper_current_state_20260520.json"
+    monkeypatch.setattr(daily_plan_generator, "format_markdown_report", lambda *args, **kwargs: "# plan\n")
+
+    daily_plan_generator.generate_daily_plan(
+        date_str="2026-05-20",
+        current_state=_empty_state(),
+        output_path=output_path,
+        account_id="paper_sandbox",
+        state_snapshot_path=state_snapshot_path,
+    )
+
+    payload = json.loads(output_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert payload["fingerprints"]["generator_version"] == "paper_daily_plan.v1"
+    assert payload["fingerprints"]["state_snapshot_path"] == str(state_snapshot_path)
+    assert "code_commit_sha" not in payload["fingerprints"]

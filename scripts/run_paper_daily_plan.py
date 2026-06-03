@@ -13,6 +13,7 @@ from core.paper_state_provider import load_official_paper_state_for_daily_plan
 from core.paths import (
     paper_config_snapshot_archive_dir,
     paper_config_snapshot_path,
+    paper_current_state_snapshot_path,
     paper_daily_action_plan_path,
 )
 
@@ -42,6 +43,11 @@ def run_paper_daily_plan(date_str: str, account_paths: PaperAccountPaths | None 
         if account_paths is not None and account_paths.account_id != "paper_default"
         else paper_config_snapshot_archive_dir()
     )
+    state_snapshot_path = (
+        account_paths.current_state_snapshot_path(date_str)
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else paper_current_state_snapshot_path(date_str)
+    )
     return generate_daily_plan(
         date_str=normalized_db_date,
         current_state=paper_state,
@@ -53,6 +59,7 @@ def run_paper_daily_plan(date_str: str, account_paths: PaperAccountPaths | None 
         account_id=account_paths.account_id if account_paths is not None else "paper_default",
         run_mode="official",
         official_run=True,
+        state_snapshot_path=state_snapshot_path,
     )
 
 
