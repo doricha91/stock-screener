@@ -6,6 +6,7 @@ import pandas as pd
 import core.daily_plan_generator as daily_plan_generator
 import scripts.run_paper_daily_plan as run_paper_daily_plan
 from core.paper_account_paths import build_paper_account_paths
+from core.paper_config_hash import PAPER_CONFIG_HASH_POLICY, compute_paper_config_hash
 from core.target_portfolio_state import (
     CurrentPortfolioState,
     RebalanceDecision,
@@ -224,6 +225,10 @@ def test_daily_plan_json_sidecar_does_not_replace_config_snapshot(monkeypatch, t
     sidecar_payload = json.loads(output_path.with_suffix(".json").read_text(encoding="utf-8"))
     assert sidecar_payload["fingerprints"]["generator_version"] == "paper_daily_plan.v1"
     assert sidecar_payload["fingerprints"]["config_snapshot_path"] == str(snapshot_path)
+    assert sidecar_payload["fingerprints"]["config_hash"] == compute_paper_config_hash(
+        {"schema_version": "paper_config_snapshot.test"}
+    )
+    assert sidecar_payload["fingerprints"]["config_hash_policy"] == PAPER_CONFIG_HASH_POLICY
 
 
 def test_run_paper_daily_plan_passes_official_sidecar_metadata(monkeypatch, tmp_path: Path):
@@ -273,3 +278,38 @@ def test_daily_plan_json_sidecar_records_state_snapshot_path(monkeypatch, tmp_pa
     assert payload["fingerprints"]["generator_version"] == "paper_daily_plan.v1"
     assert payload["fingerprints"]["state_snapshot_path"] == str(state_snapshot_path)
     assert "code_commit_sha" not in payload["fingerprints"]
+
+
+def test_daily_plan_json_sidecar_omits_config_hash_when_snapshot_missing(tmp_path: Path):
+    snapshot_path = tmp_path / "missing_config_snapshot.json"
+
+    payload = daily_plan_generator.build_daily_plan_json_payload(
+        account_id="paper_sandbox",
+        plan_date="2026-05-20",
+        run_mode="exploratory",
+        official_run=False,
+        action_items=[],
+        config_snapshot_path=snapshot_path,
+    )
+
+    assert payload["fingerprints"]["config_snapshot_path"] == str(snapshot_path)
+    assert "config_hash" not in payload["fingerprints"]
+    assert "config_hash_policy" not in payload["fingerprints"]
+
+
+def test_daily_plan_json_sidecar_omits_config_hash_when_snapshot_malformed(tmp_path: Path):
+    snapshot_path = tmp_path / "paper_config_snapshot_20260520.json"
+    snapshot_path.write_text("{bad json", encoding="utf-8")
+
+    payload = daily_plan_generator.build_daily_plan_json_payload(
+        account_id="paper_sandbox",
+        plan_date="2026-05-20",
+        run_mode="exploratory",
+        official_run=False,
+        action_items=[],
+        config_snapshot_path=snapshot_path,
+    )
+
+    assert payload["fingerprints"]["config_snapshot_path"] == str(snapshot_path)
+    assert "config_hash" not in payload["fingerprints"]
+    assert "config_hash_policy" not in payload["fingerprints"]

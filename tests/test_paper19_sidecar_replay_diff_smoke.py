@@ -133,6 +133,7 @@ def test_sidecar_fingerprint_changed_warns_with_cause_candidate(tmp_path) -> Non
     assert CATEGORY_STATE_OR_MARKET_FINGERPRINT_DIFF in report["diff_categories"]
     assert any("config_hash changed" in candidate for candidate in report["cause_candidates"])
     assert any("state_snapshot_path changed" in candidate for candidate in report["cause_candidates"])
+    assert all(" because " not in candidate.lower() for candidate in report["cause_candidates"])
 
 
 def test_sidecar_missing_optional_fields_still_compares(tmp_path) -> None:

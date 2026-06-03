@@ -26,6 +26,7 @@ from core.backtest_engine import evaluate_switching_opportunity
 from core.config_factory import make_config, get_regime_config
 from core.decision_core import compute_candidate_score
 from core.paper_config_snapshot import save_paper_config_snapshot
+from core.paper_config_hash import PAPER_CONFIG_HASH_POLICY, compute_paper_config_hash_from_file
 from core.position_sizing import calculate_entry_shares
 from core.universe_manager import load_universe_snapshot_as_of_quarter
 
@@ -651,6 +652,10 @@ def build_daily_plan_fingerprints(
     result: Dict[str, Any] = {"generator_version": DAILY_PLAN_JSON_SCHEMA_VERSION}
     if config_snapshot_path is not None:
         result["config_snapshot_path"] = str(config_snapshot_path)
+        config_hash = compute_paper_config_hash_from_file(config_snapshot_path)
+        if config_hash:
+            result["config_hash"] = config_hash
+            result["config_hash_policy"] = PAPER_CONFIG_HASH_POLICY
     if state_snapshot_path is not None:
         result["state_snapshot_path"] = str(state_snapshot_path)
     if fingerprints:
@@ -1329,6 +1334,18 @@ def generate_daily_plan(
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_content)
 
+    if config_snapshot_path is not None and config_snapshot_archive_dir is not None:
+        save_paper_config_snapshot(
+            plan_date=plan_date,
+            market_state=m_state,
+            final_config=merged_config,
+            output_path=Path(config_snapshot_path),
+            archive_dir=Path(config_snapshot_archive_dir),
+            source=config_snapshot_source,
+            market_state_write_log=market_state_write_log,
+            universe_metadata=universe_metadata,
+        )
+
     if write_json_sidecar:
         sidecar_path = resolve_daily_plan_json_sidecar_path(report_path, json_sidecar_path)
         sidecar_payload = build_daily_plan_json_payload(
@@ -1342,18 +1359,6 @@ def generate_daily_plan(
             state_snapshot_path=state_snapshot_path,
         )
         write_daily_plan_json_sidecar(path=sidecar_path, payload=sidecar_payload)
-
-    if config_snapshot_path is not None and config_snapshot_archive_dir is not None:
-        save_paper_config_snapshot(
-            plan_date=plan_date,
-            market_state=m_state,
-            final_config=merged_config,
-            output_path=Path(config_snapshot_path),
-            archive_dir=Path(config_snapshot_archive_dir),
-            source=config_snapshot_source,
-            market_state_write_log=market_state_write_log,
-            universe_metadata=universe_metadata,
-        )
         
     print(f"[OK] Action Plan saved to: {report_path}")
     return str(report_path)
