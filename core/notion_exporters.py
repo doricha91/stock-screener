@@ -35,6 +35,7 @@ from core.notion_client import (
 )
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
+from core.paper_account_paths import build_paper_account_paths
 from core.paths import (
     paper_account_snapshot_path,
     paper_daily_action_plan_path,
@@ -65,6 +66,36 @@ def _relative_to_project(path: Path) -> str:
         return str(path.relative_to(Path.cwd()))
     except ValueError:
         return str(path)
+
+
+def _normalize_export_date(date_str: str) -> str:
+    text = str(date_str).strip()
+    if not text:
+        raise NotionExportError("Date must not be blank.")
+    compact = text.replace("-", "")
+    if len(compact) != 8 or not compact.isdigit():
+        raise NotionExportError(f"Invalid date: {date_str}")
+    return f"{compact[:4]}-{compact[4:6]}-{compact[6:]}"
+
+
+def _compact_date(date_str: str) -> str:
+    return _normalize_export_date(date_str).replace("-", "")
+
+
+def _resolve_daily_plan_export_root(
+    *,
+    account_id: str,
+    paper_root: Path | None,
+) -> Path:
+    if paper_root is not None:
+        return Path(paper_root)
+    if account_id == "paper_default":
+        return paper_daily_action_plan_path("1970-01-01").parent
+    return build_paper_account_paths(
+        account_id,
+        allow_legacy_default=False,
+        create=False,
+    ).root
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -815,10 +846,23 @@ def _latest_paper_daily_plan_artifacts(root: Path) -> tuple[Path, Path]:
     if not candidates:
         raise NotionExportError(
             "No daily plan artifacts found. Expected daily_action_plan_YYYYMMDD.md with matching "
-            "config_snapshots/paper_config_snapshot_YYYYMMDD.json under outputs/paper_test."
+            f"config_snapshots/paper_config_snapshot_YYYYMMDD.json under {root}."
         )
 
     _, markdown_path, config_snapshot_path = max(candidates, key=lambda item: item[0])
+    return markdown_path, config_snapshot_path
+
+
+def _paper_daily_plan_artifacts_for_date(root: Path, date_str: str) -> tuple[Path, Path]:
+    compact_date = _compact_date(date_str)
+    markdown_path = root / f"daily_action_plan_{compact_date}.md"
+    config_snapshot_path = root / "config_snapshots" / f"paper_config_snapshot_{compact_date}.json"
+    if not markdown_path.exists() or not config_snapshot_path.exists():
+        raise NotionExportError(
+            "No daily plan artifacts found for "
+            f"{_normalize_export_date(date_str)} under {root}. Expected {markdown_path.name} "
+            f"with matching config_snapshots/{config_snapshot_path.name}."
+        )
     return markdown_path, config_snapshot_path
 
 
@@ -1103,11 +1147,18 @@ def export_daily_plan_to_notion(
     mapping_root: dict[str, dict[str, str]],
     account_id: str | None = None,
     paper_root: Path | None = None,
+    plan_date: str | None = None,
     dry_run: bool = False,
 ) -> ExportResult:
     resolved_account_id = normalize_notion_account_id(account_id)
-    root = Path(paper_root) if paper_root is not None else paper_daily_action_plan_path("1970-01-01").parent
-    markdown_path, config_snapshot_path = _latest_paper_daily_plan_artifacts(root)
+    root = _resolve_daily_plan_export_root(
+        account_id=resolved_account_id,
+        paper_root=paper_root,
+    )
+    if plan_date:
+        markdown_path, config_snapshot_path = _paper_daily_plan_artifacts_for_date(root, plan_date)
+    else:
+        markdown_path, config_snapshot_path = _latest_paper_daily_plan_artifacts(root)
     summary = summarize_daily_plan_artifacts(
         markdown_path=markdown_path,
         config_snapshot_path=config_snapshot_path,
@@ -1215,6 +1266,7 @@ def export_selected_paper_reports_to_notion(
     export_daily_plan: bool = False,
     export_daily_review_summary: bool = False,
     review_date: str | None = None,
+    daily_plan_date: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> list[ExportResult]:
@@ -1230,6 +1282,7 @@ def export_selected_paper_reports_to_notion(
                 mapping_root=mapping_root,
                 account_id=account_id,
                 paper_root=paper_root,
+                plan_date=daily_plan_date,
                 dry_run=dry_run,
             )
         )

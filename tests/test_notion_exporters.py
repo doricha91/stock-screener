@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import core.notion_exporters as notion_exporters
 from core.notion_exporters import (
     NotionExportError,
     build_account_snapshot_external_key,
@@ -108,12 +110,13 @@ def _seed_account(root: Path) -> None:
     )
 
 
-def _seed_daily_plan(root: Path) -> None:
+def _seed_daily_plan(root: Path, *, date: str = "2026-05-20", symbol: str = "ABC") -> None:
+    compact_date = date.replace("-", "")
     _write(
-        root / "daily_action_plan_20260520.md",
+        root / f"daily_action_plan_{compact_date}.md",
         "\n".join(
             [
-                "# Daily Action Plan [2026-05-20]",
+                f"# Daily Action Plan [{date}]",
                 "",
                 "## 1. Market Summary",
                 "- Current Regime: `BULL`",
@@ -122,7 +125,7 @@ def _seed_daily_plan(root: Path) -> None:
                 "## 4. Confirmed Trades",
                 "| Type | Symbol | Shares | Ref Price | Reason |",
                 "| :--- | :--- | :--- | :--- | :--- |",
-                "| BUY | **ABC** | 10 | $12.34 | ENTRY_SIGNAL |",
+                f"| BUY | **{symbol}** | 10 | $12.34 | ENTRY_SIGNAL |",
                 "| SELL | **XYZ** | 5 | $20.00 | EXIT_SIGNAL |",
                 "",
                 "## 4-0. Review Items",
@@ -144,11 +147,11 @@ def _seed_daily_plan(root: Path) -> None:
         ),
     )
     _write(
-        root / "config_snapshots" / "paper_config_snapshot_20260520.json",
+        root / "config_snapshots" / f"paper_config_snapshot_{compact_date}.json",
         json.dumps(
             {
                 "schema_version": 1,
-                "plan_date": "2026-05-20",
+                "plan_date": date,
                 "market_state": {"regime": "BULL"},
                 "market_status_summary": {"regime": "BULL"},
             }
@@ -794,6 +797,84 @@ def test_non_default_account_has_no_legacy_fallback(tmp_path):
     assert result.external_key == "daily_plan:paper_growth:2026-05-20"
     assert result.legacy_external_key is None
     assert result.legacy_fallback_used is False
+
+
+def test_non_default_daily_plan_export_uses_account_root_not_default_root(tmp_path, monkeypatch):
+    default_root = tmp_path / "paper_test"
+    account_root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan(default_root, date="2026-05-20", symbol="OLD")
+    _seed_daily_plan(account_root, date="2026-06-05", symbol="MAA")
+
+    monkeypatch.setattr(
+        notion_exporters,
+        "paper_daily_action_plan_path",
+        lambda date_str: default_root / f"daily_action_plan_{str(date_str).replace('-', '')}.md",
+    )
+    monkeypatch.setattr(
+        notion_exporters,
+        "build_paper_account_paths",
+        lambda *args, **kwargs: SimpleNamespace(root=account_root),
+    )
+
+    result = export_daily_plan_to_notion(
+        client=None,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        dry_run=True,
+    )
+
+    assert result.account_id == "paper_pilot_202606"
+    assert result.external_key == "daily_plan:paper_pilot_202606:2026-06-05"
+    assert "paper_pilot_202606" in result.source_path
+    assert "paper_test" not in result.source_path
+    assert result.source_path.endswith("paper_config_snapshot_20260605.json")
+
+
+def test_non_default_daily_plan_export_date_uses_requested_account_artifact(tmp_path):
+    account_root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan(account_root, date="2026-06-04", symbol="OLD")
+    _seed_daily_plan(account_root, date="2026-06-05", symbol="MAA")
+
+    result = export_daily_plan_to_notion(
+        client=None,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        paper_root=account_root,
+        plan_date="2026-06-05",
+        dry_run=True,
+    )
+
+    assert result.external_key == "daily_plan:paper_pilot_202606:2026-06-05"
+    assert result.source_path.endswith("paper_config_snapshot_20260605.json")
+
+
+def test_non_default_daily_plan_export_missing_account_artifact_does_not_fallback(tmp_path, monkeypatch):
+    default_root = tmp_path / "paper_test"
+    account_root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan(default_root, date="2026-05-20", symbol="OLD")
+    account_root.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        notion_exporters,
+        "paper_daily_action_plan_path",
+        lambda date_str: default_root / f"daily_action_plan_{str(date_str).replace('-', '')}.md",
+    )
+    monkeypatch.setattr(
+        notion_exporters,
+        "build_paper_account_paths",
+        lambda *args, **kwargs: SimpleNamespace(root=account_root),
+    )
+
+    with pytest.raises(NotionExportError, match="No daily plan artifacts found"):
+        export_daily_plan_to_notion(
+            client=None,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_pilot_202606",
+            dry_run=True,
+        )
 
 
 def test_paper_default_legacy_page_can_be_reused(tmp_path):

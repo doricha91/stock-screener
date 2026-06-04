@@ -52,6 +52,7 @@ def test_cli_passes_account_id_and_prints_account_aware_summary(monkeypatch, cap
     assert json_payload[0]["external_key"] == "daily_plan:paper_default:2026-05-20"
     assert json_payload[0]["legacy_external_key"] == "daily_plan:2026-05-20"
     assert json_payload[0]["legacy_fallback_used"] is False
+    assert captured["daily_plan_date"] is None
 
 
 def test_cli_defaults_account_id_to_paper_default(monkeypatch):
@@ -79,3 +80,28 @@ def test_cli_defaults_account_id_to_paper_default(monkeypatch):
 
     assert rc == 0
     assert captured["account_id"] is None
+
+
+def test_cli_passes_date_to_daily_plan_export(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(export_paper_to_notion, "load_notion_settings", lambda allow_missing=True: object())
+    monkeypatch.setattr(export_paper_to_notion, "load_notion_property_mapping", lambda: {"daily_plans": {}})
+
+    def fake_export_selected_paper_reports_to_notion(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        export_paper_to_notion,
+        "export_selected_paper_reports_to_notion",
+        fake_export_selected_paper_reports_to_notion,
+    )
+
+    rc = export_paper_to_notion.main(
+        ["--daily-plan", "--account-id", "paper_pilot_202606", "--date", "2026-06-05", "--dry-run"]
+    )
+
+    assert rc == 0
+    assert captured["account_id"] == "paper_pilot_202606"
+    assert captured["daily_plan_date"] == "2026-06-05"

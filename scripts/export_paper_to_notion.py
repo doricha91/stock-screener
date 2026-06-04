@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--daily-plan", action="store_true", help="Export latest daily plan")
     parser.add_argument("--daily-review-summary", action="store_true", help="Export daily review summary")
     parser.add_argument("--daily-ops-status", action="store_true", help="Build Daily Ops Status Notion payload summary")
-    parser.add_argument("--date", help="Review date for --daily-review-summary in YYYY-MM-DD format")
+    parser.add_argument("--date", help="Date for --daily-plan or --daily-review-summary in YYYY-MM-DD format")
     parser.add_argument("--all", action="store_true", help="Export all supported targets")
     parser.add_argument("--dry-run", action="store_true", help="Build payload summary without Notion write")
     parser.add_argument("--confirm-actual", action="store_true", help="Confirm actual Notion write for guarded targets")
@@ -135,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         export_daily_plan=export_daily_plan,
         export_daily_review_summary=export_daily_review_summary,
         review_date=args.date,
+        daily_plan_date=args.date if export_daily_plan else None,
         dry_run=args.dry_run,
     )
     summary = [
