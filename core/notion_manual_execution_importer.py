@@ -14,6 +14,7 @@ from core.notion_account_keys import (
 )
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
+from core.paper_account_paths import PaperAccountPaths
 from core.paper_execution_log import build_paper_trade_id
 from core.paths import (
     paper_account_snapshot_path,
@@ -132,10 +133,13 @@ def build_manual_execution_preview(
     mapping_root: dict[str, dict[str, str]],
     execution_date: str,
     account_id: str | None = None,
+    account_paths: PaperAccountPaths | None = None,
     env: dict[str, str] | None = None,
     reports_dir: Path | None = None,
 ) -> ManualExecutionPreview:
     resolved_account_id = normalize_notion_account_id(account_id)
+    if account_paths is not None and account_paths.account_id != resolved_account_id:
+        raise ManualExecutionImportError("Provided account_paths.account_id does not match requested account_id.")
     mapping = get_mapping_section(mapping_root, "manual_executions")
     data_source_id = get_notion_data_source_id(
         settings,
@@ -155,9 +159,9 @@ def build_manual_execution_preview(
         mapping=mapping,
         account_id=resolved_account_id,
     )
-    existing_trade_ids = _load_existing_trade_ids()
-    available_cash = _load_latest_cash_balance()
-    holdings = _load_latest_position_shares()
+    existing_trade_ids = _load_existing_trade_ids(account_paths=account_paths)
+    available_cash = _load_latest_cash_balance(account_paths=account_paths)
+    holdings = _load_latest_position_shares(account_paths=account_paths)
     projected_position_impact: dict[str, int] = {}
 
     for candidate in candidates:
@@ -208,7 +212,7 @@ def build_manual_execution_preview(
                 running_holdings[candidate.symbol] = running_holdings.get(candidate.symbol, 0) + candidate.quantity
 
     commit_allowed = _derive_commit_allowed(candidates)
-    output_dir = reports_dir if reports_dir is not None else paper_reports_dir()
+    output_dir = _resolve_preview_reports_dir(account_paths=account_paths, reports_dir=reports_dir)
     compact_date = execution_date.replace("-", "")
     json_path = output_dir / f"manual_execution_import_preview_{compact_date}.json"
     markdown_path = output_dir / f"manual_execution_import_preview_{compact_date}.md"
@@ -489,8 +493,22 @@ def _build_prospective_trade_id(candidate: ManualExecutionCandidate) -> str:
     )
 
 
-def _load_existing_trade_ids() -> set[str]:
-    path = paper_account_snapshot_path().parent / "paper_execution_log.csv"
+def _resolve_preview_reports_dir(
+    *,
+    account_paths: PaperAccountPaths | None = None,
+    reports_dir: Path | None = None,
+) -> Path:
+    if account_paths is not None and account_paths.account_id != "paper_default":
+        return account_paths.reports_dir
+    return reports_dir if reports_dir is not None else paper_reports_dir()
+
+
+def _load_existing_trade_ids(*, account_paths: PaperAccountPaths | None = None) -> set[str]:
+    path = (
+        account_paths.execution_log_path
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else paper_account_snapshot_path().parent / "paper_execution_log.csv"
+    )
     if not path.exists():
         return set()
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -501,16 +519,28 @@ def _load_existing_trade_ids() -> set[str]:
         }
 
 
-def _load_latest_cash_balance() -> float:
-    rows = _read_csv_rows(paper_account_snapshot_path())
+def _load_latest_cash_balance(*, account_paths: PaperAccountPaths | None = None) -> float:
+    path = (
+        account_paths.account_snapshot_path
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else paper_account_snapshot_path()
+    )
+    rows = _read_csv_rows(path)
     if not rows:
-        raise ManualExecutionImportError("paper_account_snapshot.csv has no rows.")
+        raise ManualExecutionImportError(f"{path.name} has no rows.")
     latest_row = max(rows, key=lambda row: row.get("snapshot_date", ""))
     return float(latest_row.get("cash") or 0.0)
 
 
-def _load_latest_position_shares() -> dict[str, int]:
-    rows = _read_csv_rows(paper_position_snapshot_path())
+def _load_latest_position_shares(*, account_paths: PaperAccountPaths | None = None) -> dict[str, int]:
+    path = (
+        account_paths.position_snapshot_path
+        if account_paths is not None and account_paths.account_id != "paper_default"
+        else paper_position_snapshot_path()
+    )
+    if not path.exists():
+        return {}
+    rows = _read_csv_rows(path)
     if not rows:
         return {}
     latest_date = max(row.get("snapshot_date", "") for row in rows)

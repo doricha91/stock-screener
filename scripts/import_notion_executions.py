@@ -59,6 +59,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Select one mode: --preview or --commit.")
 
     if args.preview:
+        account_paths = (
+            None
+            if resolved_account_id == "paper_default"
+            else build_paper_account_paths(resolved_account_id, create=True)
+        )
         settings = load_notion_settings(allow_missing=True)
         mapping = load_notion_property_mapping()
         client = NotionClient(get_notion_token(settings))
@@ -69,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
                 mapping_root=mapping,
                 execution_date=args.date,
                 account_id=resolved_account_id,
+                account_paths=account_paths,
             )
         except (ManualExecutionImportError, NotionAPIError, NotionSettingsError) as exc:
             if args.json:

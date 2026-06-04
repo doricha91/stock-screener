@@ -8,12 +8,15 @@ import pytest
 import core.notion_manual_execution_importer as importer
 from core.notion_manual_execution_importer import (
     FAIL,
+    ManualExecutionImportError,
     WARNING,
     build_manual_execution_preview,
     fetch_manual_execution_pages,
     normalize_manual_execution_pages,
 )
 from core.notion_settings import NotionSettings
+from core.paper_account_paths import PaperAccountPaths
+from core.paper_execution_log import build_paper_trade_id
 from scripts import import_notion_executions as execution_script
 
 
@@ -137,6 +140,23 @@ def _seed_ledgers(tmp_path: Path) -> None:
     _write(
         tmp_path / "paper_execution_log.csv",
         "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n",
+    )
+
+
+def _account_paths(account_id: str, root: Path) -> PaperAccountPaths:
+    return PaperAccountPaths(
+        account_id=account_id,
+        root=root,
+        legacy_default_used=False,
+        execution_log_path=root / "paper_execution_log.csv",
+        account_snapshot_path=root / "paper_account_snapshot.csv",
+        position_snapshot_path=root / "paper_position_snapshot.csv",
+        reports_dir=root / "reports",
+        reviews_dir=root / "reviews",
+        config_snapshots_dir=root / "config_snapshots",
+        config_snapshot_archive_dir=root / "archive" / "config_snapshots",
+        replay_diff_dir=root / "replay_diff",
+        replay_diff_config_snapshot_archive_dir=root / "replay_diff" / "archive" / "config_snapshots",
     )
 
 
@@ -386,6 +406,156 @@ def test_account_aware_canonical_key_is_generated_for_non_default():
     assert candidates[0].legacy_key_compatible is False
 
 
+def test_non_default_preview_uses_account_cash_reports_and_trade_ids(monkeypatch, tmp_path):
+    default_root = tmp_path / "paper_test"
+    account_root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_ledgers(default_root)
+    account_paths = _account_paths("paper_pilot_202606", account_root)
+    _write(
+        account_paths.account_snapshot_path,
+        "snapshot_date,cash\n"
+        "2026-06-05,100000.00\n",
+    )
+    _write(
+        account_paths.position_snapshot_path,
+        "snapshot_date,symbol,shares\n",
+    )
+    _write(
+        account_paths.execution_log_path,
+        "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n",
+    )
+    duplicate_default_trade_id = build_paper_trade_id(
+        {
+            "date": "2026-06-05",
+            "symbol": "MAA",
+            "side": "BUY",
+            "shares": 73,
+            "price": 135.37,
+            "reason": importer.MANUAL_EXECUTION_REASON,
+            "source": importer.MANUAL_EXECUTION_SOURCE,
+        }
+    )
+    _write(
+        default_root / "paper_execution_log.csv",
+        "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n"
+        f"{duplicate_default_trade_id},2026-06-05,MANUAL,MAA,BUY,73,135.37,9882.01,notion_manual_execution,READY,manual_execution_import,,73,135.37,2026-06-05T00:00:00\n",
+    )
+    monkeypatch.setattr(importer, "paper_account_snapshot_path", lambda: default_root / "paper_account_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_position_snapshot_path", lambda: default_root / "paper_position_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: default_root / "reports")
+
+    client = FakeClient(
+        [
+            _page(
+                page_id="page-1",
+                execution_date="2026-06-05",
+                symbol="MAA",
+                side="BUY",
+                quantity=73,
+                actual_price=135.37,
+                commission=0.0,
+                currency="USD",
+                broker="PAPER",
+                plan_date="2026-06-05",
+                linked_daily_plan_key="daily_plan:paper_pilot_202606:2026-06-05",
+                account_id="paper_pilot_202606",
+            ),
+            _page(
+                page_id="page-2",
+                execution_date="2026-06-05",
+                symbol="SW",
+                side="BUY",
+                quantity=232,
+                actual_price=42.92,
+                commission=0.0,
+                currency="USD",
+                broker="PAPER",
+                plan_date="2026-06-05",
+                linked_daily_plan_key="daily_plan:paper_pilot_202606:2026-06-05",
+                account_id="paper_pilot_202606",
+            ),
+        ]
+    )
+
+    preview = build_manual_execution_preview(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping_root(),
+        execution_date="2026-06-05",
+        account_id="paper_pilot_202606",
+        account_paths=account_paths,
+    )
+
+    assert preview.account_id == "paper_pilot_202606"
+    assert preview.projected_cash_start == 100000.0
+    assert preview.projected_cash_impact == pytest.approx(-19839.45)
+    assert preview.projected_cash_end == pytest.approx(80160.55)
+    assert preview.projected_position_impact == {"MAA": 73, "SW": 232}
+    assert preview.fail_count == 0
+    assert Path(preview.json_path).is_relative_to(account_paths.reports_dir.resolve())
+    assert Path(preview.markdown_path).is_relative_to(account_paths.reports_dir.resolve())
+
+
+def test_non_default_preview_rejects_mismatched_account_paths(tmp_path):
+    account_paths = _account_paths("paper_other", tmp_path / "paper_other")
+    with pytest.raises(ManualExecutionImportError, match="account_paths.account_id"):
+        build_manual_execution_preview(
+            client=FakeClient([]),
+            settings=_settings(),
+            mapping_root=_mapping_root(),
+            execution_date="2026-06-05",
+            account_id="paper_pilot_202606",
+            account_paths=account_paths,
+        )
+
+
+def test_cli_preview_passes_non_default_account_paths(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    account_paths = _account_paths("paper_pilot_202606", tmp_path / "paper_pilot_202606")
+
+    class Preview:
+        account_id = "paper_pilot_202606"
+        execution_date = "2026-06-05"
+        candidate_count = 0
+        commit_allowed = "true"
+        json_path = str(account_paths.reports_dir / "manual_execution_import_preview_20260605.json")
+
+        def to_dict(self):
+            return {
+                "account_id": self.account_id,
+                "execution_date": self.execution_date,
+                "candidate_count": self.candidate_count,
+                "json_path": self.json_path,
+            }
+
+    monkeypatch.setattr(execution_script, "load_notion_settings", lambda allow_missing=True: object())
+    monkeypatch.setattr(execution_script, "load_notion_property_mapping", lambda: _mapping_root())
+    monkeypatch.setattr(execution_script, "get_notion_token", lambda settings: "token")
+    monkeypatch.setattr(execution_script, "NotionClient", lambda token: object())
+
+    def fake_build_paper_account_paths(account_id, *, create=False):
+        captured["path_account_id"] = account_id
+        captured["path_create"] = create
+        return account_paths
+
+    def fake_build_manual_execution_preview(**kwargs):
+        captured.update(kwargs)
+        return Preview()
+
+    monkeypatch.setattr(execution_script, "build_paper_account_paths", fake_build_paper_account_paths)
+    monkeypatch.setattr(execution_script, "build_manual_execution_preview", fake_build_manual_execution_preview)
+
+    rc = execution_script.main(
+        ["--date", "2026-06-05", "--account-id", "paper_pilot_202606", "--preview", "--json"]
+    )
+
+    assert rc == 0
+    assert captured["path_account_id"] == "paper_pilot_202606"
+    assert captured["path_create"] is True
+    assert captured["account_id"] == "paper_pilot_202606"
+    assert captured["account_paths"] == account_paths
+
+
 def test_invalid_account_id_fails_for_preview(monkeypatch, tmp_path):
     _seed_ledgers(tmp_path)
     monkeypatch.setattr(importer, "paper_account_snapshot_path", lambda: tmp_path / "paper_account_snapshot.csv")
@@ -401,7 +571,7 @@ def test_invalid_account_id_fails_for_preview(monkeypatch, tmp_path):
         )
 
 
-def test_cli_blocks_non_default_commit(capsys):
+def test_cli_reports_missing_preview_json_for_non_default_commit(capsys):
     exit_code = execution_script.main(
         [
             "--date",
@@ -416,4 +586,4 @@ def test_cli_blocks_non_default_commit(capsys):
     )
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "blocked" in captured.out.lower()
+    assert "preview json not found" in captured.out.lower()
