@@ -87,10 +87,21 @@ generated_at
 run_id
 output path
 report path
+producer_source / provenance-only naming
 other non-semantic artifact metadata
 ```
 
 This is usually not an operational stop condition, but operators should confirm no action, symbol, quantity, price, warning, reason, or note difference exists.
+
+PAPER20-7 example:
+
+```text
+overall_status: PASS_WITH_METADATA_DIFF
+diff_categories: METADATA_DIFF
+cause_candidates: []
+config_hash diff: none
+classification: read-only replay smoke success with metadata-only differences
+```
 
 ## 6. WARNING Interpretation
 
@@ -125,7 +136,7 @@ For `config_hash` WARNING:
 1. Check Daily Plan field diffs first.
 2. If action/symbol/quantity changed, treat as a serious replay stability issue.
 3. If action/symbol/quantity did not change, compare normalized config diff.
-4. Check whether the diff is generated_at, output_dir, run_id, path, source, or other provenance metadata.
+4. Check whether the diff is generated_at, output_dir, run_id, path, source, producer_source, or other provenance metadata.
 5. If only volatile/provenance metadata differs, treat as a false-warning candidate.
 6. If semantic config differs, split a follow-up MFU for config/replay review.
 7. Do not claim the config difference caused the plan difference unless separately proven.
@@ -139,6 +150,16 @@ Daily Plan field diffs: none
 normalized config diff: source only
 classification: false warning
 follow-up: consider excluding source from paper_config_hash.v1 normalization
+```
+
+PAPER20-7 resolution:
+
+```text
+source was clarified as producer/provenance metadata.
+new config snapshots use producer_source.
+source and producer_source are excluded from paper_config_hash.v1.
+strategy_source, universe_source, and market_data_source remain semantic hash-significant candidates.
+controlled replay smoke result became PASS_WITH_METADATA_DIFF with no config_hash cause candidate.
 ```
 
 ## 8. FAIL Interpretation
@@ -174,10 +195,12 @@ Do not:
 
 ```text
 interpret replay PASS as actual approval
+interpret PASS_WITH_METADATA_DIFF as actual/export/sync approval
 interpret config_hash WARNING as confirmed root cause
 ignore action/quantity/symbol FAIL
 modify generated smoke artifacts and rerun diff as if official
 stage outputs/tmp* artifacts
+stage generated replay smoke artifacts
 run Notion write/export/sync from replay triage
 run Manual Execution/Review commit or append from replay triage
 change strategy logic during replay triage
@@ -199,6 +222,9 @@ WARNING with no action/symbol/quantity diff:
 
 config_hash WARNING from provenance metadata:
   classify as false-warning candidate and consider hash policy hardening
+
+config_hash WARNING from source/producer_source only:
+  should not occur after PAPER20-7; verify artifact version and hash normalization
 
 config_hash WARNING from semantic config:
   split config/replay review before operational use
