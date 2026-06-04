@@ -8,6 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_paths import PaperAccountPaths
 from core.paths import (
     FRONT_TEST_DIR,
     PAPER_TEST_DIR,
@@ -55,28 +56,49 @@ class PaperPreflightPaths:
     review_template_csv: Path
     validation_report: Path
     validation_issues_csv: Path
+    current_state_snapshot: Path | None = None
+    account_paths: PaperAccountPaths | None = None
 
 
-def build_paper_preflight_paths(date_str: str | None = None) -> PaperPreflightPaths:
-    reports_dir = PAPER_TEST_DIR / "reports"
-    reviews_dir = PAPER_TEST_DIR / "reviews"
+def build_paper_preflight_paths(
+    date_str: str | None = None,
+    *,
+    account_paths: PaperAccountPaths | None = None,
+) -> PaperPreflightPaths:
     clean_date = _normalize_date(date_str) if date_str else None
+    paper_root = account_paths.root if account_paths is not None else PAPER_TEST_DIR
+    reports_dir = account_paths.reports_dir if account_paths is not None else PAPER_TEST_DIR / "reports"
+    reviews_dir = account_paths.reviews_dir if account_paths is not None else PAPER_TEST_DIR / "reviews"
     return PaperPreflightPaths(
-        paper_root=PAPER_TEST_DIR,
+        paper_root=paper_root,
         front_root=FRONT_TEST_DIR,
         reports_dir=reports_dir,
         reviews_dir=reviews_dir,
         market_db=Path(market_db_path()),
-        execution_log=paper_execution_log_path(),
-        account_snapshot=paper_account_snapshot_path(),
-        position_snapshot=paper_position_snapshot_path(),
-        daily_action_plan=paper_daily_action_plan_path(clean_date) if clean_date else None,
-        config_snapshot=paper_config_snapshot_path(clean_date) if clean_date else None,
+        execution_log=account_paths.execution_log_path if account_paths is not None else paper_execution_log_path(),
+        account_snapshot=account_paths.account_snapshot_path if account_paths is not None else paper_account_snapshot_path(),
+        position_snapshot=account_paths.position_snapshot_path if account_paths is not None else paper_position_snapshot_path(),
+        daily_action_plan=(
+            account_paths.daily_action_plan_path(clean_date)
+            if account_paths is not None and clean_date
+            else paper_daily_action_plan_path(clean_date) if clean_date else None
+        ),
+        config_snapshot=(
+            account_paths.config_snapshot_path(clean_date)
+            if account_paths is not None and clean_date
+            else paper_config_snapshot_path(clean_date) if clean_date else None
+        ),
         review_worksheet_csv=reports_dir / "paper_symbol_review_worksheet.csv",
         review_buckets_csv=reports_dir / "paper_symbol_review_buckets.csv",
         review_template_csv=reviews_dir / "paper_manual_review_log_template.csv",
         validation_report=reviews_dir / "paper_manual_review_log_validation_report.md",
         validation_issues_csv=reviews_dir / "paper_manual_review_log_validation_issues.csv",
+        current_state_snapshot=(
+            account_paths.current_state_snapshot_path(clean_date)
+            if account_paths is not None and clean_date
+            else None
+        ),
+        account_paths=account_paths,
     )
 
 
@@ -103,6 +125,47 @@ def _parse_date_or_issue(date_str: str | None, issues: list[dict[str, str]], sta
             )
         )
         return None
+
+
+def _normalize_csv_date(value: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    clean = text.replace("-", "")
+    if len(clean) != 8 or not clean.isdigit():
+        return None
+    return clean
+
+
+def _current_state_dates(paper_root: Path) -> list[str]:
+    dates: list[str] = []
+    for path in paper_root.glob("paper_current_state_*.json"):
+        date_part = path.stem.replace("paper_current_state_", "")
+        normalized = _normalize_csv_date(date_part)
+        if normalized:
+            dates.append(normalized)
+    return dates
+
+
+def _account_snapshot_dates(account_snapshot_path: Path) -> list[str]:
+    if not account_snapshot_path.exists():
+        return []
+    try:
+        with account_snapshot_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+    except Exception:
+        return []
+    return [
+        normalized
+        for row in rows
+        for normalized in [_normalize_csv_date(row.get("snapshot_date", ""))]
+        if normalized
+    ]
+
+
+def _account_inception_date(paths: PaperPreflightPaths) -> str | None:
+    candidates = _account_snapshot_dates(paths.account_snapshot) + _current_state_dates(paths.paper_root)
+    return min(candidates) if candidates else None
 
 
 def _issue(
@@ -249,7 +312,14 @@ def _common_checks(
 
 def _stage_plan(paths: PaperPreflightPaths) -> tuple[list[dict[str, str]], list[str]]:
     issues: list[dict[str, str]] = []
-    checked_paths = [str(paths.market_db), str(paths.execution_log), str(paths.daily_action_plan), str(paths.config_snapshot)]
+    checked_paths = [
+        str(paths.market_db),
+        str(paths.execution_log),
+        str(paths.daily_action_plan),
+        str(paths.config_snapshot),
+    ]
+    if paths.current_state_snapshot is not None:
+        checked_paths.append(str(paths.current_state_snapshot))
     if not paths.market_db.exists():
         issues.append(_issue("error", "plan", "market_db_exists", "market DB path does not exist", path=paths.market_db))
     if not paths.execution_log.exists():
@@ -262,9 +332,46 @@ def _stage_plan(paths: PaperPreflightPaths) -> tuple[list[dict[str, str]], list[
                 path=paths.execution_log,
             )
         )
+    if paths.account_paths is not None and paths.account_paths.account_id != "paper_default":
+        if not paths.account_snapshot.exists():
+            issues.append(
+                _issue(
+                    "error",
+                    "plan",
+                    "account_snapshot_exists",
+                    "account-specific paper_account_snapshot.csv is missing",
+                    path=paths.account_snapshot,
+                )
+            )
+        inception_date = _account_inception_date(paths)
+        if inception_date is None:
+            issues.append(
+                _issue(
+                    "error",
+                    "plan",
+                    "account_inception_date",
+                    "account-specific inception date could not be determined from account snapshot or current state",
+                    path=paths.paper_root,
+                )
+            )
+        elif paths.daily_action_plan is not None:
+            plan_date = _normalize_csv_date(paths.daily_action_plan.stem.replace("daily_action_plan_", ""))
+            if plan_date and plan_date < inception_date:
+                issues.append(
+                    _issue(
+                        "error",
+                        "plan",
+                        "account_inception_date",
+                        f"plan_date {plan_date} is before account inception date {inception_date}",
+                        path=paths.paper_root,
+                        suggestion="Use a plan date on or after the account inception date; do not fall back to default paper state",
+                    )
+                )
     issues.extend(_check_paper_path(paths.execution_log, paths.paper_root, paths.front_root, "plan", "execution_log_path"))
     issues.extend(_check_paper_path(paths.daily_action_plan, paths.paper_root, paths.front_root, "plan", "daily_action_plan_path"))
     issues.extend(_check_paper_path(paths.config_snapshot, paths.paper_root, paths.front_root, "plan", "config_snapshot_path"))
+    if paths.current_state_snapshot is not None and paths.current_state_snapshot.exists():
+        issues.extend(_check_paper_path(paths.current_state_snapshot, paths.paper_root, paths.front_root, "plan", "current_state_snapshot_path"))
     return issues, checked_paths
 
 
@@ -450,16 +557,17 @@ def run_paper_preflight_check(
     strict: bool = False,
     paths: PaperPreflightPaths | None = None,
     cwd: Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
     if stage not in STAGES:
         raise ValueError(f"Unsupported stage: {stage}")
 
-    effective_paths = paths or build_paper_preflight_paths(date_str)
+    effective_paths = paths or build_paper_preflight_paths(date_str, account_paths=account_paths)
     issues, normalized_date, checked_paths = _common_checks(stage, date_str, strict, effective_paths, cwd=cwd)
     stage_sequence = ["plan", "eod", "reports", "review-template", "review-append"] if stage == "all" else [stage]
 
     if stage == "all" and normalized_date:
-        effective_paths = paths or build_paper_preflight_paths(normalized_date)
+        effective_paths = paths or build_paper_preflight_paths(normalized_date, account_paths=account_paths)
 
     for current_stage in stage_sequence:
         if current_stage == "plan":

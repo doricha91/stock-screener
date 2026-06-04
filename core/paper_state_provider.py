@@ -45,14 +45,16 @@ def load_paper_execution_rows_for_state(log_path: Path | None = None) -> list[di
 def load_official_paper_state_for_daily_plan(
     date_str: str,
     log_path: Path | None = None,
+    initial_cash: float = 100000.0,
+    currency: str = "USD",
 ) -> CurrentPortfolioState:
     normalized_plan_date = normalize_paper_trade_date(date_str)
     trade_rows = load_paper_execution_rows_for_state(log_path=log_path)
     filtered_trade_rows = filter_trade_rows_before_plan_date(trade_rows, normalized_plan_date)
     paper_state = build_paper_state_from_trades(
         filtered_trade_rows,
-        initial_cash=100000.0,
-        currency="USD",
+        initial_cash=initial_cash,
+        currency=currency,
     )
     serialized = paper_account_state_to_current_state_dict(paper_state, normalized_plan_date)
     return CurrentPortfolioState(

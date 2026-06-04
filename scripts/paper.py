@@ -78,6 +78,30 @@ def _call_with_optional_account_paths(func, *args, account_paths, **kwargs):
     return func(*args, **kwargs)
 
 
+def _call_preflight(
+    *,
+    stage: str,
+    date_str: str | None,
+    strict: bool,
+    write_report: bool,
+    account_paths,
+):
+    if "account_paths" in inspect.signature(run_preflight).parameters:
+        return run_preflight(
+            stage=stage,
+            date_str=date_str,
+            strict=strict,
+            write_report=write_report,
+            account_paths=account_paths,
+        )
+    return run_preflight(
+        stage=stage,
+        date_str=date_str,
+        strict=strict,
+        write_report=write_report,
+    )
+
+
 def _guard_writer_account(
     account_id: str | None,
     command_name: str,
@@ -124,12 +148,26 @@ def _maybe_write_preflight_report(summary: dict, write_report: bool) -> None:
     print(f"  issues_path: {issues_path}")
 
 
-def run_preflight(stage: str, date_str: str | None, strict: bool, write_report: bool) -> dict:
-    summary = run_paper_preflight_check(
-        stage=stage,
-        date_str=date_str,
-        strict=strict,
-    )
+def run_preflight(
+    stage: str,
+    date_str: str | None,
+    strict: bool,
+    write_report: bool,
+    account_paths=None,
+) -> dict:
+    if account_paths is None:
+        summary = run_paper_preflight_check(
+            stage=stage,
+            date_str=date_str,
+            strict=strict,
+        )
+    else:
+        summary = run_paper_preflight_check(
+            stage=stage,
+            date_str=date_str,
+            strict=strict,
+            account_paths=account_paths,
+        )
     _print_preflight_summary(summary)
     _maybe_write_preflight_report(summary, write_report)
     return summary
@@ -430,11 +468,15 @@ def handle_benchmark(args: argparse.Namespace) -> int:
 def handle_plan(args: argparse.Namespace) -> int:
     if _guard_writer_account(args.account_id, "paper.py plan", allow_non_default=True) != 0:
         return 1
-    summary = run_preflight(
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=True)
+    summary = _call_preflight(
         stage="plan",
         date_str=args.date,
         strict=False,
         write_report=False,
+        account_paths=account_paths,
     )
     if summary["result"] == "FAIL":
         print("Paper plan aborted because preflight failed.")
@@ -442,9 +484,6 @@ def handle_plan(args: argparse.Namespace) -> int:
     if summary["result"] == "PASS_WITH_WARNINGS":
         print("Paper plan continues with preflight warnings.")
 
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=True)
     report_path = _call_with_optional_account_paths(
         run_paper_daily_plan,
         args.date,

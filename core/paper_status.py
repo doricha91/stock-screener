@@ -222,17 +222,36 @@ def _detect_workflow_status(status: dict[str, Any]) -> str:
     return WORKFLOW_UNKNOWN
 
 
-def _next_recommended_command(workflow_status: str, date_str: str | None) -> str:
+def _next_recommended_command(
+    workflow_status: str,
+    date_str: str | None,
+    account_id: str = "paper_default",
+) -> str:
+    account_suffix = "" if account_id == "paper_default" else f" --account-id {account_id}"
     if workflow_status == WORKFLOW_NO_PLAN:
-        return f"paper.py preview --date {date_str.replace('-', '')}" if date_str else "paper.py preview --date YYYYMMDD"
+        if account_id != "paper_default":
+            return (
+                f"paper.py plan --date {date_str.replace('-', '')}{account_suffix}"
+                if date_str
+                else f"paper.py plan --date YYYYMMDD{account_suffix}"
+            )
+        return (
+            f"paper.py preview --date {date_str.replace('-', '')}{account_suffix}"
+            if date_str
+            else f"paper.py preview --date YYYYMMDD{account_suffix}"
+        )
     if workflow_status == WORKFLOW_PLAN_READY:
-        return f"paper.py commit --date {date_str.replace('-', '')}" if date_str else "paper.py commit --date YYYYMMDD"
+        return (
+            f"paper.py commit --date {date_str.replace('-', '')}{account_suffix}"
+            if date_str
+            else f"paper.py commit --date YYYYMMDD{account_suffix}"
+        )
     if workflow_status == WORKFLOW_COMMITTED:
-        return "paper.py review"
+        return f"paper.py review{account_suffix}"
     if workflow_status == WORKFLOW_REVIEW_READY:
-        return "paper.py review-append"
+        return f"paper.py review-append{account_suffix}"
     if workflow_status == WORKFLOW_REVIEW_PARTIAL:
-        return "complete pending review rows then paper.py review-append"
+        return f"complete pending review rows then paper.py review-append{account_suffix}"
     if workflow_status == WORKFLOW_REVIEW_DONE:
         return "no immediate action"
     return "inspect status details manually"
@@ -330,7 +349,11 @@ def run_paper_status(
         },
     }
     status["workflow_status"] = _detect_workflow_status(status)
-    status["next_recommended_command"] = _next_recommended_command(status["workflow_status"], target_date)
+    status["next_recommended_command"] = _next_recommended_command(
+        status["workflow_status"],
+        target_date,
+        status["account_id"],
+    )
     return status
 
 

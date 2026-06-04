@@ -14,7 +14,7 @@ from core.paper_account_paths import build_paper_account_paths
 from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
 from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
 from core.paper_manual_execution_commit import commit_manual_execution_preview
-from core.paper_status import WORKFLOW_REVIEW_READY, run_paper_status
+from core.paper_status import WORKFLOW_REVIEW_PARTIAL, run_paper_status
 from scripts.append_paper_manual_review_log import append_paper_manual_review_log_from_template
 from scripts.generate_paper_daily_review_summary import generate_paper_daily_review_summary
 from scripts.generate_paper_drawdown import generate_paper_drawdown_for_account
@@ -206,7 +206,7 @@ def test_non_default_full_local_daily_ops_smoke(tmp_path: Path, monkeypatch: pyt
         [],
     )
 
-    def _fake_load_official_paper_state_for_daily_plan(date_str: str):
+    def _fake_load_official_paper_state_for_daily_plan(date_str: str, **kwargs):
         return {"date": date_str, "account_id": account_paths.account_id}
 
     def _fake_generate_daily_plan(
@@ -218,6 +218,7 @@ def test_non_default_full_local_daily_ops_smoke(tmp_path: Path, monkeypatch: pyt
         config_snapshot_path: Path,
         config_snapshot_archive_dir: Path,
         config_snapshot_source: str,
+        **kwargs,
     ) -> str:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
@@ -321,7 +322,8 @@ def test_non_default_full_local_daily_ops_smoke(tmp_path: Path, monkeypatch: pyt
 
     assert validation_after["summary"]["validation_result"] == "PASS"
     assert append_result["summary"]["rows_appended"] == 1
-    assert final_status["workflow_status"] == WORKFLOW_REVIEW_READY
+    assert final_status["workflow_status"] == WORKFLOW_REVIEW_PARTIAL
+    assert final_status["next_recommended_command"].endswith("--account-id paper_smoke")
     assert final_status["account_id"] == account_paths.account_id
     assert final_status["account_root"] == str(account_paths.root)
     assert final_status["reports_exists"] is True

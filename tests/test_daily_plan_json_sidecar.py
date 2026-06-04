@@ -238,11 +238,16 @@ def test_run_paper_daily_plan_passes_official_sidecar_metadata(monkeypatch, tmp_
         account_root=tmp_path / "paper_sandbox",
         create=True,
     )
+    account_paths.account_snapshot_path.write_text(
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+        "2026-05-20,100000.00,100000.00,0.00,0,,USD\n",
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(
         run_paper_daily_plan,
         "load_official_paper_state_for_daily_plan",
-        lambda date_str: _empty_state(),
+        lambda date_str, **kwargs: _empty_state(),
     )
 
     def _fake_generate_daily_plan(**kwargs):
@@ -257,7 +262,7 @@ def test_run_paper_daily_plan_passes_official_sidecar_metadata(monkeypatch, tmp_
     assert captured["account_id"] == "paper_sandbox"
     assert captured["run_mode"] == "official"
     assert captured["official_run"] is True
-    assert captured["state_snapshot_path"] == account_paths.current_state_snapshot_path("20260520")
+    assert captured["state_snapshot_path"] is None
 
 
 def test_daily_plan_json_sidecar_records_state_snapshot_path(monkeypatch, tmp_path: Path):

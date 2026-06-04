@@ -13,6 +13,7 @@ from core.paper_preflight_check import (
     write_markdown,
     write_paper_preflight_issues_csv,
 )
+from core.paper_account_paths import build_paper_account_paths
 from core.paths import PAPER_TEST_DIR
 
 
@@ -153,6 +154,45 @@ def test_plan_stage_missing_execution_log_is_warning():
         summary = run_paper_preflight_check("plan", "20260513", paths=paths, cwd=Path.cwd())
         assert summary["result"] == "PASS_WITH_WARNINGS"
         assert any(issue["check_name"] == "paper_execution_log_exists" for issue in summary["issues"])
+    finally:
+        _cleanup_dir(tmp)
+        _cleanup_dir(paths.paper_root)
+
+
+def test_plan_stage_non_default_blocks_before_account_inception():
+    tmp = _tmp_dir()
+    try:
+        paths = _build_paths(tmp)
+        account_paths = build_paper_account_paths(
+            "paper_pilot_test",
+            account_root=paths.paper_root,
+            create=False,
+        )
+        _write_text(
+            paths.account_snapshot,
+            "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+            "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
+        )
+        non_default_paths = PaperPreflightPaths(
+            **{
+                **paths.__dict__,
+                "daily_action_plan": paths.paper_root / "daily_action_plan_20260604.md",
+                "config_snapshot": paths.paper_root / "config_snapshots" / "paper_config_snapshot_20260604.json",
+                "current_state_snapshot": paths.paper_root / "paper_current_state_20260605.json",
+                "account_paths": account_paths,
+            }
+        )
+        _write_text(non_default_paths.current_state_snapshot, "{}\n")
+
+        summary = run_paper_preflight_check(
+            "plan",
+            "20260604",
+            paths=non_default_paths,
+            cwd=Path.cwd(),
+        )
+
+        assert summary["result"] == "FAIL"
+        assert any(issue["check_name"] == "account_inception_date" for issue in summary["issues"])
     finally:
         _cleanup_dir(tmp)
         _cleanup_dir(paths.paper_root)

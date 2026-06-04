@@ -7,6 +7,7 @@ import pytest
 
 import core.daily_plan_generator as daily_plan_generator
 import scripts.run_paper_daily_plan as run_paper_daily_plan
+from core.paper_account_paths import build_paper_account_paths
 from core.paths import (
     front_daily_action_plan_path,
     paper_config_snapshot_archive_dir,
@@ -196,6 +197,110 @@ def test_run_paper_daily_plan_uses_paper_output_path(monkeypatch: pytest.MonkeyP
     assert captured["config_snapshot_path"] == paper_config_snapshot_path("20260509")
     assert captured["config_snapshot_archive_dir"] == paper_config_snapshot_archive_dir()
     assert captured["config_snapshot_source"] == "run_paper_daily_plan"
+
+
+def test_run_paper_daily_plan_default_account_keeps_default_state_loader(monkeypatch: pytest.MonkeyPatch):
+    paper_state = _empty_state(cash=100000.0)
+    provider_calls: dict = {}
+
+    def _fake_provider(date_str: str):
+        provider_calls["date_str"] = date_str
+        return paper_state
+
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "load_official_paper_state_for_daily_plan",
+        _fake_provider,
+    )
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "generate_daily_plan",
+        lambda **kwargs: str(kwargs["output_path"]),
+    )
+
+    run_paper_daily_plan.run_paper_daily_plan("20260509")
+
+    assert provider_calls == {"date_str": "2026-05-09"}
+
+
+def test_run_paper_daily_plan_non_default_uses_account_execution_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    account_paths.execution_log_path.write_text(
+        "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n",
+        encoding="utf-8",
+    )
+    account_paths.account_snapshot_path.write_text(
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+        "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
+        encoding="utf-8",
+    )
+    account_paths.current_state_snapshot_path("20260605").write_text(
+        '{"current_symbols":[],"current_cash_ratio":1.0,"current_hedge_ratio":0.0,'
+        '"absolute_cash":100000.0,"shares":{},"avg_price":{},"highest_prices":{}}\n',
+        encoding="utf-8",
+    )
+
+    provider_calls: dict = {}
+    captured: dict = {}
+
+    def _fake_provider(date_str: str, **kwargs):
+        provider_calls.update({"date_str": date_str, **kwargs})
+        return _empty_state(cash=kwargs["initial_cash"])
+
+    def _fake_generate_daily_plan(**kwargs):
+        captured.update(kwargs)
+        assert kwargs["current_state"].current_symbols == []
+        assert not {"AAPL", "BRK-B", "F", "GEN"} & set(kwargs["current_state"].current_symbols)
+        return str(kwargs["output_path"])
+
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "load_official_paper_state_for_daily_plan",
+        _fake_provider,
+    )
+    monkeypatch.setattr(run_paper_daily_plan, "generate_daily_plan", _fake_generate_daily_plan)
+
+    report_path = run_paper_daily_plan.run_paper_daily_plan(
+        "2026-06-05",
+        account_paths=account_paths,
+    )
+
+    assert report_path == str(account_paths.daily_action_plan_path("2026-06-05"))
+    assert provider_calls["date_str"] == "2026-06-05"
+    assert provider_calls["log_path"] == account_paths.execution_log_path
+    assert provider_calls["initial_cash"] == 100000.0
+    assert provider_calls["currency"] == "USD"
+    assert captured["account_id"] == "paper_pilot_test"
+    assert captured["state_snapshot_path"] == account_paths.current_state_snapshot_path("20260605")
+
+
+def test_run_paper_daily_plan_non_default_rejects_plan_before_account_inception(
+    tmp_path: Path,
+):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    account_paths.execution_log_path.write_text(
+        "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n",
+        encoding="utf-8",
+    )
+    account_paths.account_snapshot_path.write_text(
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+        "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="before account inception date"):
+        run_paper_daily_plan.run_paper_daily_plan("2026-06-04", account_paths=account_paths)
 
 
 def test_run_paper_daily_plan_accepts_dashed_date(monkeypatch: pytest.MonkeyPatch):
