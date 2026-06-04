@@ -15,6 +15,8 @@ _VOLATILE_KEYS = {
     "run_id",
     "report_id",
     "archive_path",
+    "source",
+    "producer_source",
     "env",
     "env_value",
 }

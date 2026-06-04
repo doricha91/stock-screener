@@ -67,7 +67,7 @@ def build_paper_config_snapshot_payload(
         "schema_version": 1,
         "plan_date": plan_date,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "source": source,
+        "producer_source": source,
         "market_state_write_log": bool(market_state_write_log),
         "market_state": _json_safe(market_state),
         "market_status_summary": _json_safe(market_status_summary),

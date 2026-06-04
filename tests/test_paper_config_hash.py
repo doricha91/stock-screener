@@ -52,9 +52,23 @@ def test_volatile_runtime_fields_do_not_change_hash() -> None:
         run_id="run-b",
         report_path="D:/other/report-b.json",
         local_path="D:/tmp/local.json",
+        source="capture_daily_plan_baseline",
+        producer_source="replay_daily_plan_diff",
         updated_at="2026-05-20T10:01:00",
     )
     assert compute_paper_config_hash(baseline) == compute_paper_config_hash(regenerated)
+
+
+def test_provenance_source_fields_do_not_change_hash() -> None:
+    source_only = _config(source="capture_daily_plan_baseline")
+    producer_source_only = _config(producer_source="capture_daily_plan_baseline")
+    different_source = _config(source="replay_daily_plan_diff")
+    different_producer_source = _config(producer_source="replay_daily_plan_diff")
+
+    baseline_hash = compute_paper_config_hash(source_only)
+    assert baseline_hash == compute_paper_config_hash(producer_source_only)
+    assert baseline_hash == compute_paper_config_hash(different_source)
+    assert baseline_hash == compute_paper_config_hash(different_producer_source)
 
 
 def test_secret_like_fields_are_excluded_from_hash_input() -> None:
@@ -80,3 +94,21 @@ def test_semantic_field_change_changes_hash() -> None:
         }
     )
     assert compute_paper_config_hash(baseline) != compute_paper_config_hash(changed)
+
+
+def test_semantic_source_fields_remain_hash_inputs() -> None:
+    baseline = _config(
+        strategy_source="strategy-a",
+        universe_source="universe-a",
+        market_data_source="market-a",
+    )
+
+    assert compute_paper_config_hash(baseline) != compute_paper_config_hash(
+        _config(strategy_source="strategy-b", universe_source="universe-a", market_data_source="market-a")
+    )
+    assert compute_paper_config_hash(baseline) != compute_paper_config_hash(
+        _config(strategy_source="strategy-a", universe_source="universe-b", market_data_source="market-a")
+    )
+    assert compute_paper_config_hash(baseline) != compute_paper_config_hash(
+        _config(strategy_source="strategy-a", universe_source="universe-a", market_data_source="market-b")
+    )

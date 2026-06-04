@@ -84,7 +84,8 @@ def test_save_paper_config_snapshot_writes_expected_fields(tmp_path: Path):
     payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert snapshot_path == output_path
     assert payload["plan_date"] == "2026-05-12"
-    assert payload["source"] == "run_paper_daily_plan"
+    assert payload["producer_source"] == "run_paper_daily_plan"
+    assert "source" not in payload
     assert payload["market_state_write_log"] is False
     assert payload["market_state"]["regime"] == "BULL"
     assert payload["market_status_summary"]["target_cash_ratio"] == 0.05
