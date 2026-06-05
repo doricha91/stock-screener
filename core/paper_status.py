@@ -166,7 +166,18 @@ def _bool_to_label(value: bool) -> str:
 def _is_review_row_answered(row: dict[str, str]) -> bool:
     review_status = row.get("review_status", "").strip().lower()
     manual_answer = row.get("manual_answer", "").strip()
-    return review_status in {"reviewed", "done", "complete", "completed"} or bool(manual_answer)
+    if review_status in {"reviewed", "deferred", "not_applicable", "done", "complete", "completed"}:
+        return True
+    return bool(manual_answer)
+
+
+def _review_row_key(row: dict[str, str]) -> tuple[str, str, str] | None:
+    review_date = str(row.get("review_date") or "").strip()
+    symbol = str(row.get("symbol") or "").strip().upper()
+    question_id = str(row.get("question_id") or "").strip()
+    if not review_date or not symbol or not question_id:
+        return None
+    return (review_date, symbol, question_id)
 
 
 def _summarize_review_progress(
@@ -184,7 +195,17 @@ def _summarize_review_progress(
             "review_progress_status": "NOT_APPLICABLE",
         }
 
-    answered_row_count = sum(1 for row in review_template_rows if _is_review_row_answered(row))
+    template_keys = {
+        key
+        for row in review_template_rows
+        if (key := _review_row_key(row)) is not None
+    }
+    answered_keys = {
+        key
+        for row in review_log_rows
+        if (key := _review_row_key(row)) is not None and key in template_keys and _is_review_row_answered(row)
+    }
+    answered_row_count = len(answered_keys)
     pending_row_count = max(template_row_count - answered_row_count, 0)
     completion_ratio = answered_row_count / template_row_count if template_row_count else 0.0
 
