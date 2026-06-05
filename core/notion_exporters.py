@@ -21,6 +21,7 @@ from core.notion_account_keys import (
     build_legacy_daily_plan_external_key,
     build_legacy_daily_review_summary_external_key,
     build_legacy_weekly_report_external_key,
+    build_manual_review_canonical_key,
     build_weekly_report_external_key as build_weekly_report_external_key_with_account,
     normalize_notion_account_id,
 )
@@ -61,6 +62,32 @@ class ExportResult:
     dry_run: bool
 
 
+MANUAL_REVIEW_TEMPLATE_TARGET = "manual_review_template"
+MANUAL_REVIEW_TEMPLATE_IMPORT_STATUS = "DRAFT"
+
+
+@dataclass(frozen=True)
+class ManualReviewTemplateExportCandidate:
+    external_key: str
+    action: str
+    page_id: str | None
+    symbol: str
+    question_id: str
+    question: str
+    source_template_key: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "external_key": self.external_key,
+            "action": self.action,
+            "page_id": self.page_id,
+            "symbol": self.symbol,
+            "question_id": self.question_id,
+            "question": self.question,
+            "source_template_key": self.source_template_key,
+        }
+
+
 def _relative_to_project(path: Path) -> str:
     try:
         return str(path.relative_to(Path.cwd()))
@@ -91,6 +118,22 @@ def _resolve_daily_plan_export_root(
         return Path(paper_root)
     if account_id == "paper_default":
         return paper_daily_action_plan_path("1970-01-01").parent
+    return build_paper_account_paths(
+        account_id,
+        allow_legacy_default=False,
+        create=False,
+    ).root
+
+
+def _resolve_manual_review_template_root(
+    *,
+    account_id: str,
+    paper_root: Path | None,
+) -> Path:
+    if paper_root is not None:
+        return Path(paper_root)
+    if account_id == "paper_default":
+        return paper_reports_dir().parent
     return build_paper_account_paths(
         account_id,
         allow_legacy_default=False,
@@ -638,6 +681,77 @@ def build_daily_review_summary_properties(
         resolve_notion_property_name(mapping, "sync_status"): notion_select("SYNCED"),
     }
     return properties
+
+
+def load_manual_review_template_rows(
+    *,
+    template_path: Path,
+    review_date: str,
+) -> list[dict[str, str]]:
+    rows = _read_csv_rows(template_path)
+    normalized_review_date = _normalize_export_date(review_date)
+    filtered = []
+    for row in rows:
+        row_review_date = str(row.get("review_date") or "").strip()
+        if not row_review_date:
+            continue
+        if _normalize_export_date(row_review_date) == normalized_review_date:
+            filtered.append(row)
+    if not filtered:
+        raise NotionExportError(f"No manual review template rows found for {normalized_review_date}: {template_path}")
+    return filtered
+
+
+def build_manual_review_template_properties(
+    row: dict[str, str],
+    mapping: dict[str, str],
+    *,
+    account_id: str,
+    review_date: str,
+    external_key: str,
+) -> dict[str, Any]:
+    symbol = str(row.get("symbol") or "").strip().upper()
+    question_id = str(row.get("question_id") or "").strip()
+    question = str(row.get("question_text") or "").strip()
+    source_template_key = str(row.get("source_worksheet_path") or "").strip()
+    return {
+        resolve_notion_property_name(mapping, "name"): notion_title(
+            f"{review_date} {account_id} {symbol} {question_id}"
+        ),
+        resolve_notion_property_name(mapping, "external_key"): notion_rich_text(external_key),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(account_id),
+        resolve_notion_property_name(mapping, "review_date"): notion_date(review_date),
+        resolve_notion_property_name(mapping, "symbol"): notion_rich_text(symbol),
+        resolve_notion_property_name(mapping, "question_id"): notion_rich_text(question_id),
+        resolve_notion_property_name(mapping, "question"): notion_rich_text(question),
+        resolve_notion_property_name(mapping, "manual_answer"): notion_rich_text(""),
+        resolve_notion_property_name(mapping, "review_status"): notion_select("pending"),
+        resolve_notion_property_name(mapping, "follow_up_needed"): notion_select("false"),
+        resolve_notion_property_name(mapping, "reviewer_note"): notion_rich_text(""),
+        resolve_notion_property_name(mapping, "source_template_key"): notion_rich_text(source_template_key),
+        resolve_notion_property_name(mapping, "import_status"): notion_select(MANUAL_REVIEW_TEMPLATE_IMPORT_STATUS),
+    }
+
+
+def _manual_review_template_candidate_from_row(
+    row: dict[str, str],
+    *,
+    account_id: str,
+    review_date: str,
+    action: str,
+    page_id: str | None,
+) -> ManualReviewTemplateExportCandidate:
+    symbol = str(row.get("symbol") or "").strip().upper()
+    question_id = str(row.get("question_id") or "").strip()
+    return ManualReviewTemplateExportCandidate(
+        external_key=build_manual_review_canonical_key(account_id, review_date, symbol, question_id),
+        action=action,
+        page_id=page_id,
+        symbol=symbol,
+        question_id=question_id,
+        question=str(row.get("question_text") or "").strip(),
+        source_template_key=str(row.get("source_worksheet_path") or "").strip(),
+    )
 
 
 def _extract_plan_section(markdown: str, heading_prefix: str, next_heading_prefixes: tuple[str, ...]) -> str:
@@ -1252,6 +1366,136 @@ def export_daily_review_summary_to_notion(
         dry_run=dry_run,
         refresh_children_on_update=False,
     )
+
+
+def export_manual_review_template_to_notion(
+    *,
+    client: NotionClient | None,
+    settings: NotionSettings,
+    mapping_root: dict[str, dict[str, str]],
+    review_date: str,
+    account_id: str | None = None,
+    paper_root: Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    resolved_account_id = normalize_notion_account_id(account_id)
+    normalized_review_date = _normalize_export_date(review_date)
+    root = _resolve_manual_review_template_root(
+        account_id=resolved_account_id,
+        paper_root=paper_root,
+    )
+    template_path = root / "reviews" / "paper_manual_review_log_template.csv"
+    if not template_path.exists():
+        raise NotionExportError(f"Manual review template not found: {template_path}")
+
+    rows = load_manual_review_template_rows(
+        template_path=template_path,
+        review_date=normalized_review_date,
+    )
+    mapping = get_mapping_section(mapping_root, "manual_reviews")
+    data_source_id = get_notion_data_source_id(
+        settings,
+        "manual_reviews",
+        env_override="NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID",
+    )
+    external_key_property = resolve_notion_property_name(mapping, "external_key")
+
+    candidates: list[ManualReviewTemplateExportCandidate] = []
+    failed: list[dict[str, str]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        question_id = str(row.get("question_id") or "").strip()
+        if not symbol or not question_id:
+            failed.append(
+                {
+                    "symbol": symbol,
+                    "question_id": question_id,
+                    "error": "symbol and question_id are required.",
+                }
+            )
+            continue
+        external_key = build_manual_review_canonical_key(
+            resolved_account_id,
+            normalized_review_date,
+            symbol,
+            question_id,
+        )
+        existing: list[dict[str, Any]] = []
+        if client is not None:
+            existing = client.query_by_external_key(
+                data_source_id,
+                external_key,
+                external_key_property,
+            )
+        if len(existing) >= 2:
+            failed.append(
+                {
+                    "symbol": symbol,
+                    "question_id": question_id,
+                    "external_key": external_key,
+                    "error": "Multiple Notion rows found for external key.",
+                }
+            )
+            continue
+
+        page_id = str(existing[0].get("id") or "").strip() if existing else None
+        action = "update" if page_id else "create"
+        candidate = _manual_review_template_candidate_from_row(
+            row,
+            account_id=resolved_account_id,
+            review_date=normalized_review_date,
+            action=action,
+            page_id=page_id,
+        )
+        candidates.append(candidate)
+
+        if not dry_run:
+            if client is None:
+                raise NotionExportError("Notion client is required for actual manual review template export.")
+            properties = build_manual_review_template_properties(
+                row,
+                mapping,
+                account_id=resolved_account_id,
+                review_date=normalized_review_date,
+                external_key=external_key,
+            )
+            if page_id:
+                client.update_page(page_id, properties)
+            else:
+                created = client.create_page(data_source_id, properties)
+                candidate = _manual_review_template_candidate_from_row(
+                    row,
+                    account_id=resolved_account_id,
+                    review_date=normalized_review_date,
+                    action="create",
+                    page_id=str(created.get("id") or "").strip(),
+                )
+                candidates[-1] = candidate
+
+    create_count = sum(1 for candidate in candidates if candidate.action == "create")
+    update_count = sum(1 for candidate in candidates if candidate.action == "update")
+    failed_count = len(failed)
+    return {
+        "target": MANUAL_REVIEW_TEMPLATE_TARGET,
+        "account_id": resolved_account_id,
+        "review_date": normalized_review_date,
+        "candidate_count": len(candidates),
+        "create_count": create_count,
+        "update_count": update_count,
+        "created_count": 0 if dry_run else create_count,
+        "updated_count": 0 if dry_run else update_count,
+        "skip_count": 0,
+        "failed_count": failed_count,
+        "source_template_path": _relative_to_project(template_path),
+        "dry_run": dry_run,
+        "would_write": not dry_run,
+        "data_source_key": "manual_reviews",
+        "data_source_id": data_source_id,
+        "initial_import_status": MANUAL_REVIEW_TEMPLATE_IMPORT_STATUS,
+        "initial_review_status": "pending",
+        "candidates": [candidate.to_dict() for candidate in candidates],
+        "failed": failed,
+    }
 
 
 def export_selected_paper_reports_to_notion(

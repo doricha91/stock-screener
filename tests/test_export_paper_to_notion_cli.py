@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from scripts import export_paper_to_notion
 
 
@@ -105,3 +107,72 @@ def test_cli_passes_date_to_daily_plan_export(monkeypatch):
     assert rc == 0
     assert captured["account_id"] == "paper_pilot_202606"
     assert captured["daily_plan_date"] == "2026-06-05"
+
+
+def test_cli_manual_review_template_requires_dry_run_or_confirm_actual():
+    with pytest.raises(SystemExit):
+        export_paper_to_notion.main(
+            [
+                "--manual-review-template",
+                "--account-id",
+                "paper_pilot_202606",
+                "--date",
+                "2026-06-05",
+            ]
+        )
+
+
+def test_cli_manual_review_template_dry_run_routes_to_exporter(monkeypatch, capsys):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(export_paper_to_notion, "load_notion_settings", lambda allow_missing=True: object())
+    monkeypatch.setattr(export_paper_to_notion, "load_notion_property_mapping", lambda: {"manual_reviews": {}})
+    monkeypatch.setattr(export_paper_to_notion, "get_notion_token", lambda settings: "token")
+    monkeypatch.setattr(export_paper_to_notion, "NotionClient", lambda token: object())
+
+    def fake_export_manual_review_template_to_notion(**kwargs):
+        captured.update(kwargs)
+        return {
+            "target": "manual_review_template",
+            "account_id": "paper_pilot_202606",
+            "review_date": "2026-06-05",
+            "candidate_count": 8,
+            "create_count": 8,
+            "update_count": 0,
+            "created_count": 0,
+            "updated_count": 0,
+            "skip_count": 0,
+            "failed_count": 0,
+            "source_template_path": "outputs/paper_accounts/paper_pilot_202606/reviews/paper_manual_review_log_template.csv",
+            "dry_run": True,
+            "would_write": False,
+            "candidates": [],
+            "failed": [],
+        }
+
+    monkeypatch.setattr(
+        export_paper_to_notion,
+        "export_manual_review_template_to_notion",
+        fake_export_manual_review_template_to_notion,
+    )
+
+    rc = export_paper_to_notion.main(
+        [
+            "--manual-review-template",
+            "--account-id",
+            "paper_pilot_202606",
+            "--date",
+            "2026-06-05",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["account_id"] == "paper_pilot_202606"
+    assert captured["review_date"] == "2026-06-05"
+    assert captured["dry_run"] is True
+    output = capsys.readouterr().out
+    assert "manual_review_template" in output
+    payload = json.loads(output[output.index("{") :])
+    assert payload["candidate_count"] == 8

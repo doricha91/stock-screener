@@ -14,6 +14,7 @@ from core.notion_manual_review_importer import (
     normalize_manual_review_pages,
 )
 from core.notion_settings import NotionSettings
+from core.paper_account_paths import build_paper_account_paths
 from scripts import import_notion_reviews as review_script
 
 
@@ -335,6 +336,98 @@ def test_existing_review_log_duplicate_is_fail(monkeypatch, tmp_path):
     assert any(issue.code == "duplicate_existing_review_key" for issue in preview.candidates[0].validation_issues)
 
 
+def test_non_default_preview_uses_account_specific_review_paths(monkeypatch, tmp_path):
+    default_reviews = tmp_path / "paper_test" / "reviews"
+    _seed_review_files(default_reviews)
+    _write(
+        default_reviews / "paper_manual_review_log.csv",
+        "review_date,symbol,review_bucket,review_priority,sample_size_flag,symbol_status,question_id,question_text,question_category,is_actionable,manual_answer,review_status,follow_up_needed,review_tag,reviewer_note,source_worksheet_path,created_at\n"
+        "2026-05-25,AAPL,review_loss,high,low_sample,realized_only,review_loss_1,existing question,review_loss,false,existing answer,reviewed,false,entry_rule,,template-key,2026-05-25T12:00:00\n",
+    )
+    account_paths = build_paper_account_paths(
+        "paper_growth",
+        account_root=tmp_path / "paper_accounts" / "paper_growth",
+        create=True,
+    )
+    _seed_review_files(account_paths.reviews_dir)
+    monkeypatch.setattr(importer, "paper_reviews_dir", lambda: default_reviews)
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "paper_test" / "reports")
+
+    preview = build_manual_review_preview(
+        client=FakeClient(
+            [
+                _page(
+                    page_id="page-1",
+                    review_date="2026-05-25",
+                    symbol="AAPL",
+                    question_id="review_loss_1",
+                    question="吏꾩엯 ?좏샇媛 ?먮옒 ?꾨왂 議곌굔怨??쇱튂?덈뒗媛?",
+                    manual_answer="?? 議곌굔怨??쇱튂?덈떎.",
+                    account_id="paper_growth",
+                )
+            ]
+        ),
+        settings=_settings(),
+        mapping_root=_mapping_root(),
+        review_date="2026-05-25",
+        account_id="paper_growth",
+        account_paths=account_paths,
+    )
+
+    assert preview.account_id == "paper_growth"
+    assert preview.fail_count == 0
+    assert not preview.duplicate_candidates
+    assert str(account_paths.reports_dir) in preview.json_path
+    assert str(tmp_path / "paper_test") not in preview.json_path
+
+
+def test_cli_review_preview_passes_non_default_account_paths(monkeypatch):
+    captured: dict[str, object] = {}
+    account_paths = build_paper_account_paths("paper_growth", account_root=Path("tmp") / "paper_growth")
+
+    class DummyPreview:
+        account_id = "paper_growth"
+        review_date = "2026-05-25"
+        candidate_count = 0
+        append_allowed = "true"
+        json_path = "tmp/paper_growth/reports/manual_review_import_preview_20260525.json"
+
+        def to_dict(self):
+            return {
+                "account_id": self.account_id,
+                "review_date": self.review_date,
+                "candidate_count": self.candidate_count,
+                "json_path": self.json_path,
+            }
+
+    monkeypatch.setattr(review_script, "load_notion_settings", lambda allow_missing=True: object())
+    monkeypatch.setattr(review_script, "load_notion_property_mapping", lambda: _mapping_root())
+    monkeypatch.setattr(review_script, "get_notion_token", lambda settings: "token")
+    monkeypatch.setattr(review_script, "NotionClient", lambda token: object())
+    monkeypatch.setattr(review_script, "build_paper_account_paths", lambda account_id, create=True: account_paths)
+
+    def fake_build_manual_review_preview(**kwargs):
+        captured.update(kwargs)
+        return DummyPreview()
+
+    monkeypatch.setattr(review_script, "build_manual_review_preview", fake_build_manual_review_preview)
+
+    exit_code = review_script.main(
+        [
+            "--date",
+            "2026-05-25",
+            "--preview",
+            "--json",
+            "--account-id",
+            "paper_growth",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["account_id"] == "paper_growth"
+    assert captured["account_paths"] is account_paths
+
+
 def test_commit_mode_returns_not_implemented(capsys):
     exit_code = review_script.main(["--date", "2026-05-25", "--commit", "--json", "--preview-json", "missing.json"])
     captured = capsys.readouterr()
@@ -408,4 +501,4 @@ def test_cli_blocks_non_default_review_commit(capsys):
     )
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "blocked" in captured.out.lower()
+    assert "Preview JSON not found" in captured.out

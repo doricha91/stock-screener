@@ -18,6 +18,7 @@ from core.notion_exporters import (
     build_benchmark_report_properties,
     build_daily_plan_properties,
     export_daily_review_summary_to_notion,
+    export_manual_review_template_to_notion,
     build_weekly_report_properties,
     export_daily_plan_to_notion,
     export_latest_account_snapshot_to_notion,
@@ -221,6 +222,19 @@ def _seed_daily_review(root: Path) -> None:
     )
 
 
+def _seed_manual_review_template(root: Path, *, date: str = "2026-06-05", count: int = 8) -> None:
+    symbols = ["MAA", "SW"]
+    lines = [
+        "review_date,symbol,review_bucket,review_priority,sample_size_flag,symbol_status,question_id,question_text,question_category,is_actionable,manual_answer,review_status,follow_up_needed,review_tag,reviewer_note,source_worksheet_path,created_at"
+    ]
+    for index in range(1, count + 1):
+        symbol = symbols[(index - 1) % len(symbols)]
+        lines.append(
+            f"{date},{symbol},daily_review,normal,normal,open,Q{index:03d},Question {index},daily,false,,pending,false,,,template:{date}:{symbol}:Q{index:03d},{date}T12:00:00"
+        )
+    _write(root / "reviews" / "paper_manual_review_log_template.csv", "\n".join(lines) + "\n")
+
+
 def _mapping() -> dict[str, dict[str, str]]:
     return {
         "weekly_reports": {
@@ -324,6 +338,26 @@ def _mapping() -> dict[str, dict[str, str]]:
             "synced_at": "Synced At",
             "sync_status": "Sync Status",
         },
+        "manual_reviews": {
+            "name": "Name",
+            "external_key": "External Key",
+            "account_id": "Account ID",
+            "review_date": "Review Date",
+            "symbol": "Symbol",
+            "question_id": "Question ID",
+            "question": "Question",
+            "manual_answer": "Manual Answer",
+            "review_status": "Review Status",
+            "follow_up_needed": "Follow-up Needed",
+            "review_tag": "Review Tag",
+            "reviewer_note": "Reviewer Note",
+            "source_template_key": "Source Template Key",
+            "validation_status": "Validation Status",
+            "validation_message": "Validation Message",
+            "import_status": "Import Status",
+            "imported_at": "Imported At",
+            "synced_at": "Synced At",
+        },
     }
 
 
@@ -337,6 +371,7 @@ def _settings() -> NotionSettings:
             "account_snapshots": "db-account",
             "daily_plans": "db-daily-plan",
             "daily_review_summaries": "db-daily-review",
+            "manual_reviews": "db-manual-reviews",
         },
     )
 
@@ -380,6 +415,27 @@ class FakeFallbackClient:
 
     def upsert_page_by_external_key(self, **kwargs):
         raise AssertionError("upsert_page_by_external_key should not be used when legacy fallback updates an existing page")
+
+
+class FakeManualReviewTemplateClient:
+    def __init__(self, existing_keys: dict[str, str] | None = None):
+        self.existing_keys = existing_keys or {}
+        self.query_calls: list[str] = []
+        self.create_calls: list[tuple[str, dict]] = []
+        self.update_calls: list[tuple[str, dict]] = []
+
+    def query_by_external_key(self, data_source_id, external_key, external_key_property_name):
+        self.query_calls.append(external_key)
+        page_id = self.existing_keys.get(external_key)
+        return [{"id": page_id}] if page_id else []
+
+    def create_page(self, data_source_id, properties):
+        self.create_calls.append((data_source_id, properties))
+        return {"id": f"created-{len(self.create_calls)}"}
+
+    def update_page(self, page_id, properties):
+        self.update_calls.append((page_id, properties))
+        return {"id": page_id}
 
 
 def test_weekly_external_key_is_generated():
@@ -873,6 +929,106 @@ def test_non_default_daily_plan_export_missing_account_artifact_does_not_fallbac
             settings=_settings(),
             mapping_root=_mapping(),
             account_id="paper_pilot_202606",
+            dry_run=True,
+        )
+
+
+def test_non_default_manual_review_template_export_uses_account_root_not_default_root(tmp_path, monkeypatch):
+    default_root = tmp_path / "paper_test"
+    account_root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_manual_review_template(default_root, date="2026-05-20")
+    _seed_manual_review_template(account_root, date="2026-06-05")
+
+    monkeypatch.setattr(
+        notion_exporters,
+        "build_paper_account_paths",
+        lambda *args, **kwargs: SimpleNamespace(root=account_root),
+    )
+
+    summary = export_manual_review_template_to_notion(
+        client=None,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        review_date="2026-06-05",
+        dry_run=True,
+    )
+
+    assert summary["account_id"] == "paper_pilot_202606"
+    assert summary["review_date"] == "2026-06-05"
+    assert summary["candidate_count"] == 8
+    assert summary["create_count"] == 8
+    assert "paper_pilot_202606" in summary["source_template_path"]
+    assert "paper_test" not in summary["source_template_path"]
+    assert summary["candidates"][0]["external_key"].startswith(
+        "manual_review:paper_pilot_202606:2026-06-05:"
+    )
+
+
+def test_manual_review_template_export_dry_run_does_not_write(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_manual_review_template(root, date="2026-06-05")
+    client = FakeManualReviewTemplateClient()
+
+    summary = export_manual_review_template_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_default",
+        paper_root=root,
+        review_date="2026-06-05",
+        dry_run=True,
+    )
+
+    assert summary["candidate_count"] == 8
+    assert summary["would_write"] is False
+    assert client.query_calls
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_manual_review_template_export_marks_existing_external_key_as_update(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_manual_review_template(root, date="2026-06-05")
+    existing_key = "manual_review:paper_default:2026-06-05:MAA:Q001"
+    client = FakeManualReviewTemplateClient(existing_keys={existing_key: "page-existing"})
+
+    summary = export_manual_review_template_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_default",
+        paper_root=root,
+        review_date="2026-06-05",
+        dry_run=True,
+    )
+
+    assert summary["candidate_count"] == 8
+    assert summary["update_count"] == 1
+    assert summary["create_count"] == 7
+    update_candidate = [item for item in summary["candidates"] if item["action"] == "update"][0]
+    assert update_candidate["external_key"] == existing_key
+    assert update_candidate["page_id"] == "page-existing"
+
+
+def test_non_default_manual_review_template_missing_account_template_does_not_fallback(tmp_path, monkeypatch):
+    default_root = tmp_path / "paper_test"
+    account_root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_manual_review_template(default_root, date="2026-06-05")
+    account_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        notion_exporters,
+        "build_paper_account_paths",
+        lambda *args, **kwargs: SimpleNamespace(root=account_root),
+    )
+
+    with pytest.raises(NotionExportError, match="Manual review template not found"):
+        export_manual_review_template_to_notion(
+            client=None,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_pilot_202606",
+            review_date="2026-06-05",
             dry_run=True,
         )
 

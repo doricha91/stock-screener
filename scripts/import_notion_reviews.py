@@ -105,12 +105,18 @@ def main(argv: list[str] | None = None) -> int:
     mapping = load_notion_property_mapping()
     client = NotionClient(get_notion_token(settings))
     try:
+        account_paths = (
+            None
+            if resolved_account_id == "paper_default"
+            else build_paper_account_paths(resolved_account_id, create=True)
+        )
         preview = build_manual_review_preview(
             client=client,
             settings=settings,
             mapping_root=mapping,
             review_date=args.date,
             account_id=resolved_account_id,
+            account_paths=account_paths,
         )
     except (ManualReviewImportError, NotionAPIError, NotionSettingsError) as exc:
         if args.json:

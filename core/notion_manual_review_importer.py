@@ -14,6 +14,7 @@ from core.notion_account_keys import (
 )
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
+from core.paper_account_paths import PaperAccountPaths
 from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
 from core.paper_manual_review_log_validator import validate_paper_manual_review_log_rows
 from core.paths import paper_reports_dir, paper_reviews_dir
@@ -121,8 +122,13 @@ def build_manual_review_preview(
     reports_dir: Path | None = None,
     existing_log_path: Path | None = None,
     template_path: Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> ManualReviewPreview:
     resolved_account_id = normalize_notion_account_id(account_id)
+    if account_paths is not None and account_paths.account_id != resolved_account_id:
+        raise ManualReviewImportError(
+            f"account_paths account_id mismatch: {account_paths.account_id} != {resolved_account_id}"
+        )
     mapping = get_mapping_section(mapping_root, "manual_reviews")
     data_source_id = get_notion_data_source_id(
         settings,
@@ -145,13 +151,21 @@ def build_manual_review_preview(
     for candidate in candidates:
         _validate_candidate_shape(candidate)
     _assign_canonical_keys(candidates, account_id=resolved_account_id)
+    effective_existing_log_path = _resolve_existing_log_path(
+        account_paths=account_paths,
+        explicit_path=existing_log_path,
+    )
+    effective_template_path = _resolve_template_path(
+        account_paths=account_paths,
+        explicit_path=template_path,
+    )
     _apply_existing_review_duplicate_validation(
         candidates,
-        existing_log_path=existing_log_path or paper_reviews_dir() / "paper_manual_review_log.csv",
+        existing_log_path=effective_existing_log_path,
     )
     _apply_template_comparison(
         candidates,
-        template_path=template_path or paper_reviews_dir() / "paper_manual_review_log_template.csv",
+        template_path=effective_template_path,
     )
     _apply_validator_rules(candidates)
 
@@ -165,7 +179,7 @@ def build_manual_review_preview(
         }
     )
 
-    output_dir = reports_dir if reports_dir is not None else paper_reports_dir()
+    output_dir = _resolve_reports_dir(account_paths=account_paths, explicit_reports_dir=reports_dir)
     compact_date = review_date.replace("-", "")
     json_path = output_dir / f"manual_review_import_preview_{compact_date}.json"
     markdown_path = output_dir / f"manual_review_import_preview_{compact_date}.md"
@@ -185,6 +199,36 @@ def build_manual_review_preview(
     )
     _write_preview_files(preview, json_path=json_path, markdown_path=markdown_path)
     return preview
+
+
+def _resolve_existing_log_path(
+    *,
+    account_paths: PaperAccountPaths | None,
+    explicit_path: Path | None,
+) -> Path:
+    if account_paths is not None:
+        return account_paths.reviews_dir / "paper_manual_review_log.csv"
+    return explicit_path or paper_reviews_dir() / "paper_manual_review_log.csv"
+
+
+def _resolve_template_path(
+    *,
+    account_paths: PaperAccountPaths | None,
+    explicit_path: Path | None,
+) -> Path:
+    if account_paths is not None:
+        return account_paths.reviews_dir / "paper_manual_review_log_template.csv"
+    return explicit_path or paper_reviews_dir() / "paper_manual_review_log_template.csv"
+
+
+def _resolve_reports_dir(
+    *,
+    account_paths: PaperAccountPaths | None,
+    explicit_reports_dir: Path | None,
+) -> Path:
+    if account_paths is not None:
+        return account_paths.reports_dir
+    return explicit_reports_dir if explicit_reports_dir is not None else paper_reports_dir()
 
 
 def fetch_manual_review_pages(
