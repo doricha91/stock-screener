@@ -367,12 +367,14 @@ OPER9-4 lets the Daily Ops Orchestrator consume local JSON evidence sidecars for
 Supported evidence files:
 
 ```text
-<account_root>\reports\daily_plan_notion_export_<TRADE_DATE>.json
-<account_root>\reports\manual_execution_template_export_<TRADE_DATE>.json
-<account_root>\reports\manual_execution_status_sync_<TRADE_DATE>.json
-<account_root>\reports\manual_review_template_export_<TRADE_DATE>.json
-<account_root>\reports\manual_review_status_sync_<TRADE_DATE>.json
+<account_root>\reports\daily_plan_notion_export_<TRADE_DATE_YYYYMMDD>.json
+<account_root>\reports\manual_execution_template_export_<TRADE_DATE_YYYYMMDD>.json
+<account_root>\reports\manual_execution_status_sync_<TRADE_DATE_YYYYMMDD>.json
+<account_root>\reports\manual_review_template_export_<TRADE_DATE_YYYYMMDD>.json
+<account_root>\reports\manual_review_status_sync_<TRADE_DATE_YYYYMMDD>.json
 ```
+
+The filename date uses compact `YYYYMMDD`, matching existing paper artifacts such as `manual_execution_import_preview_20260608.json`. The JSON payload still uses `trade_date=YYYY-MM-DD`.
 
 Evidence schema:
 

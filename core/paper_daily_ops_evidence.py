@@ -45,7 +45,8 @@ class EvidenceEvaluation:
 
 def notion_evidence_path(account_root: Path, evidence_type: str, trade_date: str) -> Path:
     stem = EVIDENCE_FILE_STEMS[evidence_type]
-    return Path(account_root) / "reports" / f"{stem}_{trade_date}.json"
+    compact_date = str(trade_date).replace("-", "")
+    return Path(account_root) / "reports" / f"{stem}_{compact_date}.json"
 
 
 def evaluate_notion_evidence(

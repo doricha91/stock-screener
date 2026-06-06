@@ -373,7 +373,13 @@ def test_notion_stage_without_evidence_stays_unknown(tmp_path: Path):
     assert stage["status"] == "UNKNOWN"
     assert stage["evidence_checked"] is False
     assert stage["evidence_status"] is None
-    assert stage["evidence_path"].endswith("daily_plan_notion_export_2026-06-08.json")
+    assert stage["evidence_path"].endswith("daily_plan_notion_export_20260608.json")
+
+
+def test_notion_evidence_path_uses_compact_filename_date(tmp_path: Path):
+    path = notion_evidence_path(tmp_path, EVIDENCE_DAILY_PLAN_NOTION_EXPORT, "2026-06-08")
+
+    assert path.name == "daily_plan_notion_export_20260608.json"
 
 
 @pytest.mark.parametrize(
@@ -406,6 +412,20 @@ def test_pass_evidence_marks_target_notion_stage_done(tmp_path: Path, evidence_t
     assert stage["status"] == "DONE"
     assert stage["evidence_checked"] is True
     assert stage["evidence_status"] == "PASS"
+
+
+def test_compact_filename_with_hyphenated_payload_trade_date_is_valid(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    evidence_path = _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert evidence_path.name == "daily_plan_notion_export_20260608.json"
+    assert json.loads(evidence_path.read_text(encoding="utf-8"))["trade_date"] == "2026-06-08"
+    assert stage["status"] == "DONE"
 
 
 def test_warning_evidence_marks_notion_stage_warning(tmp_path: Path):
@@ -487,6 +507,32 @@ def test_malformed_evidence_is_not_done_evidence(tmp_path: Path):
     assert stage["evidence_checked"] is True
     assert stage["evidence_status"] is None
     assert not stage["evidence_errors"]
+
+
+def test_hyphenated_filename_evidence_is_not_used_when_compact_file_is_absent(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_json(
+        root / "reports" / "daily_plan_notion_export_2026-06-08.json",
+        {
+            "schema_version": "paper_notion_evidence.v1",
+            "evidence_type": EVIDENCE_DAILY_PLAN_NOTION_EXPORT,
+            "account_id": "paper_ops",
+            "trade_date": "2026-06-08",
+            "data_date": "2026-06-05",
+            "target_system": "notion",
+            "status": "PASS",
+            "failed_count": 0,
+        },
+    )
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "UNKNOWN"
+    assert stage["evidence_checked"] is False
+    assert stage["evidence_path"].endswith("daily_plan_notion_export_20260608.json")
 
 
 def test_legacy_paper_test_notion_evidence_is_not_done_for_non_default_account(tmp_path: Path):

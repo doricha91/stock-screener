@@ -72,14 +72,15 @@ Required validation fields:
 The orchestrator automatically searches under account-root reports:
 
 ```text
-<account_root>\reports\daily_plan_notion_export_<TRADE_DATE>.json
-<account_root>\reports\manual_execution_template_export_<TRADE_DATE>.json
-<account_root>\reports\manual_execution_status_sync_<TRADE_DATE>.json
-<account_root>\reports\manual_review_template_export_<TRADE_DATE>.json
-<account_root>\reports\manual_review_status_sync_<TRADE_DATE>.json
+<account_root>\reports\daily_plan_notion_export_<TRADE_DATE_YYYYMMDD>.json
+<account_root>\reports\manual_execution_template_export_<TRADE_DATE_YYYYMMDD>.json
+<account_root>\reports\manual_execution_status_sync_<TRADE_DATE_YYYYMMDD>.json
+<account_root>\reports\manual_review_template_export_<TRADE_DATE_YYYYMMDD>.json
+<account_root>\reports\manual_review_status_sync_<TRADE_DATE_YYYYMMDD>.json
 ```
 
-`<TRADE_DATE>` uses the normalized `YYYY-MM-DD` value.
+`<TRADE_DATE_YYYYMMDD>` uses the compact date value, for example `20260608`.
+The JSON payload fields `trade_date` and `data_date` continue to use normalized `YYYY-MM-DD` values.
 
 For non-default accounts, matching `outputs\paper_test` evidence is never accepted as DONE evidence. If only legacy evidence exists, the stage is blocked because the evidence belongs to the wrong account root.
 
@@ -106,7 +107,7 @@ Each stage now includes evidence metadata fields:
 
 ```json
 {
-  "evidence_path": "D:\\python\\StockScreener\\outputs\\paper_accounts\\paper_pilot_202606\\reports\\daily_plan_notion_export_2026-06-08.json",
+  "evidence_path": "D:\\python\\StockScreener\\outputs\\paper_accounts\\paper_pilot_202606\\reports\\daily_plan_notion_export_20260608.json",
   "evidence_status": "PASS",
   "evidence_checked": true,
   "evidence_errors": []
