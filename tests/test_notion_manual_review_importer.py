@@ -272,6 +272,100 @@ def test_missing_optional_fields_produce_warning(monkeypatch, tmp_path):
     assert preview.warning_count == 1
     assert preview.append_allowed == "true_with_warnings"
     assert preview.candidates[0].validation_status == WARNING
+    codes = {issue.code for issue in preview.candidates[0].validation_issues}
+    assert "missing_reviewer_note" not in codes
+
+
+def test_blank_reviewer_note_only_does_not_warn(monkeypatch, tmp_path):
+    _seed_review_files(tmp_path)
+    monkeypatch.setattr(importer, "paper_reviews_dir", lambda: tmp_path)
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "reports")
+    client = FakeClient(
+        [
+            _page(
+                page_id="page-1",
+                review_date="2026-05-25",
+                symbol="AAPL",
+                question_id="review_loss_1",
+                question="吏꾩엯 ?좏샇媛 ?먮옒 ?꾨왂 議곌굔怨??쇱튂?덈뒗媛?",
+                manual_answer="?? 議곌굔怨??쇱튂?덈떎.",
+                follow_up_needed="false",
+                review_tag="entry_rule",
+                reviewer_note=None,
+                source_template_key="template:2026-05-25",
+            )
+        ]
+    )
+    preview = build_manual_review_preview(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping_root(),
+        review_date="2026-05-25",
+        template_path=tmp_path / "missing_template.csv",
+    )
+    assert preview.pass_count == 1
+    assert preview.warning_count == 0
+    assert preview.append_allowed == "true"
+    assert not preview.candidates[0].validation_issues
+
+
+def test_deferred_without_note_or_tag_still_warns(monkeypatch, tmp_path):
+    _seed_review_files(tmp_path)
+    monkeypatch.setattr(importer, "paper_reviews_dir", lambda: tmp_path)
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "reports")
+    preview = build_manual_review_preview(
+        client=FakeClient(
+            [
+                _page(
+                    page_id="page-1",
+                    review_date="2026-05-25",
+                    symbol="AAPL",
+                    question_id="review_loss_1",
+                    question="吏꾩엯 ?좏샇媛 ?먮옒 ?꾨왂 議곌굔怨??쇱튂?덈뒗媛?",
+                    manual_answer="Need more context.",
+                    review_status="deferred",
+                    follow_up_needed="false",
+                    review_tag=None,
+                    reviewer_note=None,
+                )
+            ]
+        ),
+        settings=_settings(),
+        mapping_root=_mapping_root(),
+        review_date="2026-05-25",
+    )
+    codes = {issue.code for issue in preview.candidates[0].validation_issues}
+    assert preview.warning_count == 1
+    assert "deferred_without_context" in codes
+
+
+def test_follow_up_without_note_or_tag_still_warns(monkeypatch, tmp_path):
+    _seed_review_files(tmp_path)
+    monkeypatch.setattr(importer, "paper_reviews_dir", lambda: tmp_path)
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "reports")
+    preview = build_manual_review_preview(
+        client=FakeClient(
+            [
+                _page(
+                    page_id="page-1",
+                    review_date="2026-05-25",
+                    symbol="AAPL",
+                    question_id="review_loss_1",
+                    question="吏꾩엯 ?좏샇媛 ?먮옒 ?꾨왂 議곌굔怨??쇱튂?덈뒗媛?",
+                    manual_answer="Follow up next day.",
+                    follow_up_needed="true",
+                    review_tag=None,
+                    reviewer_note=None,
+                )
+            ]
+        ),
+        settings=_settings(),
+        mapping_root=_mapping_root(),
+        review_date="2026-05-25",
+    )
+    codes = {issue.code for issue in preview.candidates[0].validation_issues}
+    assert preview.warning_count == 1
+    assert "follow_up_without_context" in codes
 
 
 def test_batch_duplicate_is_fail(monkeypatch, tmp_path):

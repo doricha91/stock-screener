@@ -355,10 +355,6 @@ def _validate_candidate_shape(candidate: ManualReviewCandidate) -> None:
         candidate.validation_issues.append(
             ManualReviewIssue(WARNING, "missing_review_tag", "Review Tag is blank.")
         )
-    if not candidate.reviewer_note:
-        candidate.validation_issues.append(
-            ManualReviewIssue(WARNING, "missing_reviewer_note", "Reviewer Note is blank.")
-        )
     if not candidate.source_template_key:
         candidate.validation_issues.append(
             ManualReviewIssue(WARNING, "missing_source_template_key", "Source Template Key is blank.")

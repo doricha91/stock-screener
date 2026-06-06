@@ -58,18 +58,22 @@ SYMBOL_EXECUTION_REVIEW_QUESTION_TEXT = (
     "Compare this symbol's actual execution with the Daily Plan. Note any quantity, price, skip, partial fill, "
     "or manual judgment exceptions that should affect the next operation."
 )
+SYMBOL_EXECUTION_REVIEW_TAG = "execution_quality"
 ACCOUNT_REVIEW_QUESTIONS = [
     (
         "account_review_1",
         "After today's execution, did cash ratio or position sizing materially deviate from policy?",
+        "position_sizing",
     ),
     (
         "account_review_2",
         "Were there any data, price, quantity, or manual decision exceptions during today's operation?",
+        "execution_quality",
     ),
     (
         "account_review_3",
         "Is there any follow-up that must be checked on the next operating day?",
+        "risk_management",
     ),
 ]
 
@@ -139,7 +143,7 @@ def build_paper_manual_review_log_template(
                 "manual_answer": "",
                 "review_status": "pending",
                 "follow_up_needed": "false",
-                "review_tag": "",
+                "review_tag": SYMBOL_EXECUTION_REVIEW_TAG,
                 "reviewer_note": "",
                 "source_worksheet_path": str(source_worksheet_path),
                 "created_at": created_at_value,
@@ -147,7 +151,7 @@ def build_paper_manual_review_log_template(
         )
 
     if output_rows:
-        for question_id, question_text in ACCOUNT_REVIEW_QUESTIONS:
+        for question_id, question_text, review_tag in ACCOUNT_REVIEW_QUESTIONS:
             output_rows.append(
                 {
                     "review_date": normalized_review_date,
@@ -163,7 +167,7 @@ def build_paper_manual_review_log_template(
                     "manual_answer": "",
                     "review_status": "pending",
                     "follow_up_needed": "false",
-                    "review_tag": "",
+                    "review_tag": review_tag,
                     "reviewer_note": "",
                     "source_worksheet_path": str(source_worksheet_path),
                     "created_at": created_at_value,

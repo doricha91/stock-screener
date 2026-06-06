@@ -18,6 +18,7 @@ from core.paper_manual_review_log_template import (
     write_markdown,
     write_paper_manual_review_log_template_csv,
 )
+from core.paper_manual_review_log_validator import ALLOWED_REVIEW_TAGS
 from core.paths import PAPER_TEST_DIR, paper_reviews_dir
 
 
@@ -133,7 +134,14 @@ def test_worksheet_question_rows_are_converted_to_template_rows():
     assert output_rows[0]["symbol"] == "CF"
     assert output_rows[0]["question_id"] == "execution_review_1"
     assert output_rows[0]["question_category"] == "execution_review"
+    assert output_rows[0]["review_tag"] == "execution_quality"
     assert [row["symbol"] for row in output_rows[-3:]] == ["ACCOUNT", "ACCOUNT", "ACCOUNT"]
+    assert [(row["question_id"], row["review_tag"]) for row in output_rows[-3:]] == [
+        ("account_review_1", "position_sizing"),
+        ("account_review_2", "execution_quality"),
+        ("account_review_3", "risk_management"),
+    ]
+    assert {row["review_tag"] for row in output_rows}.issubset(ALLOWED_REVIEW_TAGS)
     assert summary_data["review_template_row_count"] == 4
     assert summary_data["symbol_count"] == 1
     assert summary_data["account_question_count"] == 3
@@ -156,6 +164,8 @@ def test_review_log_template_limits_questions_to_one_per_symbol_plus_account_row
     symbol_rows = [row for row in output_rows if row["symbol"] != "ACCOUNT"]
     assert len(symbol_rows) == 8
     assert {row["question_id"] for row in symbol_rows} == {"execution_review_1"}
+    assert {row["review_tag"] for row in symbol_rows} == {"execution_quality"}
+    assert {row["review_tag"] for row in output_rows}.issubset(ALLOWED_REVIEW_TAGS)
     assert {row["review_date"] for row in output_rows} == {"2026-06-08"}
     keys = {(row["review_date"], row["symbol"], row["question_id"]) for row in output_rows}
     assert len(keys) == len(output_rows)
@@ -173,7 +183,7 @@ def test_manual_fields_default_values_are_set():
     assert row["manual_answer"] == ""
     assert row["review_status"] == "pending"
     assert row["follow_up_needed"] == "false"
-    assert row["review_tag"] == ""
+    assert row["review_tag"] == "execution_quality"
     assert row["reviewer_note"] == ""
 
 

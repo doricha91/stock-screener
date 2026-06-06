@@ -105,6 +105,14 @@ def test_reviewed_without_manual_answer_is_error():
     assert any(issue["issue_code"] == "blank_manual_answer_for_reviewed" for issue in issues)
 
 
+def test_reviewed_with_blank_reviewer_note_is_valid_when_answer_and_tag_exist():
+    issues, summary = validate_paper_manual_review_log_rows(
+        [_row(review_status="reviewed", manual_answer="Reviewed.", review_tag="entry_rule", reviewer_note="")]
+    )
+    assert issues == []
+    assert summary["validation_result"] == "PASS"
+
+
 def test_deferred_without_note_or_tag_is_warning():
     issues, summary = validate_paper_manual_review_log_rows([_row(review_status="deferred")])
     assert summary["warning_count"] == 1
