@@ -39,6 +39,27 @@ def _create_base_db(
     conn.close()
 
 
+def _create_ready_db(db_path: Path, target_date: str = "2026-06-05") -> None:
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", target_date)],
+        market_index_rows=[("SPY", target_date), ("QQQ", target_date), ("^VIX", target_date)],
+        daily_indicator_rows=[("AAPL", target_date)],
+        ticker_rows=[(f"T{i}", "NASDAQ100") for i in range(60)],
+    )
+
+
+def _write_universe_snapshot(universe_root: Path, date_str: str, content: str = '{"removed":[]}\n') -> Path:
+    universe_root.mkdir(parents=True, exist_ok=True)
+    path = universe_root / f"universe_snapshot_{date_str.replace('-', '')}.json"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _universe_check(summary: dict) -> dict:
+    return next(item for item in summary["checks"] if item["check_name"] == "universe_snapshot")
+
+
 def test_db_missing_fails(tmp_path):
     summary = run_paper_data_freshness_check(
         date_str="20260513",
@@ -149,6 +170,80 @@ def test_universe_snapshot_missing_warns(tmp_path):
     )
     summary = run_paper_data_freshness_check(date_str="20260513", db_path=db_path, universe_root=tmp_path / "universe")
     assert any(item["check_name"] == "universe_snapshot" and item["severity"] == "warning" for item in summary["checks"])
+
+
+def test_universe_snapshot_exact_target_date_passes(tmp_path):
+    db_path = tmp_path / "market.db"
+    universe_root = tmp_path / "universe"
+    _create_ready_db(db_path)
+    _write_universe_snapshot(universe_root, "2026-06-05")
+
+    summary = run_paper_data_freshness_check(date_str="20260605", db_path=db_path, universe_root=universe_root)
+    check = _universe_check(summary)
+
+    assert summary["result"] == "PASS"
+    assert check["severity"] == "info"
+    assert check["status"] == "ok"
+    assert check["latest_date"] == "2026-06-05"
+
+
+def test_universe_snapshot_same_quarter_asof_passes_without_warning(tmp_path):
+    db_path = tmp_path / "market.db"
+    universe_root = tmp_path / "universe"
+    _create_ready_db(db_path)
+    _write_universe_snapshot(universe_root, "2026-04-01")
+
+    summary = run_paper_data_freshness_check(date_str="20260605", db_path=db_path, universe_root=universe_root)
+    check = _universe_check(summary)
+
+    assert summary["result"] == "PASS"
+    assert summary["warning_count"] == 0
+    assert check["severity"] == "info"
+    assert check["status"] == "ok"
+    assert check["latest_date"] == "2026-04-01"
+    assert "same-quarter" in check["message"]
+
+
+def test_universe_snapshot_prior_quarter_fallback_warns(tmp_path):
+    db_path = tmp_path / "market.db"
+    universe_root = tmp_path / "universe"
+    _create_ready_db(db_path)
+    _write_universe_snapshot(universe_root, "2026-03-31")
+
+    summary = run_paper_data_freshness_check(date_str="20260605", db_path=db_path, universe_root=universe_root)
+    check = _universe_check(summary)
+
+    assert summary["result"] == "PASS_WITH_WARNINGS"
+    assert check["severity"] == "warning"
+    assert check["status"] == "fallback"
+    assert check["latest_date"] == "2026-03-31"
+
+
+def test_universe_snapshot_directory_missing_warns(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_ready_db(db_path)
+
+    summary = run_paper_data_freshness_check(date_str="20260605", db_path=db_path, universe_root=tmp_path / "missing")
+    check = _universe_check(summary)
+
+    assert summary["result"] == "PASS_WITH_WARNINGS"
+    assert check["severity"] == "warning"
+    assert check["status"] == "missing"
+
+
+def test_universe_snapshot_corrupt_file_warns(tmp_path):
+    db_path = tmp_path / "market.db"
+    universe_root = tmp_path / "universe"
+    _create_ready_db(db_path)
+    _write_universe_snapshot(universe_root, "2026-04-01", content="{bad json")
+
+    summary = run_paper_data_freshness_check(date_str="20260605", db_path=db_path, universe_root=universe_root)
+    check = _universe_check(summary)
+
+    assert summary["result"] == "PASS_WITH_WARNINGS"
+    assert check["severity"] == "warning"
+    assert check["status"] == "unreadable"
+    assert check["latest_date"] == "2026-04-01"
 
 
 def test_warning_only_returns_pass_with_warnings(tmp_path):

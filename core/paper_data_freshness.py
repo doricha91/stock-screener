@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from core.paths import OUTPUTS, market_db_path, paper_reports_dir
+from core.universe_manager import load_universe_snapshot_as_of_quarter
 
 
 FRESHNESS_REPORT_PATH_NAMES = {
@@ -78,6 +79,66 @@ def _query_listing_board_distribution(conn: sqlite3.Connection) -> dict[str, int
         return {}
     rows = cur.fetchall()
     return {str(board): int(count) for board, count in rows}
+
+
+def _quarter_label(date_value: str) -> str:
+    parsed = datetime.strptime(date_value, "%Y-%m-%d")
+    quarter = ((parsed.month - 1) // 3) + 1
+    return f"{parsed.year}Q{quarter}"
+
+
+def _build_universe_snapshot_check(target_date: str, universe_dir: Path) -> dict[str, Any]:
+    selection = load_universe_snapshot_as_of_quarter(target_date, snapshots_dir=universe_dir)
+    metadata = selection.get("metadata", {}) if isinstance(selection, dict) else {}
+    selected_date = str(metadata.get("snapshot_date") or "")
+    selected_path = str(metadata.get("snapshot_path") or "")
+    warning = str(metadata.get("warning") or "")
+    target_quarter = _quarter_label(target_date)
+    selected_quarter = str(metadata.get("snapshot_quarter") or "")
+
+    if warning:
+        if "Failed to read" in warning:
+            return _issue(
+                "warning",
+                "universe_snapshot",
+                "unreadable",
+                f"universe snapshot could not be read: {selected_path}",
+                latest_date=selected_date,
+                suggestion="Review or regenerate the selected universe snapshot",
+            )
+        if selected_date and selected_quarter != target_quarter:
+            return _issue(
+                "warning",
+                "universe_snapshot",
+                "fallback",
+                (
+                    "using prior-quarter universe snapshot under quarterly_as_of policy "
+                    f"({selected_quarter} -> {target_quarter})"
+                ),
+                latest_date=selected_date,
+                suggestion="Review fallback or create a same-quarter universe snapshot",
+            )
+        return _issue(
+            "warning",
+            "universe_snapshot",
+            "missing",
+            "optional universe snapshot is unavailable for quarterly_as_of selection",
+            latest_date=selected_date or target_date,
+            suggestion="Create a universe snapshot if quarterly as-of selection should be updated",
+        )
+
+    if selected_date == target_date:
+        message = "exact universe snapshot exists for target_date"
+    else:
+        message = "selected same-quarter quarterly_as_of universe snapshot"
+    return _issue(
+        "info",
+        "universe_snapshot",
+        "ok",
+        message,
+        latest_date=selected_date,
+        suggestion=f"Optional check passed: {selected_path}",
+    )
 
 
 def _apply_summary(target_date: str, db_path: Path, checks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -355,29 +416,7 @@ def run_paper_data_freshness_check(
                 )
             )
 
-        universe_snapshot = universe_dir / f"universe_snapshot_{target_date.replace('-', '')}.json"
-        if universe_snapshot.exists():
-            checks.append(
-                _issue(
-                    "info",
-                    "universe_snapshot",
-                    "ok",
-                    "universe snapshot exists for target_date",
-                    latest_date=target_date,
-                    suggestion="Optional check passed",
-                )
-            )
-        else:
-            checks.append(
-                _issue(
-                    "warning",
-                    "universe_snapshot",
-                    "missing",
-                    "optional universe snapshot for target_date is missing",
-                    latest_date=target_date,
-                    suggestion="Refresh universe snapshot if quarterly as-of selection should be updated",
-                )
-            )
+        checks.append(_build_universe_snapshot_check(target_date, universe_dir))
 
     return _apply_summary(target_date, market_db, checks)
 
