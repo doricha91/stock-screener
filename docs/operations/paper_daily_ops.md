@@ -300,3 +300,13 @@ PAPER16-2 fixes the operator command map and rerun policy for Daily Ops Status.
 - actual Daily Ops Status export remains guarded and paper_sandbox-only until a later policy expands it
 - manual Notion view cleanup is performed by the user after this documentation step
 - PAPER16-3 can check the manually cleaned Notion views against the SOP
+
+## 14. OPER9 Local Daily Ops Status Helper
+
+OPER9 adds a local read-only status helper for the account-aware daily ops loop:
+
+```cmd
+python scripts\paper_daily_ops.py status --account-id <ACCOUNT_ID> --data-date <DATA_DATE> --trade-date <TRADE_DATE> --json
+```
+
+This helper only inspects local artifacts and recommends the next command as text. It does not call Notion, export or sync Notion rows, commit Manual Executions, append Manual Reviews, modify ledgers, or place broker orders.
