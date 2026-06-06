@@ -27,6 +27,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--execution-commit-report", help="Optional Manual Execution commit report JSON evidence path")
     status.add_argument("--review-preview-json", help="Optional Manual Review preview JSON evidence path")
     status.add_argument("--review-commit-report", help="Optional Manual Review commit report JSON evidence path")
+    status.add_argument("--write-status-report", action="store_true", help="Persist the generated status JSON report")
+    status.add_argument("--status-report-path", help="Optional status report output path")
+    status.add_argument(
+        "--strict-exit",
+        action="store_true",
+        help="Return WARNING/UNKNOWN as 1 and BLOCKED as 2 after successful status generation",
+    )
     status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     status.set_defaults(handler=handle_status)
     return parser
@@ -50,12 +57,34 @@ def handle_status(args: argparse.Namespace) -> int:
         )
     except ValueError as exc:
         payload = {
+            "schema_version": "mfu_oper9_daily_ops_status.v1",
             "overall_status": "BLOCKED",
             "read_only": True,
             "write_executed": False,
+            "operation_write_executed": False,
             "notion_api_called": False,
             "commit_append_executed": False,
+            "status_report_written": False,
+            "status_report_path": None,
             "error": str(exc),
+            "next_command": None,
+            "next_action": None,
+            "summary": {
+                "terminal": False,
+                "needs_attention": True,
+                "has_blockers": True,
+                "has_warnings": False,
+                "has_unknowns": False,
+                "recommended_operator_action": "RESOLVE_BLOCKERS",
+            },
+            "stage_counts": {
+                "DONE": 0,
+                "READY": 0,
+                "BLOCKED": 0,
+                "WARNING": 0,
+                "UNKNOWN": 0,
+                "NOT_STARTED": 0,
+            },
             "stages": [],
         }
         if args.json:
@@ -63,6 +92,32 @@ def handle_status(args: argparse.Namespace) -> int:
         else:
             print(f"PAPER DAILY OPS STATUS BLOCKED\n  error: {exc}")
         return 2
+    except Exception as exc:
+        payload = {
+            "schema_version": "mfu_oper9_daily_ops_status.v1",
+            "overall_status": "ERROR",
+            "read_only": True,
+            "write_executed": False,
+            "operation_write_executed": False,
+            "notion_api_called": False,
+            "commit_append_executed": False,
+            "status_report_written": False,
+            "status_report_path": None,
+            "error": str(exc),
+            "stages": [],
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"PAPER DAILY OPS STATUS ERROR\n  error: {exc}")
+        return 3
+
+    if args.write_status_report:
+        report_path = _status_report_path(payload, args.status_report_path)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        payload["status_report_written"] = True
+        payload["status_report_path"] = str(report_path).replace("/", "\\")
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -75,8 +130,28 @@ def handle_status(args: argparse.Namespace) -> int:
         print(f"  workflow_status: {payload.get('workflow_status') or '-'}")
         print(f"  legacy_default_used: {str(payload['legacy_default_used']).lower()}")
         print(f"  next_command: {payload.get('next_command') or '-'}")
+        print(f"  status_report_path: {payload.get('status_report_path') or '-'}")
         for stage in payload["stages"]:
             print(f"  {stage['stage_name']}: {stage['status']}")
+    return _exit_code(payload, strict=bool(args.strict_exit))
+
+
+def _status_report_path(payload: dict, explicit_path: str | None) -> Path:
+    if explicit_path:
+        return Path(explicit_path)
+    account_root = Path(str(payload["account_root"]))
+    trade_date = str(payload["trade_date"])
+    return account_root / "reports" / f"daily_ops_status_{trade_date}.json"
+
+
+def _exit_code(payload: dict, *, strict: bool) -> int:
+    if not strict:
+        return 0
+    overall_status = str(payload.get("overall_status") or "")
+    if overall_status == "BLOCKED":
+        return 2
+    if overall_status in {"WARNING", "UNKNOWN"}:
+        return 1
     return 0
 
 

@@ -310,3 +310,52 @@ python scripts\paper_daily_ops.py status --account-id <ACCOUNT_ID> --data-date <
 ```
 
 This helper only inspects local artifacts and recommends the next command as text. It does not call Notion, export or sync Notion rows, commit Manual Executions, append Manual Reviews, modify ledgers, or place broker orders.
+
+## 15. OPER9-3 Daily Ops Orchestrator Contract Addendum
+
+OPER9-3 keeps the existing `mfu_oper9_daily_ops_status.v1` schema version and adds backward-compatible fields for safer human and automation consumption.
+
+Required compatibility fields remain:
+
+- `next_command`
+- `read_only=true`
+- `write_executed=false`
+- `notion_api_called=false`
+- `commit_append_executed=false`
+
+Added contract fields:
+
+- `next_action`: structured command risk metadata for the top-level recommendation and each stage
+- `summary`: terminal, attention, blocker, warning, unknown, and recommended operator action flags
+- `stage_counts`: count of `DONE`, `READY`, `BLOCKED`, `WARNING`, `UNKNOWN`, and `NOT_STARTED` stages
+- `operation_write_executed=false`: explicit marker that operational writes did not run
+- `status_report_written` and `status_report_path`: diagnostic status report persistence markers
+
+`next_action` classification:
+
+- read-only checks are `READ_ONLY` + `SAFE`
+- Notion export/sync commands are `NOTION_WRITE` + `REQUIRES_MANUAL_REVIEW`
+- Manual Execution commit and Manual Review append commands are `LEDGER_WRITE` + `REQUIRES_MANUAL_REVIEW`
+- broker/order command classes are `DANGEROUS`, but this helper must not recommend broker commands
+- when workflow status is `REVIEW_DONE`, `next_command` and `next_action` are both `null`
+
+Exit policy:
+
+- default mode returns `0` when the CLI successfully generates status output
+- input validation errors return `2`
+- unexpected exceptions return `3`
+- `--strict-exit` returns `1` for `WARNING` or `UNKNOWN`, and `2` for `BLOCKED`
+
+Status report persistence:
+
+```cmd
+python scripts\paper_daily_ops.py status --account-id <ACCOUNT_ID> --data-date <DATA_DATE> --trade-date <TRADE_DATE> --json --write-status-report
+```
+
+By default no file is written. With `--write-status-report`, the helper writes the final status JSON to `--status-report-path` or to:
+
+```text
+<account_root>\reports\daily_ops_status_<TRADE_DATE>.json
+```
+
+This is diagnostic/status output only. It does not change Notion, ledgers, DB files, broker state, Manual Execution commits, or Manual Review append state.

@@ -25,6 +25,22 @@ WARNING = "WARNING"
 UNKNOWN = "UNKNOWN"
 NOT_STARTED = "NOT_STARTED"
 
+COMMAND_TYPE_READ_ONLY = "READ_ONLY"
+COMMAND_TYPE_NOTION_WRITE = "NOTION_WRITE"
+COMMAND_TYPE_LEDGER_WRITE = "LEDGER_WRITE"
+COMMAND_TYPE_STATUS_SYNC = "STATUS_SYNC"
+COMMAND_TYPE_UNKNOWN = "UNKNOWN"
+
+RISK_SAFE = "SAFE"
+RISK_REQUIRES_MANUAL_REVIEW = "REQUIRES_MANUAL_REVIEW"
+RISK_DANGEROUS = "DANGEROUS"
+
+RECOMMENDED_ACTION_NONE = "NONE"
+RECOMMENDED_ACTION_RUN_NEXT_COMMAND = "RUN_NEXT_COMMAND"
+RECOMMENDED_ACTION_REVIEW_WARNINGS = "REVIEW_WARNINGS"
+RECOMMENDED_ACTION_RESOLVE_BLOCKERS = "RESOLVE_BLOCKERS"
+RECOMMENDED_ACTION_CHECK_NOTION = "CHECK_NOTION"
+
 STAGE_NAMES = [
     "DATA_FRESHNESS",
     "DAILY_PLAN",
@@ -132,11 +148,20 @@ def build_daily_ops_status(
     if workflow_status == WORKFLOW_REVIEW_DONE:
         for stage in stages:
             stage["next_command"] = None
+            stage["next_action"] = None
 
     overall_status = _derive_overall_status(blockers, warnings, stages)
     next_command = _first_next_command(stages)
     if workflow_status == WORKFLOW_REVIEW_DONE:
         next_command = None
+    stage_counts = _stage_counts(stages)
+    summary = _summary(
+        workflow_status=workflow_status,
+        blockers=blockers,
+        warnings=warnings,
+        stages=stages,
+        next_command=next_command,
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -148,8 +173,11 @@ def build_daily_ops_status(
         "workflow_status": workflow_status,
         "read_only": True,
         "write_executed": False,
+        "operation_write_executed": False,
         "notion_api_called": False,
         "commit_append_executed": False,
+        "status_report_written": False,
+        "status_report_path": None,
         "legacy_default_used": legacy_default_used,
         "paper_test_artifacts_detected": bool(legacy_matches),
         "guards": {
@@ -163,6 +191,9 @@ def build_daily_ops_status(
         "blockers": blockers,
         "warnings": warnings,
         "next_command": next_command,
+        "next_action": _next_action(next_command),
+        "summary": summary,
+        "stage_counts": stage_counts,
         "stages": stages,
     }
 
@@ -260,6 +291,7 @@ def _stage(
         "existing_artifacts": [_path_str(path) for path in existing],
         "missing_artifacts": [_path_str(path) for path in missing],
         "next_command": next_command,
+        "next_action": _next_action(next_command),
         "note": note,
     }
 
@@ -622,6 +654,129 @@ def _first_next_command(stages: list[dict[str, Any]]) -> str | None:
         if stage.get("status") in {READY, WARNING, UNKNOWN} and stage.get("next_command"):
             return str(stage["next_command"])
     return None
+
+
+def _stage_counts(stages: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {status: 0 for status in (DONE, READY, BLOCKED, WARNING, UNKNOWN, NOT_STARTED)}
+    for stage in stages:
+        status = str(stage.get("status") or "")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _summary(
+    *,
+    workflow_status: str | None,
+    blockers: list[str],
+    warnings: list[str],
+    stages: list[dict[str, Any]],
+    next_command: str | None,
+) -> dict[str, Any]:
+    has_blockers = bool(blockers) or any(stage.get("status") == BLOCKED for stage in stages)
+    has_warnings = bool(warnings) or any(stage.get("status") == WARNING for stage in stages)
+    has_unknowns = any(stage.get("status") == UNKNOWN for stage in stages)
+    terminal = workflow_status == WORKFLOW_REVIEW_DONE
+    if terminal:
+        recommended = RECOMMENDED_ACTION_NONE
+    elif has_blockers:
+        recommended = RECOMMENDED_ACTION_RESOLVE_BLOCKERS
+    elif has_warnings:
+        recommended = RECOMMENDED_ACTION_REVIEW_WARNINGS
+    elif has_unknowns:
+        recommended = RECOMMENDED_ACTION_CHECK_NOTION
+    elif next_command:
+        recommended = RECOMMENDED_ACTION_RUN_NEXT_COMMAND
+    else:
+        recommended = RECOMMENDED_ACTION_NONE
+    return {
+        "terminal": terminal,
+        "needs_attention": False if terminal else has_blockers or has_warnings or has_unknowns,
+        "has_blockers": has_blockers,
+        "has_warnings": has_warnings,
+        "has_unknowns": has_unknowns,
+        "recommended_operator_action": recommended,
+    }
+
+
+def _next_action(command: str | None) -> dict[str, Any] | None:
+    if not command:
+        return None
+    command_text = str(command)
+    lowered = command_text.lower()
+    calls_broker = any(token in lowered for token in ("broker", "order placement", "place-order", "live-order"))
+    if calls_broker:
+        return {
+            "command": command_text,
+            "command_type": COMMAND_TYPE_UNKNOWN,
+            "risk_level": RISK_DANGEROUS,
+            "requires_manual_approval": True,
+            "writes_notion": False,
+            "writes_ledger": False,
+            "calls_broker": True,
+            "reason": "Broker/API command classes are forbidden for Daily Ops Orchestrator recommendations.",
+        }
+    if "--commit" in lowered and (
+        "import_notion_executions.py" in lowered or "import_notion_reviews.py" in lowered
+    ):
+        return {
+            "command": command_text,
+            "command_type": COMMAND_TYPE_LEDGER_WRITE,
+            "risk_level": RISK_REQUIRES_MANUAL_REVIEW,
+            "requires_manual_approval": True,
+            "writes_notion": False,
+            "writes_ledger": True,
+            "calls_broker": False,
+            "reason": "Commit/append commands mutate local source-of-truth artifacts and require operator review.",
+        }
+    if "--confirm-actual" in lowered or "sync_notion_" in lowered:
+        return {
+            "command": command_text,
+            "command_type": COMMAND_TYPE_NOTION_WRITE,
+            "risk_level": RISK_REQUIRES_MANUAL_REVIEW,
+            "requires_manual_approval": True,
+            "writes_notion": True,
+            "writes_ledger": False,
+            "calls_broker": False,
+            "reason": "Notion export/sync commands can write Notion state and require manual review.",
+        }
+    if "import_notion_" in lowered and "--preview" in lowered:
+        return {
+            "command": command_text,
+            "command_type": COMMAND_TYPE_READ_ONLY,
+            "risk_level": RISK_SAFE,
+            "requires_manual_approval": False,
+            "writes_notion": False,
+            "writes_ledger": False,
+            "calls_broker": False,
+            "reason": "Preview command is read-only and does not commit local or Notion state.",
+        }
+    if (
+        "scripts\\paper.py data-freshness" in lowered
+        or "scripts/paper.py data-freshness" in lowered
+        or "scripts\\paper.py status" in lowered
+        or "scripts/paper.py status" in lowered
+    ):
+        return {
+            "command": command_text,
+            "command_type": COMMAND_TYPE_READ_ONLY,
+            "risk_level": RISK_SAFE,
+            "requires_manual_approval": False,
+            "writes_notion": False,
+            "writes_ledger": False,
+            "calls_broker": False,
+            "reason": "Recommended paper.py command is treated as local/read-only in this status contract.",
+        }
+    return {
+        "command": command_text,
+        "command_type": COMMAND_TYPE_UNKNOWN,
+        "risk_level": RISK_REQUIRES_MANUAL_REVIEW,
+        "requires_manual_approval": True,
+        "writes_notion": False,
+        "writes_ledger": False,
+        "calls_broker": False,
+        "reason": "Command class is not recognized by the Daily Ops Orchestrator contract.",
+    }
 
 
 def _path_str(path: Path) -> str:

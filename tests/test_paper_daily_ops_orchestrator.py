@@ -178,8 +178,14 @@ def test_normal_input_generates_stage_list_and_read_only_flags(tmp_path: Path):
     assert len(payload["stages"]) == 13
     assert payload["read_only"] is True
     assert payload["write_executed"] is False
+    assert payload["operation_write_executed"] is False
     assert payload["notion_api_called"] is False
     assert payload["commit_append_executed"] is False
+    assert payload["status_report_written"] is False
+    assert payload["status_report_path"] is None
+    assert "next_action" in payload
+    assert "summary" in payload
+    assert "stage_counts" in payload
 
 
 def test_non_default_legacy_paper_test_plan_blocks_daily_plan_evidence(tmp_path: Path):
@@ -265,10 +271,75 @@ def test_review_done_has_no_commit_or_append_next_command(tmp_path: Path):
 
     assert payload["workflow_status"] == "REVIEW_DONE"
     assert payload["next_command"] is None
+    assert payload["next_action"] is None
+    assert payload["summary"]["terminal"] is True
+    assert payload["summary"]["needs_attention"] is False
+    assert payload["summary"]["recommended_operator_action"] == "NONE"
     commands = [stage["next_command"] or "" for stage in payload["stages"]]
     assert all(command == "" for command in commands)
+    assert all(stage["next_action"] is None for stage in payload["stages"])
     assert not any(" --commit " in command for command in commands)
     assert not any("review-append" in command for command in commands)
+
+
+def test_next_action_classifies_read_only_notion_and_ledger_commands(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    assert _stage(payload, "DATA_FRESHNESS")["next_action"]["command_type"] == "READ_ONLY"
+    assert _stage(payload, "DATA_FRESHNESS")["next_action"]["risk_level"] == "SAFE"
+
+    _write_plan(root)
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    notion_export_action = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")["next_action"]
+    assert notion_export_action["command_type"] == "NOTION_WRITE"
+    assert notion_export_action["risk_level"] == "REQUIRES_MANUAL_REVIEW"
+    assert notion_export_action["writes_notion"] is True
+
+    _write_execution_preview(root)
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    ledger_action = _stage(payload, "MANUAL_EXECUTION_COMMIT")["next_action"]
+    assert ledger_action["command_type"] == "LEDGER_WRITE"
+    assert ledger_action["risk_level"] == "REQUIRES_MANUAL_REVIEW"
+    assert ledger_action["writes_ledger"] is True
+
+    _write_execution_commit(root)
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    sync_action = _stage(payload, "MANUAL_EXECUTION_STATUS_SYNC")["next_action"]
+    assert sync_action["command_type"] == "NOTION_WRITE"
+    assert sync_action["risk_level"] == "REQUIRES_MANUAL_REVIEW"
+    assert sync_action["writes_notion"] is True
+
+
+def test_summary_flags_blockers_warnings_unknowns_and_stage_counts(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    blocked_payload = build_daily_ops_status(
+        account_id="paper_ops",
+        data_date="2026-06-08",
+        trade_date="2026-06-08",
+        account_root=root,
+        legacy_root=legacy,
+    )
+    assert blocked_payload["summary"]["has_blockers"] is True
+    assert blocked_payload["summary"]["recommended_operator_action"] == "RESOLVE_BLOCKERS"
+
+    _write_plan(root)
+    _write_json(
+        root / "reports" / "manual_execution_import_preview_20260608.json",
+        {
+            "account_id": "paper_ops",
+            "execution_date": "2026-06-08",
+            "fail_count": 0,
+            "commit_allowed": "true_with_warnings",
+        },
+    )
+    warning_payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    assert warning_payload["summary"]["has_warnings"] is True
+    assert warning_payload["summary"]["has_unknowns"] is True
+    assert sum(warning_payload["stage_counts"].values()) == len(warning_payload["stages"]) == 13
+    assert warning_payload["stage_counts"]["WARNING"] >= 1
+    assert warning_payload["stage_counts"]["UNKNOWN"] >= 1
 
 
 def test_cli_json_output_is_parseable(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -296,3 +367,150 @@ def test_cli_json_output_is_parseable(tmp_path: Path, capsys: pytest.CaptureFixt
     payload = json.loads(capsys.readouterr().out)
     assert payload["account_id"] == "paper_ops"
     assert payload["read_only"] is True
+
+
+def test_cli_does_not_write_status_report_by_default(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+
+    exit_code = paper_daily_ops.main(
+        [
+            "status",
+            "--account-id",
+            "paper_ops",
+            "--data-date",
+            "2026-06-05",
+            "--trade-date",
+            "2026-06-08",
+            "--account-root",
+            str(root),
+            "--legacy-root",
+            str(legacy),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status_report_written"] is False
+    assert payload["status_report_path"] is None
+    assert not (root / "reports" / "daily_ops_status_2026-06-08.json").exists()
+
+
+def test_cli_writes_status_report_only_when_requested(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+
+    exit_code = paper_daily_ops.main(
+        [
+            "status",
+            "--account-id",
+            "paper_ops",
+            "--data-date",
+            "2026-06-05",
+            "--trade-date",
+            "2026-06-08",
+            "--account-root",
+            str(root),
+            "--legacy-root",
+            str(legacy),
+            "--json",
+            "--write-status-report",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    report_path = root / "reports" / "daily_ops_status_2026-06-08.json"
+    assert report_path.exists()
+    written = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["status_report_written"] is True
+    assert written["status_report_written"] is True
+    assert payload["write_executed"] is False
+    assert payload["operation_write_executed"] is False
+
+
+def test_cli_strict_exit_policy_and_validation_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+
+    default_exit = paper_daily_ops.main(
+        [
+            "status",
+            "--account-id",
+            "paper_ops",
+            "--data-date",
+            "2026-06-08",
+            "--trade-date",
+            "2026-06-08",
+            "--account-root",
+            str(root),
+            "--legacy-root",
+            str(legacy),
+            "--json",
+        ]
+    )
+    assert default_exit == 0
+    capsys.readouterr()
+
+    strict_exit = paper_daily_ops.main(
+        [
+            "status",
+            "--account-id",
+            "paper_ops",
+            "--data-date",
+            "2026-06-08",
+            "--trade-date",
+            "2026-06-08",
+            "--account-root",
+            str(root),
+            "--legacy-root",
+            str(legacy),
+            "--json",
+            "--strict-exit",
+        ]
+    )
+    assert strict_exit == 2
+    capsys.readouterr()
+
+    validation_exit = paper_daily_ops.main(
+        [
+            "status",
+            "--account-id",
+            "",
+            "--data-date",
+            "2026-06-05",
+            "--trade-date",
+            "2026-06-08",
+            "--account-root",
+            str(root),
+            "--legacy-root",
+            str(legacy),
+            "--json",
+        ]
+    )
+    assert validation_exit == 2
+
+
+def test_cli_unexpected_exception_returns_3(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+    def raise_unexpected(**_: object) -> dict:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(paper_daily_ops, "build_daily_ops_status", raise_unexpected)
+
+    exit_code = paper_daily_ops.main(
+        [
+            "status",
+            "--account-id",
+            "paper_ops",
+            "--data-date",
+            "2026-06-05",
+            "--trade-date",
+            "2026-06-08",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["overall_status"] == "ERROR"
