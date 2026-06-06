@@ -9,6 +9,7 @@ import pytest
 import core.notion_exporters as notion_exporters
 from core.notion_exporters import (
     NotionExportError,
+    build_manual_execution_template_properties,
     build_account_snapshot_external_key,
     build_benchmark_report_external_key,
     build_daily_plan_external_key,
@@ -18,6 +19,7 @@ from core.notion_exporters import (
     build_benchmark_report_properties,
     build_daily_plan_properties,
     export_daily_review_summary_to_notion,
+    export_manual_execution_template_to_notion,
     export_manual_review_template_to_notion,
     build_weekly_report_properties,
     export_daily_plan_to_notion,
@@ -235,6 +237,54 @@ def _seed_manual_review_template(root: Path, *, date: str = "2026-06-05", count:
     _write(root / "reviews" / "paper_manual_review_log_template.csv", "\n".join(lines) + "\n")
 
 
+def _seed_daily_plan_sidecar(
+    root: Path,
+    *,
+    account_id: str = "paper_pilot_202606",
+    plan_date: str = "2026-06-08",
+    items: list[dict] | None = None,
+) -> Path:
+    compact = plan_date.replace("-", "")
+    payload = {
+        "schema_version": "paper_daily_plan.v1",
+        "account_id": account_id,
+        "data_date": "2026-06-05",
+        "trade_date": plan_date,
+        "plan_date": plan_date,
+        "run_mode": "official",
+        "official_run": True,
+        "items": items
+        if items is not None
+        else [
+            {
+                "symbol": "MAA",
+                "action": "BUY",
+                "quantity": 73,
+                "price": 135.37,
+                "reason": "STRATEGY_ENTRY",
+            },
+            {
+                "symbol": "BRK-B",
+                "action": "SELL",
+                "quantity": 20,
+                "price": 512.34,
+                "reason": "SWITCH_OUT",
+            },
+            {
+                "symbol": "GEN",
+                "action": "REVIEW_EXIT",
+                "quantity": 1,
+                "price": 30.0,
+                "reason": "REVIEW_ONLY",
+            },
+        ],
+        "fingerprints": {},
+    }
+    path = root / f"daily_action_plan_{compact}.json"
+    _write(path, json.dumps(payload))
+    return path
+
+
 def _mapping() -> dict[str, dict[str, str]]:
     return {
         "weekly_reports": {
@@ -338,6 +388,28 @@ def _mapping() -> dict[str, dict[str, str]]:
             "synced_at": "Synced At",
             "sync_status": "Sync Status",
         },
+        "manual_executions": {
+            "name": "Name",
+            "external_key": "External Key",
+            "account_id": "Account ID",
+            "execution_date": "Execution Date",
+            "plan_date": "Plan Date",
+            "symbol": "Symbol",
+            "side": "Side",
+            "quantity": "Quantity",
+            "actual_price": "Actual Price",
+            "commission": "Commission",
+            "currency": "Currency",
+            "broker": "Broker",
+            "status": "Status",
+            "linked_daily_plan_key": "Linked Daily Plan Key",
+            "note": "Note",
+            "validation_status": "Validation Status",
+            "validation_message": "Validation Message",
+            "import_status": "Import Status",
+            "imported_at": "Imported At",
+            "synced_at": "Synced At",
+        },
         "manual_reviews": {
             "name": "Name",
             "external_key": "External Key",
@@ -371,6 +443,7 @@ def _settings() -> NotionSettings:
             "account_snapshots": "db-account",
             "daily_plans": "db-daily-plan",
             "daily_review_summaries": "db-daily-review",
+            "manual_executions": "db-manual-executions",
             "manual_reviews": "db-manual-reviews",
         },
     )
@@ -418,8 +491,9 @@ class FakeFallbackClient:
 
 
 class FakeManualReviewTemplateClient:
-    def __init__(self, existing_keys: dict[str, str] | None = None):
+    def __init__(self, existing_keys: dict[str, str] | None = None, schema: dict | None = None):
         self.existing_keys = existing_keys or {}
+        self.schema = schema
         self.query_calls: list[str] = []
         self.create_calls: list[tuple[str, dict]] = []
         self.update_calls: list[tuple[str, dict]] = []
@@ -436,6 +510,9 @@ class FakeManualReviewTemplateClient:
     def update_page(self, page_id, properties):
         self.update_calls.append((page_id, properties))
         return {"id": page_id}
+
+    def get_data_source_schema(self, data_source_id):
+        return self.schema or {}
 
 
 def test_weekly_external_key_is_generated():
@@ -1031,6 +1108,193 @@ def test_non_default_manual_review_template_missing_account_template_does_not_fa
             review_date="2026-06-05",
             dry_run=True,
         )
+
+
+def test_manual_execution_template_export_builds_draft_candidates_from_daily_plan(tmp_path):
+    root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan_sidecar(root)
+    client = FakeManualReviewTemplateClient()
+
+    summary = export_manual_execution_template_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        paper_root=root,
+        date_str="2026-06-08",
+        dry_run=True,
+    )
+
+    assert summary["target"] == "manual_execution_template"
+    assert summary["account_id"] == "paper_pilot_202606"
+    assert summary["execution_date"] == "2026-06-08"
+    assert summary["linked_daily_plan_key"] == "daily_plan:paper_pilot_202606:2026-06-08"
+    assert summary["candidate_count"] == 2
+    assert summary["create_count"] == 2
+    assert summary["would_write"] is False
+    first = summary["candidates"][0]
+    assert first["external_key"] == "manual_execution:paper_pilot_202606:2026-06-08:MAA:BUY:01"
+    assert first["account_id"] == "paper_pilot_202606"
+    assert first["status"] == "DRAFT"
+    assert first["import_status"] == "DRAFT"
+    assert first["actual_price"] is None
+    assert first["commission"] == 0
+    assert first["currency"] == "USD"
+    assert first["broker"] == "PAPER"
+    assert "plan_price=135.37" in first["note"]
+    assert "STRATEGY_ENTRY" in first["note"]
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_manual_execution_template_properties_leave_actual_price_blank(tmp_path):
+    root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan_sidecar(root)
+    summary = export_manual_execution_template_to_notion(
+        client=FakeManualReviewTemplateClient(),
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        paper_root=root,
+        date_str="2026-06-08",
+        dry_run=True,
+    )
+    candidate = notion_exporters.ManualExecutionTemplateExportCandidate(
+        external_key=summary["candidates"][0]["external_key"],
+        action="create",
+        page_id=None,
+        account_id="paper_pilot_202606",
+        execution_date="2026-06-08",
+        plan_date="2026-06-08",
+        symbol="MAA",
+        side="BUY",
+        quantity=73,
+        plan_price=135.37,
+        note=summary["candidates"][0]["note"],
+    )
+    properties = build_manual_execution_template_properties(candidate, _mapping()["manual_executions"])
+
+    assert "Actual Price" not in properties
+    assert properties["Status"]["select"]["name"] == "DRAFT"
+    assert properties["Import Status"]["select"]["name"] == "DRAFT"
+    assert properties["Linked Daily Plan Key"]["rich_text"][0]["text"]["content"] == (
+        "daily_plan:paper_pilot_202606:2026-06-08"
+    )
+
+
+def test_manual_execution_template_actual_export_uses_schema_compatible_import_status_and_broker(tmp_path):
+    root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan_sidecar(root, items=[{"symbol": "MAA", "action": "BUY", "quantity": 73, "price": 135.37}])
+    schema = {
+        "properties": {
+            "Import Status": {
+                "type": "select",
+                "select": {
+                    "options": [
+                        {"name": "NOT_IMPORTED"},
+                        {"name": "PREVIEWED"},
+                        {"name": "COMMITTED"},
+                        {"name": "SKIPPED"},
+                    ]
+                },
+            },
+            "Broker": {"type": "rich_text", "rich_text": {}},
+        }
+    }
+    client = FakeManualReviewTemplateClient(schema=schema)
+
+    summary = export_manual_execution_template_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        paper_root=root,
+        date_str="2026-06-08",
+        dry_run=False,
+    )
+
+    assert summary["initial_import_status"] == "NOT_IMPORTED"
+    assert summary["created_count"] == 1
+    properties = client.create_calls[0][1]
+    assert properties["Status"]["select"]["name"] == "DRAFT"
+    assert properties["Import Status"]["select"]["name"] == "NOT_IMPORTED"
+    assert properties["Broker"]["rich_text"][0]["text"]["content"] == "PAPER"
+
+
+def test_manual_execution_template_export_rejects_account_mismatch(tmp_path):
+    root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan_sidecar(root, account_id="paper_other")
+
+    with pytest.raises(NotionExportError, match="account_id mismatch"):
+        export_manual_execution_template_to_notion(
+            client=FakeManualReviewTemplateClient(),
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_pilot_202606",
+            paper_root=root,
+            date_str="2026-06-08",
+            dry_run=True,
+        )
+
+
+def test_manual_execution_template_export_rejects_missing_sidecar_account_id(tmp_path):
+    root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    path = _seed_daily_plan_sidecar(root)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("account_id")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(NotionExportError, match="account_id is required"):
+        export_manual_execution_template_to_notion(
+            client=FakeManualReviewTemplateClient(),
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_pilot_202606",
+            paper_root=root,
+            date_str="2026-06-08",
+            dry_run=True,
+        )
+
+
+def test_manual_execution_template_export_marks_existing_external_key_as_update(tmp_path):
+    root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan_sidecar(root)
+    existing_key = "manual_execution:paper_pilot_202606:2026-06-08:MAA:BUY:01"
+    client = FakeManualReviewTemplateClient(existing_keys={existing_key: "page-existing"})
+
+    summary = export_manual_execution_template_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        paper_root=root,
+        date_str="2026-06-08",
+        dry_run=True,
+    )
+
+    assert summary["candidate_count"] == 2
+    assert summary["update_count"] == 1
+    update_candidate = [item for item in summary["candidates"] if item["action"] == "update"][0]
+    assert update_candidate["external_key"] == existing_key
+    assert update_candidate["page_id"] == "page-existing"
+
+
+def test_manual_execution_template_export_empty_items_returns_zero_candidates(tmp_path):
+    root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan_sidecar(root, items=[])
+
+    summary = export_manual_execution_template_to_notion(
+        client=FakeManualReviewTemplateClient(),
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        paper_root=root,
+        date_str="2026-06-08",
+        dry_run=True,
+    )
+
+    assert summary["candidate_count"] == 0
+    assert summary["failed_count"] == 0
 
 
 def test_paper_default_legacy_page_can_be_reused(tmp_path):

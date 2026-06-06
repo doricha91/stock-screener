@@ -122,6 +122,94 @@ def test_cli_manual_review_template_requires_dry_run_or_confirm_actual():
         )
 
 
+def test_cli_manual_execution_template_requires_date_account_and_guard():
+    with pytest.raises(SystemExit):
+        export_paper_to_notion.main(
+            [
+                "--manual-execution-template",
+                "--account-id",
+                "paper_pilot_202606",
+                "--dry-run",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        export_paper_to_notion.main(
+            [
+                "--manual-execution-template",
+                "--date",
+                "2026-06-08",
+                "--dry-run",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        export_paper_to_notion.main(
+            [
+                "--manual-execution-template",
+                "--account-id",
+                "paper_pilot_202606",
+                "--date",
+                "2026-06-08",
+            ]
+        )
+
+
+def test_cli_manual_execution_template_dry_run_routes_to_exporter(monkeypatch, capsys):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(export_paper_to_notion, "load_notion_settings", lambda allow_missing=True: object())
+    monkeypatch.setattr(export_paper_to_notion, "load_notion_property_mapping", lambda: {"manual_executions": {}})
+    monkeypatch.setattr(export_paper_to_notion, "get_notion_token", lambda settings: "token")
+    monkeypatch.setattr(export_paper_to_notion, "NotionClient", lambda token: object())
+
+    def fake_export_manual_execution_template_to_notion(**kwargs):
+        captured.update(kwargs)
+        return {
+            "target": "manual_execution_template",
+            "account_id": "paper_pilot_202606",
+            "execution_date": "2026-06-08",
+            "plan_date": "2026-06-08",
+            "candidate_count": 2,
+            "create_count": 2,
+            "update_count": 0,
+            "created_count": 0,
+            "updated_count": 0,
+            "skip_count": 0,
+            "failed_count": 0,
+            "source_plan_path": "outputs/paper_accounts/paper_pilot_202606/daily_action_plan_20260608.json",
+            "dry_run": True,
+            "would_write": False,
+            "candidates": [],
+            "failed": [],
+        }
+
+    monkeypatch.setattr(
+        export_paper_to_notion,
+        "export_manual_execution_template_to_notion",
+        fake_export_manual_execution_template_to_notion,
+    )
+
+    rc = export_paper_to_notion.main(
+        [
+            "--manual-execution-template",
+            "--account-id",
+            "paper_pilot_202606",
+            "--date",
+            "2026-06-08",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["account_id"] == "paper_pilot_202606"
+    assert captured["date_str"] == "2026-06-08"
+    assert captured["dry_run"] is True
+    output = capsys.readouterr().out
+    assert "manual_execution_template" in output
+    payload = json.loads(output[output.index("{") :])
+    assert payload["candidate_count"] == 2
+
+
 def test_cli_manual_review_template_dry_run_routes_to_exporter(monkeypatch, capsys):
     captured: dict[str, object] = {}
 

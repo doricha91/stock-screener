@@ -21,6 +21,7 @@ from core.notion_account_keys import (
     build_legacy_daily_plan_external_key,
     build_legacy_daily_review_summary_external_key,
     build_legacy_weekly_report_external_key,
+    build_manual_execution_canonical_key,
     build_manual_review_canonical_key,
     build_weekly_report_external_key as build_weekly_report_external_key_with_account,
     normalize_notion_account_id,
@@ -64,6 +65,8 @@ class ExportResult:
 
 MANUAL_REVIEW_TEMPLATE_TARGET = "manual_review_template"
 MANUAL_REVIEW_TEMPLATE_IMPORT_STATUS = "DRAFT"
+MANUAL_EXECUTION_TEMPLATE_TARGET = "manual_execution_template"
+MANUAL_EXECUTION_TEMPLATE_IMPORT_STATUS = "DRAFT"
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,44 @@ class ManualReviewTemplateExportCandidate:
             "question_id": self.question_id,
             "question": self.question,
             "source_template_key": self.source_template_key,
+        }
+
+
+@dataclass(frozen=True)
+class ManualExecutionTemplateExportCandidate:
+    external_key: str
+    action: str
+    page_id: str | None
+    account_id: str
+    execution_date: str
+    plan_date: str
+    symbol: str
+    side: str
+    quantity: float
+    plan_price: float | None
+    note: str
+    import_status: str = MANUAL_EXECUTION_TEMPLATE_IMPORT_STATUS
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "external_key": self.external_key,
+            "action": self.action,
+            "page_id": self.page_id,
+            "account_id": self.account_id,
+            "execution_date": self.execution_date,
+            "plan_date": self.plan_date,
+            "symbol": self.symbol,
+            "side": self.side,
+            "quantity": self.quantity,
+            "actual_price": None,
+            "commission": 0,
+            "currency": "USD",
+            "broker": "PAPER",
+            "status": "DRAFT",
+            "import_status": self.import_status,
+            "linked_daily_plan_key": build_daily_plan_external_key(self.execution_date, self.account_id),
+            "plan_price": self.plan_price,
+            "note": self.note,
         }
 
 
@@ -733,6 +774,172 @@ def build_manual_review_template_properties(
     }
 
 
+def _daily_plan_sidecar_path_for_date(root: Path, date_str: str) -> Path:
+    compact_date = _compact_date(date_str)
+    return root / f"daily_action_plan_{compact_date}.json"
+
+
+def _load_daily_plan_sidecar_for_manual_execution_template(
+    *,
+    account_id: str,
+    date_str: str,
+    paper_root: Path | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    normalized_date = _normalize_export_date(date_str)
+    root = _resolve_daily_plan_export_root(account_id=account_id, paper_root=paper_root)
+    sidecar_path = _daily_plan_sidecar_path_for_date(root, normalized_date)
+    payload = _read_json(sidecar_path)
+    sidecar_account_id = str(payload.get("account_id") or "").strip()
+    if not sidecar_account_id:
+        raise NotionExportError(f"Daily Plan sidecar account_id is required: {sidecar_path}")
+    if sidecar_account_id != account_id:
+        raise NotionExportError(
+            f"Daily Plan sidecar account_id mismatch: cli={account_id}, sidecar={sidecar_account_id}"
+        )
+    plan_date = _normalize_export_date(str(payload.get("plan_date") or normalized_date))
+    trade_date_raw = str(payload.get("trade_date") or "").strip()
+    trade_date = _normalize_export_date(trade_date_raw) if trade_date_raw else plan_date
+    if trade_date != normalized_date and plan_date != normalized_date:
+        raise NotionExportError(
+            f"Daily Plan sidecar date mismatch: requested={normalized_date}, "
+            f"plan_date={plan_date}, trade_date={trade_date}"
+        )
+    return sidecar_path, payload
+
+
+def _manual_execution_note_from_item(item: dict[str, Any]) -> str:
+    price = item.get("price")
+    reason = str(item.get("reason") or "").strip()
+    note = f"generated_from_daily_plan; plan_price={'' if price is None else price}; reason={reason}"
+    return note.strip()
+
+
+def _manual_execution_template_candidates_from_sidecar(
+    payload: dict[str, Any],
+    *,
+    account_id: str,
+) -> tuple[str, list[ManualExecutionTemplateExportCandidate], list[dict[str, str]]]:
+    trade_date_raw = str(payload.get("trade_date") or payload.get("plan_date") or "").strip()
+    if not trade_date_raw:
+        raise NotionExportError("Daily Plan sidecar plan_date/trade_date is required.")
+    trade_date = _normalize_export_date(trade_date_raw)
+    items = payload.get("items") or []
+    if not isinstance(items, list):
+        raise NotionExportError("Daily Plan sidecar items must be a list.")
+
+    candidates: list[ManualExecutionTemplateExportCandidate] = []
+    failed: list[dict[str, str]] = []
+    sequence_by_key: dict[tuple[str, str], int] = {}
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            failed.append({"index": str(index), "error": "item is not an object"})
+            continue
+        side = str(item.get("action") or item.get("type") or "").strip().upper()
+        if side not in {"BUY", "SELL"}:
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        quantity = _safe_float(item.get("quantity") if "quantity" in item else item.get("shares"))
+        if not symbol or quantity is None or quantity <= 0:
+            failed.append(
+                {
+                    "index": str(index),
+                    "symbol": symbol,
+                    "side": side,
+                    "error": "BUY/SELL items require symbol and positive quantity.",
+                }
+            )
+            continue
+        sequence_key = (symbol, side)
+        sequence_by_key[sequence_key] = sequence_by_key.get(sequence_key, 0) + 1
+        sequence = sequence_by_key[sequence_key]
+        external_key = build_manual_execution_canonical_key(
+            account_id,
+            trade_date,
+            symbol,
+            side,
+            sequence,
+        )
+        candidates.append(
+            ManualExecutionTemplateExportCandidate(
+                external_key=external_key,
+                action="create",
+                page_id=None,
+                account_id=account_id,
+                execution_date=trade_date,
+                plan_date=trade_date,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                plan_price=_safe_float(item.get("price")),
+                note=_manual_execution_note_from_item(item),
+            )
+        )
+    return trade_date, candidates, failed
+
+
+def build_manual_execution_template_properties(
+    candidate: ManualExecutionTemplateExportCandidate,
+    mapping: dict[str, str],
+    *,
+    broker_property_type: str = "select",
+) -> dict[str, Any]:
+    broker_property = (
+        notion_rich_text("PAPER") if broker_property_type == "rich_text" else notion_select("PAPER")
+    )
+    return {
+        resolve_notion_property_name(mapping, "name"): notion_title(
+            f"{candidate.execution_date} {candidate.account_id} {candidate.side} {candidate.symbol}"
+        ),
+        resolve_notion_property_name(mapping, "external_key"): notion_rich_text(candidate.external_key),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(candidate.account_id),
+        resolve_notion_property_name(mapping, "execution_date"): notion_date(candidate.execution_date),
+        resolve_notion_property_name(mapping, "plan_date"): notion_date(candidate.plan_date),
+        resolve_notion_property_name(mapping, "symbol"): notion_rich_text(candidate.symbol),
+        resolve_notion_property_name(mapping, "side"): notion_select(candidate.side),
+        resolve_notion_property_name(mapping, "quantity"): notion_number(candidate.quantity),
+        resolve_notion_property_name(mapping, "commission"): notion_number(0),
+        resolve_notion_property_name(mapping, "currency"): notion_select("USD"),
+        resolve_notion_property_name(mapping, "broker"): broker_property,
+        resolve_notion_property_name(mapping, "status"): notion_select("DRAFT"),
+        resolve_notion_property_name(mapping, "linked_daily_plan_key"): notion_rich_text(
+            build_daily_plan_external_key(candidate.execution_date, candidate.account_id)
+        ),
+        resolve_notion_property_name(mapping, "note"): notion_rich_text(candidate.note),
+        resolve_notion_property_name(mapping, "import_status"): notion_select(candidate.import_status),
+    }
+
+
+def _get_notion_property_schema(
+    client: NotionClient | None,
+    data_source_id: str,
+    property_name: str,
+) -> dict[str, Any]:
+    if client is None or not hasattr(client, "get_data_source_schema"):
+        return {}
+    try:
+        schema = client.get_data_source_schema(data_source_id)
+    except Exception:
+        return {}
+    properties = schema.get("properties") or {}
+    property_schema = properties.get(property_name) or {}
+    return property_schema if isinstance(property_schema, dict) else {}
+
+
+def _select_option_names(property_schema: dict[str, Any]) -> set[str]:
+    property_type = str(property_schema.get("type") or "")
+    options = (property_schema.get(property_type) or {}).get("options") or []
+    return {str(option.get("name") or "") for option in options if isinstance(option, dict)}
+
+
+def _resolve_manual_execution_template_import_status(property_schema: dict[str, Any]) -> str:
+    options = _select_option_names(property_schema)
+    if not options or MANUAL_EXECUTION_TEMPLATE_IMPORT_STATUS in options:
+        return MANUAL_EXECUTION_TEMPLATE_IMPORT_STATUS
+    if "NOT_IMPORTED" in options:
+        return "NOT_IMPORTED"
+    return MANUAL_EXECUTION_TEMPLATE_IMPORT_STATUS
+
+
 def _manual_review_template_candidate_from_row(
     row: dict[str, str],
     *,
@@ -1366,6 +1573,136 @@ def export_daily_review_summary_to_notion(
         dry_run=dry_run,
         refresh_children_on_update=False,
     )
+
+
+def export_manual_execution_template_to_notion(
+    *,
+    client: NotionClient | None,
+    settings: NotionSettings,
+    mapping_root: dict[str, dict[str, str]],
+    date_str: str,
+    account_id: str | None = None,
+    paper_root: Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    resolved_account_id = normalize_notion_account_id(account_id)
+    normalized_date = _normalize_export_date(date_str)
+    sidecar_path, payload = _load_daily_plan_sidecar_for_manual_execution_template(
+        account_id=resolved_account_id,
+        date_str=normalized_date,
+        paper_root=paper_root,
+    )
+    sidecar_account_id = str(payload.get("account_id") or "").strip()
+    trade_date, raw_candidates, failed = _manual_execution_template_candidates_from_sidecar(
+        payload,
+        account_id=sidecar_account_id,
+    )
+    mapping = get_mapping_section(mapping_root, "manual_executions")
+    data_source_id = get_notion_data_source_id(
+        settings,
+        "manual_executions",
+        env_override="NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID",
+    )
+    external_key_property = resolve_notion_property_name(mapping, "external_key")
+    import_status_property = resolve_notion_property_name(mapping, "import_status")
+    broker_property = resolve_notion_property_name(mapping, "broker")
+    import_status_schema = _get_notion_property_schema(client, data_source_id, import_status_property)
+    broker_schema = _get_notion_property_schema(client, data_source_id, broker_property)
+    initial_import_status = _resolve_manual_execution_template_import_status(import_status_schema)
+    broker_property_type = str(broker_schema.get("type") or "select")
+
+    candidates: list[ManualExecutionTemplateExportCandidate] = []
+    for candidate in raw_candidates:
+        existing: list[dict[str, Any]] = []
+        if client is not None:
+            existing = client.query_by_external_key(
+                data_source_id,
+                candidate.external_key,
+                external_key_property,
+            )
+        if len(existing) >= 2:
+            failed.append(
+                {
+                    "symbol": candidate.symbol,
+                    "side": candidate.side,
+                    "external_key": candidate.external_key,
+                    "error": "Multiple Notion rows found for external key.",
+                }
+            )
+            continue
+
+        page_id = str(existing[0].get("id") or "").strip() if existing else None
+        action = "update" if page_id else "create"
+        candidate = ManualExecutionTemplateExportCandidate(
+            external_key=candidate.external_key,
+            action=action,
+            page_id=page_id,
+            account_id=candidate.account_id,
+            execution_date=candidate.execution_date,
+            plan_date=candidate.plan_date,
+            symbol=candidate.symbol,
+            side=candidate.side,
+            quantity=candidate.quantity,
+            plan_price=candidate.plan_price,
+            note=candidate.note,
+            import_status=initial_import_status,
+        )
+        candidates.append(candidate)
+
+        if not dry_run:
+            if client is None:
+                raise NotionExportError("Notion client is required for actual manual execution template export.")
+            properties = build_manual_execution_template_properties(
+                candidate,
+                mapping,
+                broker_property_type=broker_property_type,
+            )
+            if page_id:
+                client.update_page(page_id, properties)
+            else:
+                created = client.create_page(data_source_id, properties)
+                candidates[-1] = ManualExecutionTemplateExportCandidate(
+                    external_key=candidate.external_key,
+                    action="create",
+                    page_id=str(created.get("id") or "").strip(),
+                    account_id=candidate.account_id,
+                    execution_date=candidate.execution_date,
+                    plan_date=candidate.plan_date,
+                    symbol=candidate.symbol,
+                    side=candidate.side,
+                    quantity=candidate.quantity,
+                    plan_price=candidate.plan_price,
+                    note=candidate.note,
+                    import_status=candidate.import_status,
+                )
+
+    create_count = sum(1 for candidate in candidates if candidate.action == "create")
+    update_count = sum(1 for candidate in candidates if candidate.action == "update")
+    failed_count = len(failed)
+    return {
+        "target": MANUAL_EXECUTION_TEMPLATE_TARGET,
+        "account_id": sidecar_account_id,
+        "execution_date": trade_date,
+        "plan_date": trade_date,
+        "linked_daily_plan_key": build_daily_plan_external_key(trade_date, sidecar_account_id),
+        "candidate_count": len(candidates),
+        "create_count": create_count,
+        "update_count": update_count,
+        "created_count": 0 if dry_run else create_count,
+        "updated_count": 0 if dry_run else update_count,
+        "skip_count": 0,
+        "failed_count": failed_count,
+        "source_plan_path": _relative_to_project(sidecar_path),
+        "dry_run": dry_run,
+        "would_write": not dry_run,
+        "data_source_key": "manual_executions",
+        "data_source_id": data_source_id,
+        "initial_import_status": initial_import_status,
+        "initial_status": "DRAFT",
+        "candidates": [candidate.to_dict() for candidate in candidates],
+        "failed": failed,
+        "legacy_trade_date_note": "" if payload.get("trade_date") else "trade_date missing; used plan_date",
+    }
 
 
 def export_manual_review_template_to_notion(
