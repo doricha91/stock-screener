@@ -13,6 +13,9 @@ from core.paper_daily_ops_evidence import (
     EVIDENCE_MANUAL_REVIEW_TEMPLATE,
     notion_evidence_path,
 )
+from core.notion_client import NotionAPIError
+from core.notion_settings import NotionSettings
+from core.paper_daily_ops_notion_status import build_notion_live_read_status
 from core.paper_daily_ops_orchestrator import build_daily_ops_status
 from scripts import paper_daily_ops
 
@@ -194,6 +197,111 @@ def _write_notion_evidence(
     return path
 
 
+def _notion_stage_report(
+    status: str,
+    *,
+    row_count: int = 1,
+    status_counts: dict[str, int] | None = None,
+    errors: list[str] | None = None,
+    warnings: list[str] | None = None,
+) -> dict:
+    return {
+        "status": status,
+        "row_count": row_count,
+        "status_counts": status_counts or {},
+        "errors": errors or [],
+        "warnings": warnings or [],
+        "details": {},
+    }
+
+
+def _notion_report(stages: dict[str, dict], *, status: str = "PASS") -> dict:
+    return {
+        "enabled": True,
+        "called": True,
+        "status": status,
+        "errors": [],
+        "warnings": [],
+        "summary": {"stage_status_counts": {status: len(stages)}, "total_row_count": len(stages)},
+        "stages": stages,
+    }
+
+
+def _notion_property(value: str, kind: str) -> dict:
+    if kind == "select":
+        return {"type": "select", "select": {"name": value}}
+    if kind == "date":
+        return {"type": "date", "date": {"start": value}}
+    if kind == "number":
+        return {"type": "number", "number": float(value)}
+    return {"type": "rich_text", "rich_text": [{"plain_text": value}]}
+
+
+def _fake_notion_page(*, account_id: str = "paper_ops", date_key: str, date_value: str, status: str = "SYNCED") -> dict:
+    return {
+        "id": f"page-{date_key}",
+        "properties": {
+            "Account ID": _notion_property(account_id, "select"),
+            "Plan Date": _notion_property(date_value, "date"),
+            "Execution Date": _notion_property(date_value, "date"),
+            "Review Date": _notion_property(date_value, "date"),
+            "Status": _notion_property(status, "select"),
+            "Import Status": _notion_property(status, "select"),
+            "Review Status": _notion_property(status.lower(), "select"),
+            "Sync Status": _notion_property(status, "select"),
+            "Actual Price": _notion_property("100", "number"),
+        },
+    }
+
+
+class _FakeNotionClient:
+    def __init__(self, pages: list[dict] | None = None, exc: Exception | None = None) -> None:
+        self.pages = pages or []
+        self.exc = exc
+        self.calls: list[tuple[str, dict | None]] = []
+
+    def query_data_source(self, data_source_id: str, *, filter_payload: dict | None = None, **_: object) -> list[dict]:
+        self.calls.append((data_source_id, filter_payload))
+        if self.exc:
+            raise self.exc
+        return list(self.pages)
+
+
+def _notion_settings() -> NotionSettings:
+    return NotionSettings(
+        enabled=True,
+        token_env="NOTION_TOKEN",
+        data_sources={
+            "daily_plans": "daily-plans",
+            "manual_executions": "manual-executions",
+            "manual_reviews": "manual-reviews",
+        },
+    )
+
+
+def _notion_mapping() -> dict[str, dict[str, str]]:
+    return {
+        "daily_plans": {
+            "account_id": "Account ID",
+            "plan_date": "Plan Date",
+            "sync_status": "Sync Status",
+        },
+        "manual_executions": {
+            "account_id": "Account ID",
+            "execution_date": "Execution Date",
+            "status": "Status",
+            "import_status": "Import Status",
+            "actual_price": "Actual Price",
+        },
+        "manual_reviews": {
+            "account_id": "Account ID",
+            "review_date": "Review Date",
+            "review_status": "Review Status",
+            "import_status": "Import Status",
+        },
+    }
+
+
 def test_account_id_missing_is_blocked():
     with pytest.raises(ValueError, match="account_id is required"):
         build_daily_ops_status(account_id="", data_date="2026-06-05", trade_date="2026-06-08")
@@ -231,12 +339,157 @@ def test_normal_input_generates_stage_list_and_read_only_flags(tmp_path: Path):
     assert payload["write_executed"] is False
     assert payload["operation_write_executed"] is False
     assert payload["notion_api_called"] is False
+    assert payload["notion_live_read_enabled"] is False
+    assert payload["notion_live_read_called"] is False
+    assert payload["notion_live_read_status"] == "SKIPPED"
     assert payload["commit_append_executed"] is False
     assert payload["status_report_written"] is False
     assert payload["status_report_path"] is None
     assert "next_action" in payload
     assert "summary" in payload
     assert "stage_counts" in payload
+    assert all("notion_checked" in stage for stage in payload["stages"])
+
+
+def test_notion_live_read_module_uses_read_only_client():
+    page = _fake_notion_page(date_key="plan_date", date_value="2026-06-08")
+    client = _FakeNotionClient([page])
+
+    report = build_notion_live_read_status(
+        account_id="paper_ops",
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        client=client,
+        settings=_notion_settings(),
+        mapping_root=_notion_mapping(),
+    )
+
+    assert report["called"] is True
+    assert client.calls
+    assert len(client.calls) == 7
+    assert report["stages"]["DAILY_PLAN_NOTION_EXPORT"]["row_count"] == 1
+
+
+def test_notion_live_read_disabled_settings_is_blocked():
+    report = build_notion_live_read_status(
+        account_id="paper_ops",
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        client=_FakeNotionClient(),
+        settings=NotionSettings(enabled=False, token_env="NOTION_TOKEN", data_sources={}),
+        mapping_root=_notion_mapping(),
+    )
+
+    assert report["called"] is True
+    assert report["status"] == "BLOCKED"
+    assert report["errors"]
+
+
+def test_notion_live_read_api_exception_is_json_safe():
+    report = build_notion_live_read_status(
+        account_id="paper_ops",
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        client=_FakeNotionClient(exc=NotionAPIError("read failed")),
+        settings=_notion_settings(),
+        mapping_root=_notion_mapping(),
+    )
+
+    assert report["called"] is True
+    assert report["status"] == "BLOCKED"
+    assert "read failed" in report["errors"][0]
+
+
+def test_include_notion_read_improves_daily_plan_export_stage(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"DAILY_PLAN_NOTION_EXPORT": _notion_stage_report("PASS", status_counts={"SYNCED": 1})}
+        ),
+    )
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert payload["notion_live_read_enabled"] is True
+    assert payload["notion_live_read_called"] is True
+    assert stage["status"] == "DONE"
+    assert stage["notion_checked"] is True
+    assert stage["notion_row_count"] == 1
+
+
+def test_notion_ready_manual_execution_preserves_preview_recommendation(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_EXECUTION_PREVIEW": _notion_stage_report("PASS", status_counts={"READY": 1})}
+        ),
+    )
+    stage = _stage(payload, "MANUAL_EXECUTION_PREVIEW")
+
+    assert stage["status"] == "READY"
+    assert stage["next_action"]["command_type"] == "READ_ONLY"
+    assert stage["notion_checked"] is True
+
+
+def test_local_commit_with_unsynced_notion_status_keeps_sync_recommendation(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {
+                "MANUAL_EXECUTION_STATUS_SYNC": _notion_stage_report(
+                    "WARNING",
+                    status_counts={"READY": 1},
+                    warnings=["No Notion rows are COMMITTED/SYNCED."],
+                )
+            },
+            status="WARNING",
+        ),
+    )
+    stage = _stage(payload, "MANUAL_EXECUTION_STATUS_SYNC")
+
+    assert stage["status"] == "WARNING"
+    assert "sync_notion_execution_status.py" in stage["next_command"]
+    assert stage["notion_warnings"]
+
+
+def test_notion_mismatch_blocks_stage(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {
+                "DAILY_PLAN_NOTION_EXPORT": _notion_stage_report(
+                    "BLOCKED",
+                    errors=["Notion account_id mismatch: other != paper_ops."],
+                )
+            },
+            status="BLOCKED",
+        ),
+    )
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "BLOCKED"
+    assert stage["notion_errors"]
 
 
 def test_non_default_legacy_paper_test_plan_blocks_daily_plan_evidence(tmp_path: Path):

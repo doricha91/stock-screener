@@ -29,6 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--review-commit-report", help="Optional Manual Review commit report JSON evidence path")
     status.add_argument("--write-status-report", action="store_true", help="Persist the generated status JSON report")
     status.add_argument("--status-report-path", help="Optional status report output path")
+    status.add_argument("--include-notion-read", action="store_true", help="Opt into read-only Notion status verification")
+    status.add_argument(
+        "--notion-timeout-seconds",
+        type=int,
+        default=30,
+        help="Timeout for optional read-only Notion API calls",
+    )
     status.add_argument(
         "--strict-exit",
         action="store_true",
@@ -54,6 +61,8 @@ def handle_status(args: argparse.Namespace) -> int:
             account_root=Path(args.account_root) if args.account_root else None,
             legacy_root=Path(args.legacy_root) if args.legacy_root else None,
             evidence_paths=evidence,
+            include_notion_read=bool(args.include_notion_read),
+            notion_timeout_seconds=int(args.notion_timeout_seconds),
         )
     except ValueError as exc:
         payload = {
@@ -63,6 +72,11 @@ def handle_status(args: argparse.Namespace) -> int:
             "write_executed": False,
             "operation_write_executed": False,
             "notion_api_called": False,
+            "notion_live_read_enabled": bool(args.include_notion_read),
+            "notion_live_read_called": False,
+            "notion_live_read_status": "SKIPPED",
+            "notion_live_read_errors": [],
+            "notion_live_read_summary": {"stage_status_counts": {}, "total_row_count": 0},
             "commit_append_executed": False,
             "status_report_written": False,
             "status_report_path": None,
@@ -100,6 +114,11 @@ def handle_status(args: argparse.Namespace) -> int:
             "write_executed": False,
             "operation_write_executed": False,
             "notion_api_called": False,
+            "notion_live_read_enabled": bool(args.include_notion_read),
+            "notion_live_read_called": False,
+            "notion_live_read_status": "SKIPPED",
+            "notion_live_read_errors": [],
+            "notion_live_read_summary": {"stage_status_counts": {}, "total_row_count": 0},
             "commit_append_executed": False,
             "status_report_written": False,
             "status_report_path": None,

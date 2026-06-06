@@ -22,6 +22,15 @@ from core.paper_daily_ops_evidence import (
     EvidenceEvaluation,
     evaluate_notion_evidence,
 )
+from core.paper_daily_ops_notion_status import (
+    BLOCKED as NOTION_BLOCKED,
+    PASS as NOTION_PASS,
+    SKIPPED as NOTION_SKIPPED,
+    UNKNOWN as NOTION_UNKNOWN,
+    WARNING as NOTION_WARNING,
+    build_notion_live_read_status,
+    skipped_notion_live_read_status,
+)
 from core.paper_status import WORKFLOW_REVIEW_DONE, run_paper_status
 
 
@@ -83,6 +92,9 @@ def build_daily_ops_status(
     account_root: Path | None = None,
     legacy_root: Path | None = None,
     evidence_paths: OpsEvidencePaths | None = None,
+    include_notion_read: bool = False,
+    notion_timeout_seconds: int = 30,
+    notion_status_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = []
@@ -138,6 +150,14 @@ def build_daily_ops_status(
         "legacy_artifacts": legacy_artifacts,
         "global_blockers": blockers,
     }
+    notion_report = _build_notion_report(
+        include_notion_read=include_notion_read,
+        notion_timeout_seconds=notion_timeout_seconds,
+        notion_status_report=notion_status_report,
+        account_id=normalized_account_id,
+        data_date=normalized_data_date,
+        trade_date=normalized_trade_date,
+    )
     stages = [
         _stage_data_freshness(stage_context),
         _stage_daily_plan(stage_context),
@@ -153,6 +173,7 @@ def build_daily_ops_status(
         _stage_manual_review_status_sync(stage_context),
         _stage_final_status(stage_context),
     ]
+    _apply_notion_report(stages, notion_report)
     workflow_status = _safe_workflow_status(root, normalized_trade_date)
     if workflow_status == WORKFLOW_REVIEW_DONE:
         for stage in stages:
@@ -184,6 +205,11 @@ def build_daily_ops_status(
         "write_executed": False,
         "operation_write_executed": False,
         "notion_api_called": False,
+        "notion_live_read_enabled": bool(include_notion_read),
+        "notion_live_read_called": bool(notion_report.get("called")),
+        "notion_live_read_status": str(notion_report.get("status") or NOTION_SKIPPED),
+        "notion_live_read_errors": list(notion_report.get("errors") or []),
+        "notion_live_read_summary": dict(notion_report.get("summary") or {}),
         "commit_append_executed": False,
         "status_report_written": False,
         "status_report_path": None,
@@ -306,6 +332,12 @@ def _stage(
         "evidence_status": evidence.evidence_status if evidence is not None else None,
         "evidence_checked": bool(evidence.checked) if evidence is not None else False,
         "evidence_errors": list(evidence.blockers) if evidence is not None else [],
+        "notion_checked": False,
+        "notion_status": NOTION_SKIPPED,
+        "notion_row_count": 0,
+        "notion_status_counts": {},
+        "notion_errors": [],
+        "notion_warnings": [],
         "note": note,
     }
 
@@ -640,6 +672,83 @@ def _notion_evidence(ctx: dict[str, Any], evidence_type: str) -> EvidenceEvaluat
         data_date=ctx["data_date"],
         evidence_type=evidence_type,
     )
+
+
+def _build_notion_report(
+    *,
+    include_notion_read: bool,
+    notion_timeout_seconds: int,
+    notion_status_report: dict[str, Any] | None,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+) -> dict[str, Any]:
+    if notion_status_report is not None:
+        return notion_status_report
+    if not include_notion_read:
+        return skipped_notion_live_read_status()
+    return build_notion_live_read_status(
+        account_id=account_id,
+        data_date=data_date,
+        trade_date=trade_date,
+        timeout_seconds=notion_timeout_seconds,
+    )
+
+
+def _apply_notion_report(stages: list[dict[str, Any]], notion_report: dict[str, Any]) -> None:
+    stage_reports = notion_report.get("stages") or {}
+    if not isinstance(stage_reports, dict):
+        return
+    by_name = {stage["stage_name"]: stage for stage in stages}
+    for stage_name, stage_report in stage_reports.items():
+        stage = by_name.get(stage_name)
+        if not stage or not isinstance(stage_report, dict):
+            continue
+        _attach_notion_fields(stage, stage_report)
+        _apply_notion_stage_status(stage, stage_report)
+
+
+def _attach_notion_fields(stage: dict[str, Any], stage_report: dict[str, Any]) -> None:
+    stage["notion_checked"] = True
+    stage["notion_status"] = str(stage_report.get("status") or NOTION_UNKNOWN)
+    stage["notion_row_count"] = int(stage_report.get("row_count") or 0)
+    stage["notion_status_counts"] = dict(stage_report.get("status_counts") or {})
+    stage["notion_errors"] = list(stage_report.get("errors") or [])
+    stage["notion_warnings"] = list(stage_report.get("warnings") or [])
+
+
+def _apply_notion_stage_status(stage: dict[str, Any], stage_report: dict[str, Any]) -> None:
+    notion_status = str(stage_report.get("status") or NOTION_UNKNOWN)
+    if notion_status == NOTION_BLOCKED:
+        stage["status"] = BLOCKED
+        stage["blockers"] = sorted(set([*stage.get("blockers", []), *stage.get("notion_errors", [])]))
+        stage["next_command"] = None
+        stage["next_action"] = None
+        return
+    if stage.get("status") == BLOCKED:
+        return
+    if notion_status == NOTION_PASS and stage.get("stage_name") in {
+        "DAILY_PLAN_NOTION_EXPORT",
+        "MANUAL_EXECUTION_TEMPLATE",
+        "MANUAL_EXECUTION_STATUS_SYNC",
+        "MANUAL_REVIEW_TEMPLATE",
+        "MANUAL_REVIEW_STATUS_SYNC",
+    }:
+        stage["status"] = DONE
+        stage["next_command"] = None
+        stage["next_action"] = None
+        return
+    if notion_status == NOTION_WARNING and stage.get("stage_name") in {
+        "DAILY_PLAN_NOTION_EXPORT",
+        "MANUAL_EXECUTION_TEMPLATE",
+        "MANUAL_EXECUTION_STATUS_SYNC",
+        "MANUAL_REVIEW_TEMPLATE",
+        "MANUAL_REVIEW_STATUS_SYNC",
+    }:
+        stage["status"] = WARNING
+        warnings = [*stage.get("warnings", []), *stage.get("notion_warnings", [])]
+        stage["warnings"] = sorted(set(warnings))
+        return
 
 
 def _safe_workflow_status(root: Path, trade_date: str) -> str | None:

@@ -404,3 +404,52 @@ Stage JSON now includes:
 - `evidence_errors`
 
 These fields are diagnostic status fields. They do not mean that the orchestrator performed a Notion write.
+
+## 17. OPER9-5 Optional Notion Live Read Addendum
+
+OPER9-5 adds optional read-only Notion UI-state verification.
+
+Default status remains local-only:
+
+```cmd
+python scripts\paper_daily_ops.py status --account-id <ACCOUNT_ID> --data-date <DATA_DATE> --trade-date <TRADE_DATE> --json
+```
+
+Notion read is opt-in:
+
+```cmd
+python scripts\paper_daily_ops.py status --account-id <ACCOUNT_ID> --data-date <DATA_DATE> --trade-date <TRADE_DATE> --json --include-notion-read
+```
+
+Optional timeout:
+
+```cmd
+--notion-timeout-seconds <N>
+```
+
+The helper only calls read-only Notion data source query APIs. It does not create, update, delete, export, sync, commit, append, place orders, or mutate ledgers.
+
+Top-level JSON fields:
+
+- `notion_live_read_enabled`
+- `notion_live_read_called`
+- `notion_live_read_status`
+- `notion_live_read_errors`
+- `notion_live_read_summary`
+
+Stage JSON fields:
+
+- `notion_checked`
+- `notion_status`
+- `notion_row_count`
+- `notion_status_counts`
+- `notion_errors`
+- `notion_warnings`
+
+Operational policy:
+
+- Notion is UI-state verification only.
+- Local CSV/JSON/Markdown/SQLite artifacts remain source of truth.
+- Notion/local mismatch is not treated as DONE.
+- Notion read failure is reported in JSON and does not imply an operational write failure.
+- `REVIEW_DONE` still suppresses `next_command` and `next_action`.
