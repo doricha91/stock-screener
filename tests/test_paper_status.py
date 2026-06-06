@@ -73,7 +73,7 @@ def test_review_ready_when_reports_template_and_validation_pass_exist(tmp_path):
     )
     _write(root / "reports" / "paper_daily_review_summary.md", "# summary\n")
     _write(root / "reports" / "paper_performance_summary.md", "# perf\n")
-    _write(root / "reviews" / "paper_manual_review_log_template.csv", "review_date,symbol\n2026-05-21,AAPL\n")
+    _write(root / "reviews" / "paper_manual_review_log_template.csv", "review_date,symbol\n2026-05-20,AAPL\n")
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",
         "# Paper Manual Review Log Validation Report\n\n- Validation result: PASS\n",
@@ -146,15 +146,15 @@ def test_review_partial_when_some_template_rows_answered_and_log_exists(tmp_path
     _write(
         root / "reviews" / "paper_manual_review_log_template.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-21,AAPL,Q1,,pending\n"
-        "2026-05-21,AAPL,Q2,,pending\n"
-        "2026-05-21,AAPL,Q3,,pending\n"
-        "2026-05-21,AAPL,Q4,,pending\n",
+        "2026-05-20,AAPL,Q1,,pending\n"
+        "2026-05-20,AAPL,Q2,,pending\n"
+        "2026-05-20,AAPL,Q3,,pending\n"
+        "2026-05-20,AAPL,Q4,,pending\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-21,AAPL,Q1,filled,reviewed\n",
+        "2026-05-20,AAPL,Q1,filled,reviewed\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",
@@ -183,18 +183,18 @@ def test_review_done_when_all_template_rows_answered_and_log_exists(tmp_path):
     _write(
         root / "reviews" / "paper_manual_review_log_template.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-21,AAPL,Q1,,pending\n"
-        "2026-05-21,AAPL,Q2,,pending\n"
-        "2026-05-21,AAPL,Q3,,pending\n"
-        "2026-05-21,AAPL,Q4,,pending\n",
+        "2026-05-20,AAPL,Q1,,pending\n"
+        "2026-05-20,AAPL,Q2,,pending\n"
+        "2026-05-20,AAPL,Q3,,pending\n"
+        "2026-05-20,AAPL,Q4,,pending\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-21,AAPL,Q1,filled-1,reviewed\n"
-        "2026-05-21,AAPL,Q2,filled-2,reviewed\n"
-        "2026-05-21,AAPL,Q3,filled-3,reviewed\n"
-        "2026-05-21,AAPL,Q4,filled-4,reviewed\n",
+        "2026-05-20,AAPL,Q1,filled-1,reviewed\n"
+        "2026-05-20,AAPL,Q2,filled-2,reviewed\n"
+        "2026-05-20,AAPL,Q3,filled-3,reviewed\n"
+        "2026-05-20,AAPL,Q4,filled-4,reviewed\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",
@@ -223,8 +223,8 @@ def test_review_progress_uses_log_rows_not_pending_template_answers(tmp_path):
     template_lines = ["review_date,symbol,question_id,manual_answer,review_status"]
     log_lines = ["review_date,symbol,question_id,manual_answer,review_status"]
     for index in range(1, 9):
-        template_lines.append(f"2026-05-21,AAPL,Q{index},,pending")
-        log_lines.append(f"2026-05-21,AAPL,Q{index},answer-{index},reviewed")
+        template_lines.append(f"2026-05-20,AAPL,Q{index},,pending")
+        log_lines.append(f"2026-05-20,AAPL,Q{index},answer-{index},reviewed")
     _write(root / "reviews" / "paper_manual_review_log_template.csv", "\n".join(template_lines) + "\n")
     _write(root / "reviews" / "paper_manual_review_log.csv", "\n".join(log_lines) + "\n")
     _write(
@@ -257,14 +257,14 @@ def test_duplicate_review_log_key_counts_once(tmp_path):
     _write(
         root / "reviews" / "paper_manual_review_log_template.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-21,AAPL,Q1,,pending\n"
-        "2026-05-21,AAPL,Q2,,pending\n",
+        "2026-05-20,AAPL,Q1,,pending\n"
+        "2026-05-20,AAPL,Q2,,pending\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-21,AAPL,Q1,answer-1,reviewed\n"
-        "2026-05-21,AAPL,Q1,answer-1-duplicate,reviewed\n",
+        "2026-05-20,AAPL,Q1,answer-1,reviewed\n"
+        "2026-05-20,AAPL,Q1,answer-1-duplicate,reviewed\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",
@@ -277,3 +277,71 @@ def test_duplicate_review_log_key_counts_once(tmp_path):
     assert status["review_answered_row_count"] == 1
     assert status["review_pending_row_count"] == 1
     assert status["review_progress_status"] == "PARTIAL"
+
+
+def test_stale_review_template_does_not_make_target_date_review_ready(tmp_path):
+    root = _build_root(tmp_path)
+    _write(root / "daily_action_plan_20260520.md", "# plan\n")
+    _write(root / "paper_current_state_20260520.json", "{}\n")
+    _write(
+        root / "paper_account_snapshot.csv",
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols\n"
+        "2026-05-20,100,200,3,2,AAPL|MSFT\n",
+    )
+    _write(root / "paper_position_snapshot.csv", "snapshot_date,symbol\n2026-05-20,AAPL\n")
+    _write(root / "reports" / "paper_daily_review_summary.md", "# summary\n")
+    _write(root / "reports" / "paper_performance_summary.md", "# perf\n")
+    _write(
+        root / "reviews" / "paper_manual_review_log_template.csv",
+        "review_date,symbol,question_id,manual_answer,review_status\n"
+        "2026-05-19,AAPL,Q1,,pending\n",
+    )
+    _write(
+        root / "reviews" / "paper_manual_review_log_validation_report.md",
+        "# Paper Manual Review Log Validation Report\n\n- Validation result: PASS\n",
+    )
+
+    status = run_paper_status("20260520", paper_root=root)
+
+    assert status["workflow_status"] == WORKFLOW_COMMITTED
+    assert status["review_template_exists"] is False
+    assert status["review_template_row_count"] == 0
+    assert status["review_template_total_row_count"] == 1
+
+
+def test_stale_review_log_rows_do_not_count_for_target_date_progress(tmp_path):
+    root = _build_root(tmp_path)
+    _write(root / "daily_action_plan_20260520.md", "# plan\n")
+    _write(root / "paper_current_state_20260520.json", "{}\n")
+    _write(
+        root / "paper_account_snapshot.csv",
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols\n"
+        "2026-05-20,100,200,3,2,AAPL|MSFT\n",
+    )
+    _write(root / "paper_position_snapshot.csv", "snapshot_date,symbol\n2026-05-20,AAPL\n")
+    _write(root / "reports" / "paper_daily_review_summary.md", "# summary\n")
+    _write(root / "reports" / "paper_performance_summary.md", "# perf\n")
+    _write(
+        root / "reviews" / "paper_manual_review_log_template.csv",
+        "review_date,symbol,question_id,manual_answer,review_status\n"
+        "2026-05-20,AAPL,Q1,,pending\n"
+        "2026-05-20,AAPL,Q2,,pending\n",
+    )
+    _write(
+        root / "reviews" / "paper_manual_review_log.csv",
+        "review_date,symbol,question_id,manual_answer,review_status\n"
+        "2026-05-19,AAPL,Q1,old answer,reviewed\n"
+        "2026-05-19,AAPL,Q2,old answer,reviewed\n",
+    )
+    _write(
+        root / "reviews" / "paper_manual_review_log_validation_report.md",
+        "# Paper Manual Review Log Validation Report\n\n- Validation result: PASS\n",
+    )
+
+    status = run_paper_status("20260520", paper_root=root)
+
+    assert status["workflow_status"] == WORKFLOW_REVIEW_READY
+    assert status["manual_review_log_row_count"] == 0
+    assert status["manual_review_log_total_row_count"] == 2
+    assert status["review_answered_row_count"] == 0
+    assert status["review_pending_row_count"] == 2

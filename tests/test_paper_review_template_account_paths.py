@@ -74,8 +74,12 @@ def test_non_default_review_template_writes_under_reviews_root(tmp_path: Path):
         ],
     )
 
-    result = generate_paper_manual_review_log_template(account_paths=account_paths)
+    result = generate_paper_manual_review_log_template(account_paths=account_paths, review_date="2026-06-08")
     assert result["csv_output_path"].is_relative_to(account_paths.reviews_dir.resolve())
     assert result["markdown_output_path"].is_relative_to(account_paths.reviews_dir.resolve())
+    assert result["summary"]["review_date"] == "2026-06-08"
+    with result["csv_output_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows
+    assert {row["review_date"] for row in rows} == {"2026-06-08"}
     assert not (tmp_path / "paper_test").exists()
-

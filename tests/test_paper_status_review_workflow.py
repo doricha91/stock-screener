@@ -46,13 +46,13 @@ def test_validation_fail_does_not_transition_to_review_partial_or_done(tmp_path)
     _write(
         root / "reviews" / "paper_manual_review_log_template.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-31,AMT,Q1,,pending\n"
-        "2026-05-31,AMT,Q2,,pending\n",
+        "2026-05-20,AMT,Q1,,pending\n"
+        "2026-05-20,AMT,Q2,,pending\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-31,AMT,Q1,filled,reviewed\n",
+        "2026-05-20,AMT,Q1,filled,reviewed\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",
@@ -69,7 +69,7 @@ def test_review_log_without_template_does_not_misclassify_as_done(tmp_path):
     _write(
         root / "reviews" / "paper_manual_review_log.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-31,AMT,Q1,filled,reviewed\n",
+        "2026-05-20,AMT,Q1,filled,reviewed\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",
@@ -93,15 +93,15 @@ def test_non_default_account_paths_partial_review_matches_4c_shape(tmp_path, mon
     _write(
         root / "reviews" / "paper_manual_review_log_template.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-31,AMT,neutral_1,,pending\n"
-        "2026-05-31,AMT,neutral_2,,pending\n"
-        "2026-05-31,AMT,neutral_3,,pending\n"
-        "2026-05-31,AMT,neutral_4,,pending\n",
+        "2026-05-20,AMT,neutral_1,,pending\n"
+        "2026-05-20,AMT,neutral_2,,pending\n"
+        "2026-05-20,AMT,neutral_3,,pending\n"
+        "2026-05-20,AMT,neutral_4,,pending\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-31,AMT,neutral_1,paper_sandbox rehearsal review,reviewed\n",
+        "2026-05-20,AMT,neutral_1,paper_sandbox rehearsal review,reviewed\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",
@@ -128,18 +128,18 @@ def test_non_default_account_paths_done_review(tmp_path, monkeypatch):
     _write(
         root / "reviews" / "paper_manual_review_log_template.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-31,AMT,neutral_1,,pending\n"
-        "2026-05-31,AMT,neutral_2,,pending\n"
-        "2026-05-31,AMT,neutral_3,,pending\n"
-        "2026-05-31,AMT,neutral_4,,pending\n",
+        "2026-05-20,AMT,neutral_1,,pending\n"
+        "2026-05-20,AMT,neutral_2,,pending\n"
+        "2026-05-20,AMT,neutral_3,,pending\n"
+        "2026-05-20,AMT,neutral_4,,pending\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-31,AMT,neutral_1,a1,reviewed\n"
-        "2026-05-31,AMT,neutral_2,a2,reviewed\n"
-        "2026-05-31,AMT,neutral_3,a3,reviewed\n"
-        "2026-05-31,AMT,neutral_4,a4,reviewed\n",
+        "2026-05-20,AMT,neutral_1,a1,reviewed\n"
+        "2026-05-20,AMT,neutral_2,a2,reviewed\n"
+        "2026-05-20,AMT,neutral_3,a3,reviewed\n"
+        "2026-05-20,AMT,neutral_4,a4,reviewed\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",
@@ -158,8 +158,8 @@ def test_review_ready_still_returned_when_validation_pass_but_no_review_log(tmp_
     _write(
         root / "reviews" / "paper_manual_review_log_template.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
-        "2026-05-31,AMT,neutral_1,,pending\n"
-        "2026-05-31,AMT,neutral_2,,pending\n",
+        "2026-05-20,AMT,neutral_1,,pending\n"
+        "2026-05-20,AMT,neutral_2,,pending\n",
     )
     _write(
         root / "reviews" / "paper_manual_review_log_validation_report.md",

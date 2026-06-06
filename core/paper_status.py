@@ -225,6 +225,12 @@ def _summarize_review_progress(
     }
 
 
+def _filter_review_rows_for_date(rows: list[dict[str, str]], target_date: str | None) -> list[dict[str, str]]:
+    if not target_date:
+        return rows
+    return [row for row in rows if str(row.get("review_date") or "").strip() == target_date]
+
+
 def _detect_workflow_status(status: dict[str, Any]) -> str:
     if not status["date"]:
         return WORKFLOW_UNKNOWN
@@ -268,7 +274,11 @@ def _next_recommended_command(
             else f"paper.py commit --date YYYYMMDD{account_suffix}"
         )
     if workflow_status == WORKFLOW_COMMITTED:
-        return f"paper.py review{account_suffix}"
+        return (
+            f"paper.py review --date {date_str.replace('-', '')}{account_suffix}"
+            if date_str
+            else f"paper.py review{account_suffix}"
+        )
     if workflow_status == WORKFLOW_REVIEW_READY:
         return f"paper.py review-append{account_suffix}"
     if workflow_status == WORKFLOW_REVIEW_PARTIAL:
@@ -307,8 +317,10 @@ def run_paper_status(
     execution_rows = execution.get("rows") or []
     position_rows_for_date = [row for row in position_rows if row.get("snapshot_date") == target_date]
     execution_rows_for_date = [row for row in execution_rows if row.get("date") == target_date]
-    review_template_rows = _read_csv_rows(review_template_path) if review_template_path.exists() else []
-    review_log_rows = _read_csv_rows(review_log_path) if review_log_path.exists() else []
+    all_review_template_rows = _read_csv_rows(review_template_path) if review_template_path.exists() else []
+    all_review_log_rows = _read_csv_rows(review_log_path) if review_log_path.exists() else []
+    review_template_rows = _filter_review_rows_for_date(all_review_template_rows, target_date)
+    review_log_rows = _filter_review_rows_for_date(all_review_log_rows, target_date)
     review_progress = _summarize_review_progress(review_template_rows, review_log_rows)
 
     current_state_exists = bool(current_state_path and current_state_path.exists())
@@ -317,6 +329,7 @@ def run_paper_status(
     plan_exists = bool(plan_path and plan_path.exists())
     same_date_snapshot_exists = current_state_exists or account_snapshot_exists or position_snapshot_exists
     reports_ready = daily_review_summary_path.exists() and performance_summary_path.exists()
+    review_template_exists_for_date = review_template_path.exists() and bool(review_template_rows)
 
     status = {
         "account_id": account_paths.account_id if account_paths is not None else "paper_default",
@@ -350,12 +363,14 @@ def run_paper_status(
         "paper_performance_summary_exists": performance_summary_path.exists(),
         "paper_daily_review_summary_mtime": _safe_mtime(daily_review_summary_path),
         "paper_performance_summary_mtime": _safe_mtime(performance_summary_path),
-        "review_template_exists": review_template_path.exists(),
+        "review_template_exists": review_template_exists_for_date,
         "review_template_row_count": len(review_template_rows),
+        "review_template_total_row_count": len(all_review_template_rows),
         "review_validation_exists": review_validation["exists"],
         "review_validation_result": review_validation["validation_result"],
         "manual_review_log_exists": review_log_path.exists(),
         "manual_review_log_row_count": len(review_log_rows),
+        "manual_review_log_total_row_count": len(all_review_log_rows),
         "review_answered_row_count": review_progress["review_answered_row_count"],
         "review_pending_row_count": review_progress["review_pending_row_count"],
         "review_done_row_count": review_progress["review_done_row_count"],
@@ -397,7 +412,7 @@ def format_paper_status(status: dict[str, Any], *, verbose: bool = False) -> str
         f"  review_validation: {status['review_validation_result'] or ('missing' if not status['review_validation_exists'] else 'unknown')}",
         f"  review_progress_status: {status.get('review_progress_status') or '-'}",
         f"  review_pending_row_count: {status.get('review_pending_row_count', 0)}",
-        f"  manual_review_log_row_count: {status['manual_review_log_row_count']}",
+        f"  manual_review_log_row_count: {status.get('manual_review_log_row_count', 0)}",
         f"  same_date_snapshot_exists: {str(status['same_date_snapshot_exists']).lower()}",
         f"  next_recommended_command: {status['next_recommended_command']}",
     ]

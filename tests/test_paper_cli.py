@@ -838,6 +838,7 @@ def test_commit_guard_does_not_call_prepare_reports_or_review(monkeypatch):
 
 def test_review_shortcut_runs_reports_then_template_then_validate(monkeypatch):
     order: list[str] = []
+    captured_dates: list[str | None] = []
 
     def fake_handle_reports(args):
         order.append("reports")
@@ -845,6 +846,7 @@ def test_review_shortcut_runs_reports_then_template_then_validate(monkeypatch):
 
     def fake_handle_review_template(args):
         order.append("review-template")
+        captured_dates.append(args.date)
         return 0
 
     def fake_handle_review_validate(args):
@@ -857,6 +859,24 @@ def test_review_shortcut_runs_reports_then_template_then_validate(monkeypatch):
     exit_code = paper.main(["review"])
     assert exit_code == 0
     assert order == ["reports", "review-template", "review-validate"]
+    assert captured_dates == [None]
+
+
+def test_review_shortcut_passes_explicit_review_date_to_template(monkeypatch):
+    captured_dates: list[str | None] = []
+
+    monkeypatch.setattr(paper, "handle_reports", lambda args: 0)
+    monkeypatch.setattr(
+        paper,
+        "handle_review_template",
+        lambda args: captured_dates.append(args.date) or 0,
+    )
+    monkeypatch.setattr(paper, "handle_review_validate", lambda args: 0)
+
+    exit_code = paper.main(["review", "--date", "2026-06-08"])
+
+    assert exit_code == 0
+    assert captured_dates == ["2026-06-08"]
 
 
 def test_review_shortcut_does_not_call_review_append(monkeypatch):
@@ -1369,7 +1389,7 @@ def test_review_template_runs_preflight_first(monkeypatch):
             "issues": [],
         }
 
-    def fake_generate_template() -> dict:
+    def fake_generate_template(**kwargs) -> dict:
         order.append("template")
         return {
             "csv_output_path": "outputs/paper_test/reviews/paper_manual_review_log_template.csv",
@@ -1398,7 +1418,7 @@ def test_review_template_aborts_when_preflight_fails(monkeypatch):
             "issues": [{"severity": "error", "stage": stage, "check_name": "x", "message": "x"}],
         }
 
-    def fake_generate_template() -> dict:
+    def fake_generate_template(**kwargs) -> dict:
         called["template"] = True
         return {}
 
@@ -1423,7 +1443,7 @@ def test_review_template_calls_existing_generator_on_pass(monkeypatch):
             "issues": [{"severity": "warning", "stage": stage, "check_name": "x", "message": "x"}],
         }
 
-    def fake_generate_template() -> dict:
+    def fake_generate_template(**kwargs) -> dict:
         called["template"] = True
         return {
             "csv_output_path": "outputs/paper_test/reviews/paper_manual_review_log_template.csv",

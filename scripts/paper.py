@@ -332,11 +332,15 @@ def run_commit_shortcut(date_str: str, replace: bool, account_id: str | None = N
     )
 
 
-def run_review_shortcut(allow_warnings: bool, account_id: str | None = None) -> int:
+def run_review_shortcut(
+    allow_warnings: bool,
+    account_id: str | None = None,
+    review_date: str | None = None,
+) -> int:
     reports_result = handle_reports(argparse.Namespace(strict=not allow_warnings, account_id=account_id))
     if reports_result != 0:
         return reports_result
-    template_result = handle_review_template(argparse.Namespace(account_id=account_id))
+    template_result = handle_review_template(argparse.Namespace(account_id=account_id, date=review_date))
     if template_result != 0:
         return template_result
     return handle_review_validate(argparse.Namespace(account_id=account_id))
@@ -364,7 +368,16 @@ def handle_commit(args: argparse.Namespace) -> int:
 
 
 def handle_review(args: argparse.Namespace) -> int:
-    return run_review_shortcut(allow_warnings=args.allow_warnings, account_id=args.account_id)
+    try:
+        review_date = _normalize_cli_date(args.date) if args.date else None
+    except ValueError as exc:
+        print(f"Paper review aborted: {exc}")
+        return 1
+    return run_review_shortcut(
+        allow_warnings=args.allow_warnings,
+        account_id=args.account_id,
+        review_date=review_date,
+    )
 
 
 def handle_status(args: argparse.Namespace) -> int:
@@ -665,9 +678,14 @@ def handle_reports(args: argparse.Namespace) -> int:
 
 
 def handle_review_template(args: argparse.Namespace) -> int:
+    try:
+        review_date = _normalize_cli_date(args.date) if getattr(args, "date", None) else None
+    except ValueError as exc:
+        print(f"Paper review-template aborted: {exc}")
+        return 1
     summary = run_preflight(
         stage="review-template",
-        date_str=None,
+        date_str=review_date,
         strict=False,
         write_report=False,
     )
@@ -677,10 +695,11 @@ def handle_review_template(args: argparse.Namespace) -> int:
     account_paths = None
     if args.account_id and args.account_id != "paper_default":
         account_paths = build_paper_account_paths(args.account_id, create=True)
-    result = generate_paper_manual_review_log_template(account_paths=account_paths)
+    result = generate_paper_manual_review_log_template(account_paths=account_paths, review_date=review_date)
     print("PAPER REVIEW TEMPLATE")
     print(f"  csv_output_path: {result['csv_output_path']}")
     print(f"  markdown_output_path: {result['markdown_output_path']}")
+    print(f"  review_date: {result['summary'].get('review_date') or review_date or '-'}")
     print(f"  review_template_row_count: {result['summary']['review_template_row_count']}")
     return 0
 
@@ -882,6 +901,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review_parser.add_argument("--allow-warnings", action="store_true", help="Allow PASS_WITH_WARNINGS during reports preflight")
     review_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    review_parser.add_argument("--date", help="Review date / trade date (YYYYMMDD or YYYY-MM-DD)")
     review_parser.set_defaults(handler=handle_review)
 
     review_template_parser = subparsers.add_parser(
@@ -889,6 +909,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run manual review log template generator after automatic paper preflight",
     )
     review_template_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    review_template_parser.add_argument("--date", help="Review date / trade date (YYYYMMDD or YYYY-MM-DD)")
     review_template_parser.set_defaults(handler=handle_review_template)
 
     review_validate_parser = subparsers.add_parser(

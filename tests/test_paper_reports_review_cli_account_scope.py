@@ -57,8 +57,9 @@ def test_review_template_and_validate_use_non_default_account_paths(monkeypatch)
         lambda account_id=None, *, create=False: account_paths,
     )
     monkeypatch.setattr(paper, "run_preflight", lambda **kwargs: {"result": "PASS"})
-    def fake_generate_paper_manual_review_log_template(account_paths=None):
+    def fake_generate_paper_manual_review_log_template(account_paths=None, review_date=None):
         captured["template_account_id"] = account_paths.account_id
+        captured["template_review_date"] = review_date
         return {
             "csv_output_path": root / "reviews" / "paper_manual_review_log_template.csv",
             "markdown_output_path": root / "reviews" / "paper_manual_review_log_template.md",
@@ -77,9 +78,10 @@ def test_review_template_and_validate_use_non_default_account_paths(monkeypatch)
     monkeypatch.setattr(paper, "generate_paper_manual_review_log_template", fake_generate_paper_manual_review_log_template)
     monkeypatch.setattr(paper, "validate_paper_manual_review_log", fake_validate_paper_manual_review_log)
 
-    assert paper.main(["review-template", "--account-id", "paper_growth"]) == 0
+    assert paper.main(["review-template", "--account-id", "paper_growth", "--date", "2026-06-08"]) == 0
     assert paper.main(["review-validate", "--account-id", "paper_growth"]) == 0
     assert captured["template_account_id"] == "paper_growth"
+    assert captured["template_review_date"] == "2026-06-08"
     assert captured["validate_account_id"] == "paper_growth"
 
 
