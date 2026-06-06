@@ -40,6 +40,8 @@ def build_paper_config_snapshot_payload(
     source: str,
     market_state_write_log: bool,
     universe_metadata: dict[str, Any] | None = None,
+    data_date: str | None = None,
+    trade_date: str | None = None,
 ) -> dict[str, Any]:
     weights = _extract_strategy_weights(final_config)
     market_status_summary = {
@@ -66,6 +68,8 @@ def build_paper_config_snapshot_payload(
     return {
         "schema_version": 1,
         "plan_date": plan_date,
+        "data_date": data_date or plan_date,
+        "trade_date": trade_date or plan_date,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "producer_source": source,
         "market_state_write_log": bool(market_state_write_log),
@@ -91,6 +95,8 @@ def save_paper_config_snapshot(
     source: str = "run_paper_daily_plan",
     market_state_write_log: bool = False,
     universe_metadata: dict[str, Any] | None = None,
+    data_date: str | None = None,
+    trade_date: str | None = None,
 ) -> Path:
     output_path = Path(output_path)
     archive_dir = Path(archive_dir)
@@ -111,6 +117,8 @@ def save_paper_config_snapshot(
         source=source,
         market_state_write_log=market_state_write_log,
         universe_metadata=universe_metadata,
+        data_date=data_date,
+        trade_date=trade_date,
     )
     output_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

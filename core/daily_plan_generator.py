@@ -618,6 +618,8 @@ def build_daily_plan_json_payload(
     *,
     account_id: str,
     plan_date: str,
+    data_date: str | None = None,
+    trade_date: str | None = None,
     run_mode: str,
     official_run: bool,
     action_items: List[Dict[str, Any]],
@@ -634,6 +636,8 @@ def build_daily_plan_json_payload(
     return {
         "schema_version": DAILY_PLAN_JSON_SCHEMA_VERSION,
         "account_id": account_id,
+        "data_date": data_date or plan_date,
+        "trade_date": trade_date or plan_date,
         "plan_date": plan_date,
         "run_mode": run_mode,
         "official_run": bool(official_run),
@@ -816,6 +820,7 @@ def build_strategy_entry_action_items(
 
 def generate_daily_plan(
     date_str: str = None,
+    data_date: str | None = None,
     current_state: CurrentPortfolioState | None = None,
     output_path: str | Path | None = None,
     market_state_write_log: bool = True,
@@ -836,6 +841,8 @@ def generate_daily_plan(
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
     plan_date = date_str
+    explicit_data_date = data_date is not None
+    requested_data_date = data_date or plan_date
 
     _configure_console_encoding()
         
@@ -851,12 +858,14 @@ def generate_daily_plan(
 
     # 2. 시장 국면 판단
     m_state = market_analyzer.get_market_state(
-        target_date=plan_date,
+        target_date=requested_data_date,
         write_log=market_state_write_log,
     )
     data_date = m_state["date"]
+    trade_date = plan_date
+    signal_date = data_date if explicit_data_date else plan_date
     regime = m_state["regime"]
-    print(f"[INFO] plan_date={plan_date}, data_date={data_date}")
+    print(f"[INFO] plan_date={plan_date}, data_date={data_date}, trade_date={trade_date}")
     base_config = make_config({}, data_date, data_date)
     merged_config = get_regime_config(regime, base_config)
     rs_lookback = int(merged_config.get('rs_lookback', 120))
@@ -868,7 +877,7 @@ def generate_daily_plan(
         end_date=data_date,
         start_date=bench_start,
     )
-    universe_selection = load_universe_snapshot_as_of_quarter(plan_date)
+    universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
     universe_snapshot = universe_selection.get("snapshot", {})
     universe_metadata = universe_selection.get("metadata", {})
     removed_universe_symbols = {
@@ -880,7 +889,7 @@ def generate_daily_plan(
     stale_holdings_alert: List[str] = []
     
     # 3. 신규 매수 후보 스크리닝 (Raw Signals)
-    df_candidates = build_screener_results(market_state=m_state, end_date=plan_date)
+    df_candidates = build_screener_results(market_state=m_state, end_date=signal_date)
     if not df_candidates.empty and removed_universe_symbols:
         symbol_col = "Symbol" if "Symbol" in df_candidates.columns else "symbol" if "symbol" in df_candidates.columns else None
         if symbol_col:
@@ -975,7 +984,7 @@ def generate_daily_plan(
     formatted_candidates = []
     for c in candidate_rows:
         latest_price_date = c.get('Date', c.get('date'))
-        stale_flag, stale_days = is_stale_candidate(latest_price_date, plan_date, stale_candidate_max_days)
+        stale_flag, stale_days = is_stale_candidate(latest_price_date, signal_date, stale_candidate_max_days)
         if stale_flag:
             stale_exclusions.append({
                 'symbol': c['symbol'],
@@ -1003,7 +1012,7 @@ def generate_daily_plan(
     candidate_diagnostics, candidate_diag_summary = build_candidate_filter_diagnostics(
         formatted_candidates,
         score_threshold,
-        plan_date,
+        signal_date,
     )
     print(
         "Candidate filter summary: "
@@ -1329,6 +1338,8 @@ def generate_daily_plan(
         stale_candidate_max_days=stale_candidate_max_days,
         removed_candidate_exclusions=removed_candidate_exclusions,
         stale_holdings_alert=stale_holdings_alert,
+        data_date=data_date,
+        trade_date=trade_date,
     )
     
     with open(report_path, "w", encoding="utf-8") as f:
@@ -1337,6 +1348,8 @@ def generate_daily_plan(
     if config_snapshot_path is not None and config_snapshot_archive_dir is not None:
         save_paper_config_snapshot(
             plan_date=plan_date,
+            data_date=data_date,
+            trade_date=trade_date,
             market_state=m_state,
             final_config=merged_config,
             output_path=Path(config_snapshot_path),
@@ -1351,6 +1364,8 @@ def generate_daily_plan(
         sidecar_payload = build_daily_plan_json_payload(
             account_id=account_id,
             plan_date=plan_date,
+            data_date=data_date,
+            trade_date=trade_date,
             run_mode=run_mode,
             official_run=official_run,
             action_items=action_items,
@@ -1378,6 +1393,8 @@ def format_markdown_report(
     stale_candidate_max_days: int = 7,
     removed_candidate_exclusions: Optional[List[Dict[str, Any]]] = None,
     stale_holdings_alert: Optional[List[str]] = None,
+    data_date: str | None = None,
+    trade_date: str | None = None,
 ) -> str:
     """마크다운 리포트 템플릿을 작성합니다."""
     # ... (상단 로직 유지)
@@ -1401,7 +1418,13 @@ def format_markdown_report(
             "데이터가 정지되었을 수 있습니다. 확인 요망!\n"
         )
 
+    display_data_date = data_date or date_str
+    display_trade_date = trade_date or date_str
     report = f"""# 📈 Daily Action Plan [{date_str}]
+Data Date: {display_data_date}
+Trade Date: {display_trade_date}
+Plan Date: {date_str}
+
 > **중요 공지**: 본 리포트의 수량은 전일 종가 기준입니다. 장 개장 후 갭상승/하락이 클 경우 실제 가용 현금 내에서 수량을 미세 조절하십시오.
 {stale_holdings_notice}
 

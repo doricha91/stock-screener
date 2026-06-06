@@ -281,6 +281,58 @@ def test_run_paper_daily_plan_non_default_uses_account_execution_log(
     assert captured["state_snapshot_path"] == account_paths.current_state_snapshot_path("20260605")
 
 
+def test_run_paper_daily_plan_explicit_dates_use_trade_date_artifacts_and_data_date_signals(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    account_paths.execution_log_path.write_text(
+        "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n",
+        encoding="utf-8",
+    )
+    account_paths.account_snapshot_path.write_text(
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+        "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
+        encoding="utf-8",
+    )
+    account_paths.current_state_snapshot_path("20260605").write_text(
+        '{"current_symbols":[],"absolute_cash":100000.0}\n',
+        encoding="utf-8",
+    )
+
+    provider_calls: dict = {}
+    captured: dict = {}
+
+    def _fake_provider(date_str: str, **kwargs):
+        provider_calls.update({"date_str": date_str, **kwargs})
+        return _empty_state(cash=100000.0)
+
+    def _fake_generate_daily_plan(**kwargs):
+        captured.update(kwargs)
+        return str(kwargs["output_path"])
+
+    monkeypatch.setattr(run_paper_daily_plan, "load_official_paper_state_for_daily_plan", _fake_provider)
+    monkeypatch.setattr(run_paper_daily_plan, "generate_daily_plan", _fake_generate_daily_plan)
+
+    report_path = run_paper_daily_plan.run_paper_daily_plan(
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        account_paths=account_paths,
+    )
+
+    assert report_path == str(account_paths.daily_action_plan_path("20260608"))
+    assert provider_calls["date_str"] == "2026-06-08"
+    assert captured["date_str"] == "2026-06-08"
+    assert captured["data_date"] == "2026-06-05"
+    assert captured["output_path"] == account_paths.daily_action_plan_path("20260608")
+    assert captured["config_snapshot_path"] == account_paths.config_snapshot_path("20260608")
+    assert captured["state_snapshot_path"] == account_paths.current_state_snapshot_path("20260605")
+
+
 def test_run_paper_daily_plan_non_default_rejects_plan_before_account_inception(
     tmp_path: Path,
 ):
@@ -301,6 +353,49 @@ def test_run_paper_daily_plan_non_default_rejects_plan_before_account_inception(
 
     with pytest.raises(ValueError, match="before account inception date"):
         run_paper_daily_plan.run_paper_daily_plan("2026-06-04", account_paths=account_paths)
+
+
+def test_run_paper_daily_plan_explicit_dates_reject_before_account_inception(
+    tmp_path: Path,
+):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    account_paths.account_snapshot_path.write_text(
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+        "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="before account inception date"):
+        run_paper_daily_plan.run_paper_daily_plan(
+            data_date="2026-06-03",
+            trade_date="2026-06-04",
+            account_paths=account_paths,
+        )
+
+
+def test_run_paper_daily_plan_explicit_dates_reject_trade_not_after_data():
+    with pytest.raises(ValueError, match="must be after data_date"):
+        run_paper_daily_plan.run_paper_daily_plan(
+            data_date="2026-06-05",
+            trade_date="2026-06-05",
+        )
+
+
+def test_run_paper_daily_plan_explicit_dates_reject_weekend_trade_date():
+    with pytest.raises(ValueError, match="must not be a weekend"):
+        run_paper_daily_plan.run_paper_daily_plan(
+            data_date="2026-06-05",
+            trade_date="2026-06-06",
+        )
+
+
+def test_run_paper_daily_plan_requires_data_and_trade_dates_together():
+    with pytest.raises(ValueError, match="must be provided together"):
+        run_paper_daily_plan.run_paper_daily_plan(data_date="2026-06-05")
 
 
 def test_run_paper_daily_plan_accepts_dashed_date(monkeypatch: pytest.MonkeyPatch):

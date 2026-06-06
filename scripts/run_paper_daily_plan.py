@@ -26,6 +26,20 @@ def _normalize_date_for_db(date_str: str) -> str:
     return datetime.strptime(clean_date, "%Y%m%d").strftime("%Y-%m-%d")
 
 
+def _validate_explicit_dates(data_date: str, trade_date: str) -> tuple[str, str]:
+    normalized_data_date = _normalize_date_for_db(data_date)
+    normalized_trade_date = _normalize_date_for_db(trade_date)
+    data_dt = datetime.strptime(normalized_data_date, "%Y-%m-%d").date()
+    trade_dt = datetime.strptime(normalized_trade_date, "%Y-%m-%d").date()
+    if trade_dt <= data_dt:
+        raise ValueError(
+            f"trade_date {normalized_trade_date} must be after data_date {normalized_data_date}"
+        )
+    if trade_dt.weekday() >= 5:
+        raise ValueError(f"trade_date {normalized_trade_date} must not be a weekend")
+    return normalized_data_date, normalized_trade_date
+
+
 def _read_account_initial_snapshot(account_paths: PaperAccountPaths) -> tuple[float, str] | None:
     if not account_paths.account_snapshot_path.exists():
         return None
@@ -85,8 +99,25 @@ def _latest_existing_current_state_path(
     return sorted(candidates, key=lambda item: item[0])[-1][1]
 
 
-def run_paper_daily_plan(date_str: str, account_paths: PaperAccountPaths | None = None) -> str:
-    normalized_db_date = _normalize_date_for_db(date_str)
+def run_paper_daily_plan(
+    date_str: str | None = None,
+    account_paths: PaperAccountPaths | None = None,
+    *,
+    data_date: str | None = None,
+    trade_date: str | None = None,
+) -> str:
+    explicit_mode = data_date is not None or trade_date is not None
+    if explicit_mode:
+        if not data_date or not trade_date:
+            raise ValueError("--data-date and --trade-date must be provided together")
+        normalized_data_date, normalized_db_date = _validate_explicit_dates(data_date, trade_date)
+        artifact_date = normalized_db_date
+    else:
+        if date_str is None:
+            raise ValueError("--date is required unless --data-date and --trade-date are provided")
+        normalized_data_date = None
+        normalized_db_date = _normalize_date_for_db(date_str)
+        artifact_date = normalized_db_date
     state_log_path = None
     initial_cash = 100000.0
     currency = "USD"
@@ -118,14 +149,14 @@ def run_paper_daily_plan(date_str: str, account_paths: PaperAccountPaths | None 
             currency=currency,
         )
     output_path = (
-        account_paths.daily_action_plan_path(date_str)
+        account_paths.daily_action_plan_path(artifact_date)
         if account_paths is not None and account_paths.account_id != "paper_default"
-        else paper_daily_action_plan_path(date_str)
+        else paper_daily_action_plan_path(artifact_date)
     )
     config_snapshot_output_path = (
-        account_paths.config_snapshot_path(date_str)
+        account_paths.config_snapshot_path(artifact_date)
         if account_paths is not None and account_paths.account_id != "paper_default"
-        else paper_config_snapshot_path(date_str)
+        else paper_config_snapshot_path(artifact_date)
     )
     config_snapshot_archive_path = (
         account_paths.config_snapshot_archive_dir
@@ -135,10 +166,11 @@ def run_paper_daily_plan(date_str: str, account_paths: PaperAccountPaths | None 
     if account_paths is not None and account_paths.account_id != "paper_default":
         state_snapshot_path = _latest_existing_current_state_path(account_paths, normalized_db_date)
     else:
-        default_state_snapshot_path = paper_current_state_snapshot_path(date_str)
+        default_state_snapshot_path = paper_current_state_snapshot_path(artifact_date)
         state_snapshot_path = default_state_snapshot_path if default_state_snapshot_path.exists() else None
     return generate_daily_plan(
         date_str=normalized_db_date,
+        data_date=normalized_data_date,
         current_state=paper_state,
         output_path=output_path,
         market_state_write_log=False,
@@ -154,10 +186,16 @@ def run_paper_daily_plan(date_str: str, account_paths: PaperAccountPaths | None 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate official paper daily plan")
-    parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+    parser.add_argument("--date", help="Legacy target date (YYYYMMDD or YYYY-MM-DD)")
+    parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
+    parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
     args = parser.parse_args()
 
-    report_path = run_paper_daily_plan(args.date)
+    report_path = run_paper_daily_plan(
+        args.date,
+        data_date=args.data_date,
+        trade_date=args.trade_date,
+    )
     if not report_path:
         print("Failed to generate official paper daily plan.")
         return 1

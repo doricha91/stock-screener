@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Sequence
@@ -76,6 +77,30 @@ def _call_with_optional_account_paths(func, *args, account_paths, **kwargs):
     if "account_paths" in inspect.signature(func).parameters:
         return func(*args, account_paths=account_paths, **kwargs)
     return func(*args, **kwargs)
+
+
+def _normalize_cli_date(date_str: str) -> str:
+    clean = str(date_str).replace("-", "").strip()
+    if len(clean) != 8 or not clean.isdigit():
+        raise ValueError(f"Invalid date format: {date_str}")
+    return datetime.strptime(clean, "%Y%m%d").strftime("%Y-%m-%d")
+
+
+def _print_data_freshness_summary(summary: dict) -> None:
+    print("PAPER DATA FRESHNESS")
+    print(f"  target_date: {summary['target_date']}")
+    print(f"  result: {summary['result']}")
+    print(f"  error_count: {summary['error_count']}")
+    print(f"  warning_count: {summary['warning_count']}")
+
+
+def _validate_explicit_plan_dates(data_date: str, trade_date: str) -> None:
+    data_dt = datetime.strptime(data_date, "%Y-%m-%d").date()
+    trade_dt = datetime.strptime(trade_date, "%Y-%m-%d").date()
+    if trade_dt <= data_dt:
+        raise ValueError(f"trade_date {trade_date} must be after data_date {data_date}")
+    if trade_dt.weekday() >= 5:
+        raise ValueError(f"trade_date {trade_date} must not be a weekend")
 
 
 def _call_preflight(
@@ -468,12 +493,44 @@ def handle_benchmark(args: argparse.Namespace) -> int:
 def handle_plan(args: argparse.Namespace) -> int:
     if _guard_writer_account(args.account_id, "paper.py plan", allow_non_default=True) != 0:
         return 1
+    explicit_mode = bool(args.data_date or args.trade_date)
+    if explicit_mode and (not args.data_date or not args.trade_date):
+        print("Paper plan aborted: --data-date and --trade-date must be provided together.")
+        return 1
+    if explicit_mode and args.date:
+        print("Paper plan aborted: use either legacy --date or explicit --data-date/--trade-date, not both.")
+        return 1
+    if not explicit_mode and not args.date:
+        print("Paper plan aborted: provide --date or both --data-date and --trade-date.")
+        return 1
+
+    try:
+        preflight_date = _normalize_cli_date(args.trade_date if explicit_mode else args.date)
+        data_date = _normalize_cli_date(args.data_date) if explicit_mode else None
+        if explicit_mode:
+            _validate_explicit_plan_dates(data_date, preflight_date)
+    except ValueError as exc:
+        print(f"Paper plan aborted: {exc}")
+        return 1
+
+    if explicit_mode:
+        data_freshness = run_paper_data_freshness_check(date_str=data_date, strict=True)
+        _print_data_freshness_summary(data_freshness)
+        if data_freshness["result"] != "PASS":
+            print("Paper plan aborted because data_date freshness failed.")
+            return 1
+    else:
+        print(
+            "WARNING: legacy --date mode does not separate data_date and trade_date. "
+            "Use --data-date and --trade-date for official EOD operation."
+        )
+
     account_paths = None
     if args.account_id and args.account_id != "paper_default":
         account_paths = build_paper_account_paths(args.account_id, create=True)
     summary = _call_preflight(
         stage="plan",
-        date_str=args.date,
+        date_str=preflight_date,
         strict=False,
         write_report=False,
         account_paths=account_paths,
@@ -484,11 +541,24 @@ def handle_plan(args: argparse.Namespace) -> int:
     if summary["result"] == "PASS_WITH_WARNINGS":
         print("Paper plan continues with preflight warnings.")
 
-    report_path = _call_with_optional_account_paths(
-        run_paper_daily_plan,
-        args.date,
-        account_paths=account_paths,
-    )
+    try:
+        if explicit_mode:
+            report_path = _call_with_optional_account_paths(
+                run_paper_daily_plan,
+                None,
+                account_paths=account_paths,
+                data_date=data_date,
+                trade_date=preflight_date,
+            )
+        else:
+            report_path = _call_with_optional_account_paths(
+                run_paper_daily_plan,
+                args.date,
+                account_paths=account_paths,
+            )
+    except ValueError as exc:
+        print(f"Paper plan aborted: {exc}")
+        return 1
     if not report_path:
         print("Failed to generate official paper daily plan.")
         return 1
@@ -778,7 +848,9 @@ def build_parser() -> argparse.ArgumentParser:
         "plan",
         help="Run paper daily plan after automatic paper preflight",
     )
-    plan_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+    plan_parser.add_argument("--date", help="Legacy target date (YYYYMMDD or YYYY-MM-DD)")
+    plan_parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
+    plan_parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
     plan_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     plan_parser.set_defaults(handler=handle_plan)
 

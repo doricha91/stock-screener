@@ -174,6 +174,8 @@ def test_daily_plan_json_sidecar_is_written_from_structured_action_items(monkeyp
     assert output_path.read_text(encoding="utf-8") == markdown_content
     assert payload["schema_version"] == "paper_daily_plan.v1"
     assert payload["account_id"] == "paper_sandbox"
+    assert payload["data_date"] == "2026-05-20"
+    assert payload["trade_date"] == "2026-05-20"
     assert payload["plan_date"] == "2026-05-20"
     assert payload["run_mode"] == "exploratory"
     assert payload["official_run"] is False
@@ -189,6 +191,48 @@ def test_daily_plan_json_sidecar_is_written_from_structured_action_items(monkeyp
             "note": "fixture note",
         }
     ]
+
+
+def test_daily_plan_json_sidecar_records_explicit_data_and_trade_dates(monkeypatch, tmp_path: Path):
+    _patch_minimal_daily_plan_dependencies(monkeypatch)
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        daily_plan_generator.market_analyzer,
+        "get_market_state",
+        lambda target_date=None, write_log=True: {
+            "date": target_date,
+            "regime": "BULL",
+            "vix_value": 20.0,
+            "triggers": {},
+        },
+    )
+    def _fake_build_screener_results(market_state=None, end_date=None):
+        captured["screener_end_date"] = end_date
+        return pd.DataFrame()
+
+    monkeypatch.setattr(daily_plan_generator, "build_screener_results", _fake_build_screener_results)
+    output_path = tmp_path / "daily_action_plan_20260608.md"
+
+    report_path = daily_plan_generator.generate_daily_plan(
+        date_str="2026-06-08",
+        data_date="2026-06-05",
+        current_state=_empty_state(),
+        output_path=output_path,
+        account_id="paper_pilot_test",
+        run_mode="official",
+        official_run=True,
+    )
+
+    payload = json.loads(output_path.with_suffix(".json").read_text(encoding="utf-8"))
+    markdown = output_path.read_text(encoding="utf-8")
+    assert report_path == str(output_path)
+    assert payload["data_date"] == "2026-06-05"
+    assert payload["trade_date"] == "2026-06-08"
+    assert payload["plan_date"] == "2026-06-08"
+    assert "Data Date: 2026-06-05" in markdown
+    assert "Trade Date: 2026-06-08" in markdown
+    assert "Plan Date: 2026-06-08" in markdown
+    assert captured["screener_end_date"] == "2026-06-05"
 
 
 def test_daily_plan_json_sidecar_does_not_replace_config_snapshot(monkeypatch, tmp_path: Path):
