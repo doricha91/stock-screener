@@ -53,6 +53,26 @@ REQUIRED_BUCKET_COLUMNS = [
     "is_actionable",
 ]
 
+SYMBOL_EXECUTION_REVIEW_QUESTION_ID = "execution_review_1"
+SYMBOL_EXECUTION_REVIEW_QUESTION_TEXT = (
+    "Compare this symbol's actual execution with the Daily Plan. Note any quantity, price, skip, partial fill, "
+    "or manual judgment exceptions that should affect the next operation."
+)
+ACCOUNT_REVIEW_QUESTIONS = [
+    (
+        "account_review_1",
+        "After today's execution, did cash ratio or position sizing materially deviate from policy?",
+    ),
+    (
+        "account_review_2",
+        "Were there any data, price, quantity, or manual decision exceptions during today's operation?",
+    ),
+    (
+        "account_review_3",
+        "Is there any follow-up that must be checked on the next operating day?",
+    ),
+]
+
 
 def load_csv_rows(
     path: Path,
@@ -92,11 +112,14 @@ def build_paper_manual_review_log_template(
     warnings: list[str] = []
     output_rows: list[dict[str, Any]] = []
 
+    seen_symbols: set[str] = set()
     for row in worksheet_rows:
         symbol = str(row.get("symbol", "")).strip()
-        question_category = str(row.get("question_category", "")).strip()
         if not symbol:
             raise ValueError("symbol is required")
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
         bucket_row = bucket_by_symbol.get(symbol)
         if bucket_row is None:
             raise ValueError(f"Missing review bucket row for symbol: {symbol}")
@@ -109,9 +132,9 @@ def build_paper_manual_review_log_template(
                 "review_priority": str(bucket_row.get("review_priority", "")).strip(),
                 "sample_size_flag": str(bucket_row.get("sample_size_flag", "")).strip(),
                 "symbol_status": str(bucket_row.get("symbol_status", "")).strip(),
-                "question_id": str(row.get("question_id", "")).strip(),
-                "question_text": str(row.get("question_text", "")).strip(),
-                "question_category": question_category,
+                "question_id": SYMBOL_EXECUTION_REVIEW_QUESTION_ID,
+                "question_text": SYMBOL_EXECUTION_REVIEW_QUESTION_TEXT,
+                "question_category": "execution_review",
                 "is_actionable": "false",
                 "manual_answer": "",
                 "review_status": "pending",
@@ -123,9 +146,35 @@ def build_paper_manual_review_log_template(
             }
         )
 
+    if output_rows:
+        for question_id, question_text in ACCOUNT_REVIEW_QUESTIONS:
+            output_rows.append(
+                {
+                    "review_date": normalized_review_date,
+                    "symbol": "ACCOUNT",
+                    "review_bucket": "account_review",
+                    "review_priority": "medium",
+                    "sample_size_flag": "not_applicable",
+                    "symbol_status": "account",
+                    "question_id": question_id,
+                    "question_text": question_text,
+                    "question_category": "account_review",
+                    "is_actionable": "false",
+                    "manual_answer": "",
+                    "review_status": "pending",
+                    "follow_up_needed": "false",
+                    "review_tag": "",
+                    "reviewer_note": "",
+                    "source_worksheet_path": str(source_worksheet_path),
+                    "created_at": created_at_value,
+                }
+            )
+
     summary_data = {
         "review_template_row_count": len(output_rows),
-        "symbol_count": len({row["symbol"] for row in output_rows}),
+        "symbol_count": len({row["symbol"] for row in output_rows if row["symbol"] != "ACCOUNT"}),
+        "account_question_count": len(ACCOUNT_REVIEW_QUESTIONS) if output_rows else 0,
+        "symbol_question_policy": "one_execution_review_per_symbol",
         "bucket_counts": dict(Counter(row["review_bucket"] for row in output_rows)),
         "priority_counts": dict(Counter(row["review_priority"] for row in output_rows)),
         "high_priority_symbols": sorted({row["symbol"] for row in output_rows if row["review_priority"] == "high"}),

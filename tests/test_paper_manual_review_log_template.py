@@ -129,10 +129,36 @@ def test_worksheet_question_rows_are_converted_to_template_rows():
         review_date="2026-05-19",
         created_at="2026-05-19T09:00:00",
     )
-    assert len(output_rows) == 1
+    assert len(output_rows) == 4
     assert output_rows[0]["symbol"] == "CF"
-    assert output_rows[0]["question_id"] == "review_loss_1"
-    assert summary_data["review_template_row_count"] == 1
+    assert output_rows[0]["question_id"] == "execution_review_1"
+    assert output_rows[0]["question_category"] == "execution_review"
+    assert [row["symbol"] for row in output_rows[-3:]] == ["ACCOUNT", "ACCOUNT", "ACCOUNT"]
+    assert summary_data["review_template_row_count"] == 4
+    assert summary_data["symbol_count"] == 1
+    assert summary_data["account_question_count"] == 3
+
+
+def test_review_log_template_limits_questions_to_one_per_symbol_plus_account_rows():
+    symbols = [f"SYM{i}" for i in range(1, 9)]
+    output_rows, summary_data, _ = build_paper_manual_review_log_template(
+        [_worksheet_row(symbol=symbol) for symbol in symbols],
+        [_bucket_row(symbol=symbol) for symbol in symbols],
+        source_worksheet_path=Path("outputs/paper_test/reports/paper_symbol_review_worksheet.csv"),
+        review_date="2026-06-08",
+        created_at="2026-06-08T09:00:00",
+    )
+
+    assert len(output_rows) == 11
+    assert summary_data["review_template_row_count"] == 11
+    assert summary_data["symbol_count"] == 8
+    assert summary_data["account_question_count"] == 3
+    symbol_rows = [row for row in output_rows if row["symbol"] != "ACCOUNT"]
+    assert len(symbol_rows) == 8
+    assert {row["question_id"] for row in symbol_rows} == {"execution_review_1"}
+    assert {row["review_date"] for row in output_rows} == {"2026-06-08"}
+    keys = {(row["review_date"], row["symbol"], row["question_id"]) for row in output_rows}
+    assert len(keys) == len(output_rows)
 
 
 def test_manual_fields_default_values_are_set():
