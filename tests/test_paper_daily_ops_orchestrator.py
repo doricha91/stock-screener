@@ -5,6 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from core.paper_daily_ops_evidence import (
+    EVIDENCE_DAILY_PLAN_NOTION_EXPORT,
+    EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC,
+    EVIDENCE_MANUAL_EXECUTION_TEMPLATE,
+    EVIDENCE_MANUAL_REVIEW_STATUS_SYNC,
+    EVIDENCE_MANUAL_REVIEW_TEMPLATE,
+    notion_evidence_path,
+)
 from core.paper_daily_ops_orchestrator import build_daily_ops_status
 from scripts import paper_daily_ops
 
@@ -141,6 +149,49 @@ def _write_review_commit(root: Path) -> None:
         "review_date,symbol,question_id,manual_answer,review_status\n"
         "2026-06-08,AAPL,Q1,done,reviewed\n",
     )
+
+
+def _write_notion_evidence(
+    root: Path,
+    evidence_type: str,
+    *,
+    status: str = "PASS",
+    account_id: str = "paper_ops",
+    trade_date: str = "2026-06-08",
+    data_date: str | None = "2026-06-05",
+    failed_count: int = 0,
+) -> Path:
+    path = notion_evidence_path(root, evidence_type, trade_date)
+    operation = "sync" if evidence_type.endswith("STATUS_SYNC") else "export"
+    _write_json(
+        path,
+        {
+            "schema_version": "paper_notion_evidence.v1",
+            "evidence_type": evidence_type,
+            "account_id": account_id,
+            "trade_date": trade_date,
+            "data_date": data_date,
+            "source_command": "python scripts\\example.py --json",
+            "source_artifacts": [],
+            "target_system": "notion",
+            "operation": operation,
+            "dry_run": False,
+            "actual_executed": True,
+            "notion_api_called": True,
+            "write_executed": True,
+            "status": status,
+            "page_count": 1,
+            "created_count": 0,
+            "updated_count": 1,
+            "skipped_count": 0,
+            "failed_count": failed_count,
+            "warnings": ["operator should review"] if status == "WARNING" else [],
+            "errors": ["notion write failed"] if status == "FAILED" or failed_count else [],
+            "created_at": "2026-06-08T09:00:00+09:00",
+            "producer": "test",
+        },
+    )
+    return path
 
 
 def test_account_id_missing_is_blocked():
@@ -309,6 +360,148 @@ def test_next_action_classifies_read_only_notion_and_ledger_commands(tmp_path: P
     assert sync_action["command_type"] == "NOTION_WRITE"
     assert sync_action["risk_level"] == "REQUIRES_MANUAL_REVIEW"
     assert sync_action["writes_notion"] is True
+
+
+def test_notion_stage_without_evidence_stays_unknown(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "UNKNOWN"
+    assert stage["evidence_checked"] is False
+    assert stage["evidence_status"] is None
+    assert stage["evidence_path"].endswith("daily_plan_notion_export_2026-06-08.json")
+
+
+@pytest.mark.parametrize(
+    ("evidence_type", "stage_name"),
+    [
+        (EVIDENCE_DAILY_PLAN_NOTION_EXPORT, "DAILY_PLAN_NOTION_EXPORT"),
+        (EVIDENCE_MANUAL_EXECUTION_TEMPLATE, "MANUAL_EXECUTION_TEMPLATE"),
+        (EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC, "MANUAL_EXECUTION_STATUS_SYNC"),
+        (EVIDENCE_MANUAL_REVIEW_TEMPLATE, "MANUAL_REVIEW_TEMPLATE"),
+        (EVIDENCE_MANUAL_REVIEW_STATUS_SYNC, "MANUAL_REVIEW_STATUS_SYNC"),
+    ],
+)
+def test_pass_evidence_marks_target_notion_stage_done(tmp_path: Path, evidence_type: str, stage_name: str):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    if stage_name in {"MANUAL_EXECUTION_STATUS_SYNC", "MANUAL_REVIEW_STATUS_SYNC"}:
+        _write_execution_preview(root)
+        _write_execution_commit(root)
+    if stage_name in {"MANUAL_REVIEW_TEMPLATE", "MANUAL_REVIEW_STATUS_SYNC"}:
+        _write_review_ready(root)
+    if stage_name == "MANUAL_REVIEW_STATUS_SYNC":
+        _write_review_preview(root)
+        _write_review_commit(root)
+    _write_notion_evidence(root, evidence_type)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(payload, stage_name)
+
+    assert stage["status"] == "DONE"
+    assert stage["evidence_checked"] is True
+    assert stage["evidence_status"] == "PASS"
+
+
+def test_warning_evidence_marks_notion_stage_warning(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT, status="WARNING")
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "WARNING"
+    assert stage["evidence_checked"] is True
+    assert stage["evidence_status"] == "WARNING"
+    assert stage["warnings"]
+
+
+@pytest.mark.parametrize("status,failed_count", [("FAILED", 0), ("PASS", 1)])
+def test_failed_evidence_or_failed_count_blocks_notion_stage(tmp_path: Path, status: str, failed_count: int):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(
+        root,
+        EVIDENCE_DAILY_PLAN_NOTION_EXPORT,
+        status=status,
+        failed_count=failed_count,
+    )
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "BLOCKED"
+    assert stage["evidence_checked"] is True
+    assert stage["evidence_errors"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_error"),
+    [
+        ("account_id", "other_account", "account_id"),
+        ("trade_date", "2026-06-09", "trade_date"),
+        ("evidence_type", EVIDENCE_MANUAL_EXECUTION_TEMPLATE, "evidence_type"),
+    ],
+)
+def test_mismatched_evidence_blocks_notion_stage(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    expected_error: str,
+):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    path = _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload[field] = value
+    _write_json(path, payload)
+
+    status = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(status, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "BLOCKED"
+    assert stage["evidence_checked"] is True
+    assert any(expected_error in error for error in stage["evidence_errors"])
+
+
+def test_malformed_evidence_is_not_done_evidence(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    path = notion_evidence_path(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT, "2026-06-08")
+    _write(path, "{not-json")
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "WARNING"
+    assert stage["evidence_checked"] is True
+    assert stage["evidence_status"] is None
+    assert not stage["evidence_errors"]
+
+
+def test_legacy_paper_test_notion_evidence_is_not_done_for_non_default_account(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(legacy, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "BLOCKED"
+    assert stage["evidence_checked"] is True
+    assert stage["evidence_status"] is None
+    assert "Legacy paper_test evidence" in stage["evidence_errors"][0]
 
 
 def test_summary_flags_blockers_warnings_unknowns_and_stage_counts(tmp_path: Path):

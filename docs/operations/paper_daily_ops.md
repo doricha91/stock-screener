@@ -359,3 +359,46 @@ By default no file is written. With `--write-status-report`, the helper writes t
 ```
 
 This is diagnostic/status output only. It does not change Notion, ledgers, DB files, broker state, Manual Execution commits, or Manual Review append state.
+
+## 16. OPER9-4 Local Evidence Sidecar Addendum
+
+OPER9-4 lets the Daily Ops Orchestrator consume local JSON evidence sidecars for Notion export/sync stages. The helper still does not call Notion or execute export/sync/commit/append commands.
+
+Supported evidence files:
+
+```text
+<account_root>\reports\daily_plan_notion_export_<TRADE_DATE>.json
+<account_root>\reports\manual_execution_template_export_<TRADE_DATE>.json
+<account_root>\reports\manual_execution_status_sync_<TRADE_DATE>.json
+<account_root>\reports\manual_review_template_export_<TRADE_DATE>.json
+<account_root>\reports\manual_review_status_sync_<TRADE_DATE>.json
+```
+
+Evidence schema:
+
+- `schema_version=paper_notion_evidence.v1`
+- `target_system=notion`
+- `evidence_type` must match the stage
+- `account_id` and `trade_date` must match the status request
+- `data_date` must match when present
+- `status` is one of `PASS`, `WARNING`, `FAILED`, `UNKNOWN`
+- `failed_count > 0` blocks the stage
+
+Stage interpretation:
+
+- no sidecar: keep `UNKNOWN`
+- `PASS` evidence: `DONE`
+- `WARNING` evidence: `WARNING`
+- `FAILED` evidence or `failed_count > 0`: `BLOCKED`
+- account/date/type/schema mismatch: `BLOCKED`
+- malformed JSON: `WARNING`, never `DONE`
+- legacy `outputs\paper_test` evidence is not DONE evidence for non-default accounts
+
+Stage JSON now includes:
+
+- `evidence_path`
+- `evidence_status`
+- `evidence_checked`
+- `evidence_errors`
+
+These fields are diagnostic status fields. They do not mean that the orchestrator performed a Notion write.

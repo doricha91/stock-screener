@@ -13,6 +13,15 @@ from core.paper_account_paths import (
     build_paper_account_paths,
 )
 from core.paper_account_profile import validate_account_id
+from core.paper_daily_ops_evidence import (
+    EVIDENCE_DAILY_PLAN_NOTION_EXPORT,
+    EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC,
+    EVIDENCE_MANUAL_EXECUTION_TEMPLATE,
+    EVIDENCE_MANUAL_REVIEW_STATUS_SYNC,
+    EVIDENCE_MANUAL_REVIEW_TEMPLATE,
+    EvidenceEvaluation,
+    evaluate_notion_evidence,
+)
 from core.paper_status import WORKFLOW_REVIEW_DONE, run_paper_status
 
 
@@ -277,6 +286,7 @@ def _stage(
     blockers: list[str] | None = None,
     warnings: list[str] | None = None,
     next_command: str | None = None,
+    evidence: EvidenceEvaluation | None = None,
     note: str = "",
 ) -> dict[str, Any]:
     required_paths = required or []
@@ -292,6 +302,10 @@ def _stage(
         "missing_artifacts": [_path_str(path) for path in missing],
         "next_command": next_command,
         "next_action": _next_action(next_command),
+        "evidence_path": _path_str(evidence.path) if evidence is not None else None,
+        "evidence_status": evidence.evidence_status if evidence is not None else None,
+        "evidence_checked": bool(evidence.checked) if evidence is not None else False,
+        "evidence_errors": list(evidence.blockers) if evidence is not None else [],
         "note": note,
     }
 
@@ -344,14 +358,26 @@ def _stage_daily_plan(ctx: dict[str, Any]) -> dict[str, Any]:
 def _stage_daily_plan_notion_export(ctx: dict[str, Any]) -> dict[str, Any]:
     plan = _stage_daily_plan(ctx)
     if plan["status"] == DONE:
+        command = (
+            f"python scripts\\export_paper_to_notion.py --daily-plan --account-id {ctx['account_id']} "
+            f"--date {ctx['trade_date']} --confirm-actual --json"
+        )
+        evidence = _notion_evidence(ctx, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+        if evidence.checked:
+            return _stage(
+                "DAILY_PLAN_NOTION_EXPORT",
+                evidence.stage_status or UNKNOWN,
+                blockers=list(evidence.blockers),
+                warnings=list(evidence.warnings),
+                evidence=evidence,
+                note="Local Notion evidence sidecar was evaluated.",
+            )
         return _stage(
             "DAILY_PLAN_NOTION_EXPORT",
             UNKNOWN,
-            next_command=(
-                f"python scripts\\export_paper_to_notion.py --daily-plan --account-id {ctx['account_id']} "
-                f"--date {ctx['trade_date']} --confirm-actual --json"
-            ),
-            note="No local export sidecar proves this Notion write stage in OPER9-2.",
+            next_command=command,
+            evidence=evidence,
+            note="No local export sidecar proves this Notion write stage.",
         )
     return _stage("DAILY_PLAN_NOTION_EXPORT", BLOCKED, blockers=["Daily Plan is not DONE."])
 
@@ -359,13 +385,25 @@ def _stage_daily_plan_notion_export(ctx: dict[str, Any]) -> dict[str, Any]:
 def _stage_manual_execution_template(ctx: dict[str, Any]) -> dict[str, Any]:
     if _stage_daily_plan(ctx)["status"] != DONE:
         return _stage("MANUAL_EXECUTION_TEMPLATE", BLOCKED, blockers=["Daily Plan JSON sidecar is required."])
+    command = (
+        f"python scripts\\export_paper_to_notion.py --manual-execution-template --account-id {ctx['account_id']} "
+        f"--date {ctx['trade_date']} --confirm-actual --json"
+    )
+    evidence = _notion_evidence(ctx, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    if evidence.checked:
+        return _stage(
+            "MANUAL_EXECUTION_TEMPLATE",
+            evidence.stage_status or UNKNOWN,
+            blockers=list(evidence.blockers),
+            warnings=list(evidence.warnings),
+            evidence=evidence,
+            note="Local Notion evidence sidecar was evaluated.",
+        )
     return _stage(
         "MANUAL_EXECUTION_TEMPLATE",
         UNKNOWN,
-        next_command=(
-            f"python scripts\\export_paper_to_notion.py --manual-execution-template --account-id {ctx['account_id']} "
-            f"--date {ctx['trade_date']} --confirm-actual --json"
-        ),
+        next_command=command,
+        evidence=evidence,
         note="No local export sidecar proves Manual Execution DRAFT rows were exported.",
     )
 
@@ -426,15 +464,28 @@ def _stage_manual_execution_status_sync(ctx: dict[str, Any]) -> dict[str, Any]:
     artifacts = ctx["artifacts"]
     if not artifacts["execution_commit_json"].exists():
         return _stage("MANUAL_EXECUTION_STATUS_SYNC", BLOCKED, required=[artifacts["execution_commit_json"]], blockers=["Execution commit report is required for status sync."])
+    command = (
+        f"python scripts\\sync_notion_execution_status.py --date {ctx['trade_date']} --account-id {ctx['account_id']} "
+        f"--commit-report \"{_path_str(artifacts['execution_commit_json'])}\" --json"
+    )
+    evidence = _notion_evidence(ctx, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+    if evidence.checked:
+        return _stage(
+            "MANUAL_EXECUTION_STATUS_SYNC",
+            evidence.stage_status or UNKNOWN,
+            required=[artifacts["execution_commit_json"]],
+            blockers=list(evidence.blockers),
+            warnings=list(evidence.warnings),
+            evidence=evidence,
+            note="Local Notion evidence sidecar was evaluated.",
+        )
     return _stage(
         "MANUAL_EXECUTION_STATUS_SYNC",
         UNKNOWN,
         required=[artifacts["execution_commit_json"]],
-        next_command=(
-            f"python scripts\\sync_notion_execution_status.py --date {ctx['trade_date']} --account-id {ctx['account_id']} "
-            f"--commit-report \"{_path_str(artifacts['execution_commit_json'])}\" --json"
-        ),
-        note="No local sync sidecar proves this Notion sync stage in OPER9-2.",
+        next_command=command,
+        evidence=evidence,
+        note="No local sync sidecar proves this Notion sync stage.",
     )
 
 
@@ -461,14 +512,27 @@ def _stage_daily_review(ctx: dict[str, Any]) -> dict[str, Any]:
 def _stage_manual_review_template(ctx: dict[str, Any]) -> dict[str, Any]:
     if not ctx["artifacts"]["review_template_csv"].exists():
         return _stage("MANUAL_REVIEW_TEMPLATE", BLOCKED, required=[ctx["artifacts"]["review_template_csv"]], blockers=["Review template CSV is required."])
+    command = (
+        f"python scripts\\export_paper_to_notion.py --manual-review-template --account-id {ctx['account_id']} "
+        f"--date {ctx['trade_date']} --confirm-actual --json"
+    )
+    evidence = _notion_evidence(ctx, EVIDENCE_MANUAL_REVIEW_TEMPLATE)
+    if evidence.checked:
+        return _stage(
+            "MANUAL_REVIEW_TEMPLATE",
+            evidence.stage_status or UNKNOWN,
+            required=[ctx["artifacts"]["review_template_csv"]],
+            blockers=list(evidence.blockers),
+            warnings=list(evidence.warnings),
+            evidence=evidence,
+            note="Local Notion evidence sidecar was evaluated.",
+        )
     return _stage(
         "MANUAL_REVIEW_TEMPLATE",
         UNKNOWN,
         required=[ctx["artifacts"]["review_template_csv"]],
-        next_command=(
-            f"python scripts\\export_paper_to_notion.py --manual-review-template --account-id {ctx['account_id']} "
-            f"--date {ctx['trade_date']} --confirm-actual --json"
-        ),
+        next_command=command,
+        evidence=evidence,
         note="No local export sidecar proves Manual Review rows were exported.",
     )
 
@@ -528,15 +592,28 @@ def _stage_manual_review_status_sync(ctx: dict[str, Any]) -> dict[str, Any]:
     artifacts = ctx["artifacts"]
     if not artifacts["review_commit_json"].exists():
         return _stage("MANUAL_REVIEW_STATUS_SYNC", BLOCKED, required=[artifacts["review_commit_json"]], blockers=["Review commit report is required for status sync."])
+    command = (
+        f"python scripts\\sync_notion_review_status.py --date {ctx['trade_date']} --account-id {ctx['account_id']} "
+        f"--commit-report \"{_path_str(artifacts['review_commit_json'])}\" --json"
+    )
+    evidence = _notion_evidence(ctx, EVIDENCE_MANUAL_REVIEW_STATUS_SYNC)
+    if evidence.checked:
+        return _stage(
+            "MANUAL_REVIEW_STATUS_SYNC",
+            evidence.stage_status or UNKNOWN,
+            required=[artifacts["review_commit_json"]],
+            blockers=list(evidence.blockers),
+            warnings=list(evidence.warnings),
+            evidence=evidence,
+            note="Local Notion evidence sidecar was evaluated.",
+        )
     return _stage(
         "MANUAL_REVIEW_STATUS_SYNC",
         UNKNOWN,
         required=[artifacts["review_commit_json"]],
-        next_command=(
-            f"python scripts\\sync_notion_review_status.py --date {ctx['trade_date']} --account-id {ctx['account_id']} "
-            f"--commit-report \"{_path_str(artifacts['review_commit_json'])}\" --json"
-        ),
-        note="No local sync sidecar proves this Notion sync stage in OPER9-2.",
+        next_command=command,
+        evidence=evidence,
+        note="No local sync sidecar proves this Notion sync stage.",
     )
 
 
@@ -552,6 +629,17 @@ def _stage_final_status(ctx: dict[str, Any]) -> dict[str, Any]:
             next_command=f"python scripts\\paper.py status --account-id {ctx['account_id']} --date {ctx['trade_date']} --json",
         )
     return _stage("FINAL_STATUS", UNKNOWN, next_command=f"python scripts\\paper.py status --account-id {ctx['account_id']} --date {ctx['trade_date']} --json")
+
+
+def _notion_evidence(ctx: dict[str, Any], evidence_type: str) -> EvidenceEvaluation:
+    return evaluate_notion_evidence(
+        account_root=ctx["root"],
+        legacy_root=ctx["legacy_root"],
+        account_id=ctx["account_id"],
+        trade_date=ctx["trade_date"],
+        data_date=ctx["data_date"],
+        evidence_type=evidence_type,
+    )
 
 
 def _safe_workflow_status(root: Path, trade_date: str) -> str | None:
