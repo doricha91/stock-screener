@@ -327,6 +327,26 @@ Rules:
 
 See [mfu_oper9_8_orchestrator_step_advancement_fix.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_8_orchestrator_step_advancement_fix.md).
 
+## OPER9-9 Stage Advancement Matrix Addendum
+
+OPER9-9 audits the full operator-facing stage advancement matrix.
+
+Rules:
+
+- `next_command` and `operator_summary.current_step` must point to the actual next operational stage.
+- Passed stages must not return as top-level commands only because diagnostic evidence is missing.
+- Downstream preview, commit, append, or sync commands must not skip required upstream gates such as Daily Plan export or template export.
+- If local/Notion reconciliation reports a conflict, `operator_summary.recommended_operator_action` should direct the operator to resolve the conflict instead of running risky commands.
+- When `workflow_status=REVIEW_DONE`, `next_command` remains `null`, `operator_summary.current_step=FINAL_STATUS`, and `operator_summary.terminal=true`.
+
+n8n usage:
+
+- Render `operator_summary.current_step`, `operator_summary.operator_message`, `operator_summary.next_command`, `operator_summary.recommended_operator_action`, `operator_summary.risk_level`, and `operator_summary.requires_manual_approval`.
+- Do not select a different next step by scanning raw `stages`.
+- Treat `NOTION_WRITE`, `LEDGER_WRITE`, and `DANGEROUS` commands as approval-gated or excluded according to the current OPER9 safety boundary.
+
+See [mfu_oper9_9_orchestrator_stage_advancement_matrix_audit.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_9_orchestrator_stage_advancement_matrix_audit.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 

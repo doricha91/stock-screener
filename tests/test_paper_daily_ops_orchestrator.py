@@ -33,6 +33,15 @@ def _stage(payload: dict, name: str) -> dict:
     return next(stage for stage in payload["stages"] if stage["stage_name"] == name)
 
 
+def _assert_operator_next(payload: dict, stage_name: str, command_fragment: str | None) -> None:
+    assert payload["operator_summary"]["current_step"] == stage_name
+    assert payload["operator_summary"]["next_command"] == payload["next_command"]
+    if command_fragment is None:
+        assert payload["next_command"] is None
+    else:
+        assert command_fragment in payload["next_command"]
+
+
 def _root(tmp_path: Path) -> Path:
     root = tmp_path / "paper_accounts" / "paper_ops"
     (root / "reports").mkdir(parents=True)
@@ -511,6 +520,164 @@ def test_plan_ready_legacy_warning_does_not_rewind_to_data_freshness(tmp_path: P
     assert payload["warnings"]
     assert payload["operator_summary"]["current_step"] == "DAILY_PLAN_NOTION_EXPORT"
     assert "data-freshness" not in payload["operator_summary"]["next_command"]
+
+
+def test_stage_advancement_matrix_initial_no_plan_uses_initial_step(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+
+    _assert_operator_next(payload, "DATA_FRESHNESS", "data-freshness")
+    assert payload["operator_summary"]["recommended_operator_action"] == "RUN_NEXT_COMMAND"
+    assert payload["operator_summary"]["risk_level"] == "SAFE"
+
+
+def test_stage_advancement_matrix_plan_export_then_execution_template(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    plan_ready = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(plan_ready, "DAILY_PLAN_NOTION_EXPORT", "export_paper_to_notion.py --daily-plan")
+    assert "data-freshness" not in plan_ready["next_command"]
+
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    export_done = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(export_done, "MANUAL_EXECUTION_TEMPLATE", "--manual-execution-template")
+
+
+def test_stage_advancement_matrix_execution_template_gates_preview(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_execution_preview(root)
+
+    template_missing = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(template_missing, "MANUAL_EXECUTION_TEMPLATE", "--manual-execution-template")
+    assert "import_notion_executions.py" not in template_missing["next_command"]
+
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    template_done = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(template_done, "MANUAL_EXECUTION_COMMIT", "import_notion_executions.py")
+    assert "--commit" in template_done["next_command"]
+
+
+def test_stage_advancement_matrix_execution_preview_to_commit_to_sync_to_review(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+
+    ready_for_preview = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_EXECUTION_PREVIEW": _notion_stage_report("PASS", status_counts={"READY": 1})}
+        ),
+    )
+    _assert_operator_next(ready_for_preview, "MANUAL_EXECUTION_PREVIEW", "import_notion_executions.py")
+    assert "--preview" in ready_for_preview["next_command"]
+
+    _write_execution_preview(root)
+    preview_done = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(preview_done, "MANUAL_EXECUTION_COMMIT", "import_notion_executions.py")
+    assert "--commit" in preview_done["next_command"]
+
+    _write_execution_commit(root)
+    commit_done = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(commit_done, "MANUAL_EXECUTION_STATUS_SYNC", "sync_notion_execution_status.py")
+    assert commit_done["operator_summary"]["requires_manual_approval"] is True
+
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+    sync_done = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(sync_done, "DAILY_REVIEW", "paper.py review")
+
+
+def test_stage_advancement_matrix_daily_review_to_manual_review_template(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+
+    before_review = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(before_review, "DAILY_REVIEW", "paper.py review")
+
+    _write_review_ready(root)
+    review_ready = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(review_ready, "MANUAL_REVIEW_TEMPLATE", "--manual-review-template")
+    assert "paper.py review" not in review_ready["next_command"]
+
+
+def test_stage_advancement_matrix_manual_review_preview_append_and_sync(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+    _write_review_ready(root)
+
+    template_missing = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(template_missing, "MANUAL_REVIEW_TEMPLATE", "--manual-review-template")
+
+    _write_notion_evidence(root, EVIDENCE_MANUAL_REVIEW_TEMPLATE)
+    template_done = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_REVIEW_PREVIEW": _notion_stage_report("PASS", status_counts={"READY": 1})}
+        ),
+    )
+    _assert_operator_next(template_done, "MANUAL_REVIEW_PREVIEW", "import_notion_reviews.py")
+    assert "--preview" in template_done["next_command"]
+
+    _write_review_preview(root)
+    preview_done = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(preview_done, "MANUAL_REVIEW_APPEND", "import_notion_reviews.py")
+    assert "--commit" in preview_done["next_command"]
+
+    _write_json(
+        root / "reports" / "manual_review_import_commit_20260608.json",
+        {
+            "account_id": "paper_ops",
+            "review_date": "2026-06-08",
+            "rows": [],
+        },
+    )
+    append_done = build_daily_ops_status(**_base_kwargs(root, legacy))
+    _assert_operator_next(append_done, "MANUAL_REVIEW_STATUS_SYNC", "sync_notion_review_status.py")
+
+
+def test_stage_advancement_matrix_review_done_terminal_suppresses_all_commands(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+    _write_review_ready(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_REVIEW_TEMPLATE)
+    _write_review_preview(root)
+    _write_review_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_REVIEW_STATUS_SYNC)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+
+    assert payload["workflow_status"] == "REVIEW_DONE"
+    _assert_operator_next(payload, "FINAL_STATUS", None)
+    assert payload["operator_summary"]["terminal"] is True
+    assert all(stage["next_command"] is None for stage in payload["stages"])
 
 
 def test_local_commit_with_unsynced_notion_status_keeps_sync_recommendation(tmp_path: Path):

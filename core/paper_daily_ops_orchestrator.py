@@ -839,11 +839,21 @@ def _is_stale_next_command_stage(
 ) -> bool:
     stage_name = str(stage.get("stage_name") or "")
     daily_plan_done = _stage_status(stages, "DAILY_PLAN") == DONE
+    execution_template_done = _stage_status(stages, "MANUAL_EXECUTION_TEMPLATE") == DONE
+    execution_preview_done = _stage_status(stages, "MANUAL_EXECUTION_PREVIEW") in {DONE, WARNING}
+    execution_commit_done = _stage_status(stages, "MANUAL_EXECUTION_COMMIT") in {DONE, WARNING}
+    execution_sync_done = _stage_status(stages, "MANUAL_EXECUTION_STATUS_SYNC") == DONE
+    daily_review_done = _stage_status(stages, "DAILY_REVIEW") == DONE
+    review_template_done = _stage_status(stages, "MANUAL_REVIEW_TEMPLATE") == DONE
+    review_preview_done = _stage_status(stages, "MANUAL_REVIEW_PREVIEW") in {DONE, WARNING}
+    review_append_done = _stage_status(stages, "MANUAL_REVIEW_APPEND") in {DONE, WARNING}
+    review_sync_done = _stage_status(stages, "MANUAL_REVIEW_STATUS_SYNC") == DONE
     if stage_name == "DATA_FRESHNESS":
         return daily_plan_done or str(workflow_status or "") not in {"", "NO_PLAN", "UNKNOWN_OR_INCOMPLETE"}
     if stage_name == "DAILY_PLAN":
         return daily_plan_done or str(workflow_status or "") not in {"", "NO_PLAN", "UNKNOWN_OR_INCOMPLETE"}
     if stage_name in {
+        "DAILY_PLAN_NOTION_EXPORT",
         "MANUAL_EXECUTION_TEMPLATE",
         "MANUAL_EXECUTION_PREVIEW",
         "MANUAL_EXECUTION_COMMIT",
@@ -853,8 +863,28 @@ def _is_stale_next_command_stage(
         "MANUAL_REVIEW_PREVIEW",
         "MANUAL_REVIEW_APPEND",
         "MANUAL_REVIEW_STATUS_SYNC",
-    }:
-        return not daily_plan_done
+    } and not daily_plan_done:
+        return True
+    if stage_name == "DAILY_PLAN_NOTION_EXPORT":
+        return execution_template_done or execution_commit_done or daily_review_done
+    if stage_name == "MANUAL_EXECUTION_TEMPLATE":
+        return execution_commit_done or execution_sync_done or daily_review_done
+    if stage_name == "MANUAL_EXECUTION_PREVIEW":
+        return execution_commit_done or execution_sync_done or daily_review_done
+    if stage_name == "MANUAL_EXECUTION_COMMIT":
+        return execution_sync_done or daily_review_done
+    if stage_name == "MANUAL_EXECUTION_STATUS_SYNC":
+        return daily_review_done
+    if stage_name == "DAILY_REVIEW":
+        return review_template_done or review_preview_done or review_append_done
+    if stage_name == "MANUAL_REVIEW_TEMPLATE":
+        return review_preview_done or review_append_done or review_sync_done
+    if stage_name == "MANUAL_REVIEW_PREVIEW":
+        return review_append_done or review_sync_done
+    if stage_name == "MANUAL_REVIEW_APPEND":
+        return review_sync_done or str(workflow_status or "") == WORKFLOW_REVIEW_DONE
+    if stage_name == "MANUAL_REVIEW_STATUS_SYNC":
+        return str(workflow_status or "") == WORKFLOW_REVIEW_DONE
     return False
 
 
