@@ -285,6 +285,34 @@ Safety boundary:
 
 See [mfu_oper9_daily_ops_orchestrator_closeout.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_daily_ops_orchestrator_closeout.md).
 
+## OPER9-7 Operator Summary Addendum
+
+Daily Ops status JSON includes `operator_summary` for n8n and notification renderers.
+
+Use it as the compact message source:
+
+- `operator_summary.operator_message`
+- `operator_summary.current_step`
+- `operator_summary.current_step_status`
+- `operator_summary.recommended_operator_action`
+- `operator_summary.next_command`
+- `operator_summary.command_type`
+- `operator_summary.risk_level`
+- `operator_summary.requires_manual_approval`
+- `operator_summary.has_reconciliation_conflicts`
+
+n8n should render or route this summary. It should not re-derive stage decisions from `stages`.
+
+Automation boundary:
+
+- `READ_ONLY` + `SAFE` commands may be considered for future read-only automation.
+- `NOTION_WRITE` requires explicit approval.
+- `LEDGER_WRITE` is not an n8n auto-execution target.
+- `DANGEROUS` commands must not be auto-executed.
+- broker/order, ledger/DB mutation, Notion write/sync, commit, and append remain excluded unless a later approval-based MFU explicitly changes the policy.
+
+See [mfu_oper9_7_operator_summary_json_contract.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_7_operator_summary_json_contract.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 

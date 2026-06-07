@@ -28,6 +28,7 @@ from core.paper_daily_ops_notion_status import (
     build_notion_live_read_status,
     skipped_notion_live_read_status,
 )
+from core.paper_daily_ops_operator_summary import build_operator_summary
 from core.paper_daily_ops_reconciliation import apply_reconciliation
 from core.paper_status import WORKFLOW_REVIEW_DONE, run_paper_status
 
@@ -192,7 +193,7 @@ def build_daily_ops_status(
         next_command=next_command,
     )
 
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "account_id": normalized_account_id,
         "account_root": _path_str(root),
@@ -231,6 +232,8 @@ def build_daily_ops_status(
         "reconciliation_summary": reconciliation_summary,
         "stages": stages,
     }
+    payload["operator_summary"] = build_operator_summary(payload)
+    return payload
 
 
 def _validate_required_account_id(account_id: str) -> str:

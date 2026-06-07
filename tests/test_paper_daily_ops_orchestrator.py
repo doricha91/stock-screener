@@ -349,9 +349,25 @@ def test_normal_input_generates_stage_list_and_read_only_flags(tmp_path: Path):
     assert "next_action" in payload
     assert "summary" in payload
     assert "stage_counts" in payload
+    assert "operator_summary" in payload
     assert payload["reconciliation_summary"]["checked"] is False
     assert all("notion_checked" in stage for stage in payload["stages"])
     assert all("reconciliation_checked" in stage for stage in payload["stages"])
+
+    operator_summary = payload["operator_summary"]
+    assert operator_summary["current_step"] == "DATA_FRESHNESS"
+    assert operator_summary["current_step_status"] == "READY"
+    assert operator_summary["next_command"] == payload["next_command"]
+    assert operator_summary["command_type"] == payload["next_action"]["command_type"]
+    assert operator_summary["risk_level"] == payload["next_action"]["risk_level"]
+    assert operator_summary["requires_manual_approval"] == payload["next_action"]["requires_manual_approval"]
+    assert operator_summary["warnings"] == payload["warnings"]
+    assert operator_summary["blockers"] == payload["blockers"]
+    assert operator_summary["ready_count"] == payload["stage_counts"]["READY"]
+    assert operator_summary["blocked_count"] == payload["stage_counts"]["BLOCKED"]
+    assert operator_summary["warning_count"] == payload["stage_counts"]["WARNING"]
+    assert operator_summary["done_count"] == payload["stage_counts"]["DONE"]
+    assert operator_summary["unknown_count"] == payload["stage_counts"]["UNKNOWN"]
 
 
 def test_notion_live_read_module_uses_read_only_client():
@@ -446,6 +462,8 @@ def test_notion_ready_manual_execution_preserves_preview_recommendation(tmp_path
     assert stage["notion_checked"] is True
     assert stage["reconciliation_status"] == "READY"
     assert payload["reconciliation_summary"]["recommended_operator_action"] == "RUN_PREVIEW"
+    assert payload["operator_summary"]["recommended_operator_action"] == "RUN_PREVIEW"
+    assert payload["operator_summary"]["current_step"] == "DATA_FRESHNESS"
 
 
 def test_local_commit_with_unsynced_notion_status_keeps_sync_recommendation(tmp_path: Path):
@@ -502,6 +520,10 @@ def test_notion_mismatch_blocks_stage(tmp_path: Path):
     assert stage["notion_errors"]
     assert stage["next_command"] is None
     assert payload["reconciliation_summary"]["blocking_conflict_count"] == 1
+    assert payload["operator_summary"]["has_reconciliation_conflicts"] is True
+    assert payload["operator_summary"]["conflict_count"] == 1
+    assert payload["operator_summary"]["recommended_operator_action"] == "RESOLVE_CONFLICT"
+    assert payload["operator_summary"]["current_step"] == "DAILY_PLAN_NOTION_EXPORT"
 
 
 def test_local_plan_without_notion_plan_reconciles_export_ready(tmp_path: Path):
@@ -568,6 +590,9 @@ def test_notion_execution_ready_missing_actual_price_is_warning(tmp_path: Path):
     assert stage["status"] == "WARNING"
     assert stage["reconciliation_rule_id"] == "OPER9_6_EXEC_PREVIEW_READY_MISSING_PRICE"
     assert payload["reconciliation_summary"]["recommended_operator_action"] == "RESOLVE_CONFLICT"
+    assert payload["operator_summary"]["operator_message"] == (
+        "Local and Notion states conflict. Resolve the conflict before running risky commands."
+    )
 
 
 def test_notion_committed_without_local_commit_blocks_commit_recommendation(tmp_path: Path):
@@ -688,10 +713,39 @@ def test_review_done_with_unsynced_notion_keeps_next_commands_null_but_reports_c
     assert payload["workflow_status"] == "REVIEW_DONE"
     assert payload["next_command"] is None
     assert payload["next_action"] is None
+    assert payload["operator_summary"]["terminal"] is True
+    assert payload["operator_summary"]["current_step"] == "FINAL_STATUS"
+    assert payload["operator_summary"]["next_command"] is None
+    assert payload["operator_summary"]["operator_message"] == "Daily ops loop is complete."
     assert _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")["status"] == "WARNING"
     assert _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")["next_command"] is None
     assert payload["reconciliation_summary"]["warning_conflict_count"] == 1
     assert payload["reconciliation_summary"]["recommended_operator_action"] == "RESOLVE_CONFLICT"
+
+
+def test_operator_summary_exists_when_notion_read_is_blocked(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report={
+            "enabled": True,
+            "called": True,
+            "status": "BLOCKED",
+            "errors": ["Notion settings are disabled or missing."],
+            "warnings": [],
+            "summary": {"stage_status_counts": {}, "total_row_count": 0},
+            "stages": {},
+        },
+    )
+
+    operator_summary = payload["operator_summary"]
+    assert operator_summary["notion_live_read_enabled"] is True
+    assert operator_summary["notion_live_read_status"] == "BLOCKED"
+    assert operator_summary["current_step"] == "DATA_FRESHNESS"
+    assert operator_summary["next_command"] == payload["next_command"]
 
 
 def test_non_default_legacy_paper_test_plan_blocks_daily_plan_evidence(tmp_path: Path):
