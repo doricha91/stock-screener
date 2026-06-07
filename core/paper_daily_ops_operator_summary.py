@@ -119,7 +119,7 @@ def _recommended_operator_action(
     if terminal:
         return ACTION_NONE
     reconciliation_action = str(reconciliation_summary.get("recommended_operator_action") or "")
-    if reconciliation_action and reconciliation_action != ACTION_NONE:
+    if reconciliation_action == ACTION_RESOLVE_CONFLICT:
         return reconciliation_action
     if next_action:
         command_type = str(next_action.get("command_type") or "")
@@ -159,6 +159,8 @@ def _operator_message(
     if status == "WARNING":
         return "Daily ops has warnings. Review warnings before continuing."
     if status == "READY":
+        return "The next daily ops step is ready."
+    if stage.get("next_command"):
         return "The next daily ops step is ready."
     if status == "DONE":
         return "The current daily ops step is done."

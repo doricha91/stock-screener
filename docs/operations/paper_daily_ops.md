@@ -313,6 +313,20 @@ Automation boundary:
 
 See [mfu_oper9_7_operator_summary_json_contract.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_7_operator_summary_json_contract.md).
 
+## OPER9-8 Step Advancement Addendum
+
+Operator-facing `next_command` and `operator_summary.current_step` must advance with the local workflow.
+
+Rules:
+
+- Once Daily Plan artifacts exist and `workflow_status` is `PLAN_READY` or later, do not send the operator back to `DATA_FRESHNESS`.
+- Stage-level `DATA_FRESHNESS` may remain diagnostic `READY` if no durable freshness report exists, but it must not become the top-level command after the plan is generated.
+- n8n should trust `operator_summary.current_step` and `operator_summary.next_command`, not the first READY stage in `stages`.
+- Downstream preview stages must not override earlier pending operational stages such as Daily Plan Notion export or Manual Execution template export.
+- legacy `paper_test` warnings remain visible but should not rewind the workflow to a passed stage.
+
+See [mfu_oper9_8_orchestrator_step_advancement_fix.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_8_orchestrator_step_advancement_fix.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 

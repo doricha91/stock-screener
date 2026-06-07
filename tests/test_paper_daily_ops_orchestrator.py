@@ -462,8 +462,55 @@ def test_notion_ready_manual_execution_preserves_preview_recommendation(tmp_path
     assert stage["notion_checked"] is True
     assert stage["reconciliation_status"] == "READY"
     assert payload["reconciliation_summary"]["recommended_operator_action"] == "RUN_PREVIEW"
-    assert payload["operator_summary"]["recommended_operator_action"] == "RUN_PREVIEW"
-    assert payload["operator_summary"]["current_step"] == "DATA_FRESHNESS"
+    assert payload["operator_summary"]["recommended_operator_action"] == "RUN_NEXT_COMMAND"
+    assert payload["operator_summary"]["current_step"] == "DAILY_PLAN_NOTION_EXPORT"
+
+
+def test_plan_ready_advances_past_data_freshness_for_top_level_next_command(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+
+    assert payload["workflow_status"] == "PLAN_READY"
+    assert _stage(payload, "DATA_FRESHNESS")["status"] == "READY"
+    assert _stage(payload, "DAILY_PLAN")["status"] == "DONE"
+    assert payload["next_command"] != _stage(payload, "DATA_FRESHNESS")["next_command"]
+    assert "data-freshness" not in payload["next_command"]
+    assert payload["operator_summary"]["current_step"] != "DATA_FRESHNESS"
+    assert payload["operator_summary"]["operator_message"] != (
+        "Data freshness check is ready. Run the read-only freshness command first."
+    )
+    assert payload["operator_summary"]["next_command"] == payload["next_command"]
+    assert payload["operator_summary"]["current_step"] == "DAILY_PLAN_NOTION_EXPORT"
+    assert "export_paper_to_notion.py" in payload["next_command"]
+
+
+def test_plan_ready_does_not_skip_to_downstream_preview_when_plan_export_is_pending(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+
+    assert _stage(payload, "MANUAL_EXECUTION_PREVIEW")["status"] == "READY"
+    assert payload["operator_summary"]["current_step"] == "DAILY_PLAN_NOTION_EXPORT"
+    assert "import_notion_executions.py" not in payload["next_command"]
+
+
+def test_plan_ready_legacy_warning_does_not_rewind_to_data_freshness(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write(legacy / "reports" / "manual_execution_import_preview_20260608.json", "{}")
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+
+    assert payload["paper_test_artifacts_detected"] is True
+    assert payload["warnings"]
+    assert payload["operator_summary"]["current_step"] == "DAILY_PLAN_NOTION_EXPORT"
+    assert "data-freshness" not in payload["operator_summary"]["next_command"]
 
 
 def test_local_commit_with_unsynced_notion_status_keeps_sync_recommendation(tmp_path: Path):

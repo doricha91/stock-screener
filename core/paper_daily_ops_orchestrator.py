@@ -181,7 +181,7 @@ def build_daily_ops_status(
             stage["next_action"] = None
 
     overall_status = _derive_overall_status(blockers, warnings, stages)
-    next_command = _first_next_command(stages)
+    next_command = _first_next_command(stages, workflow_status=workflow_status)
     if workflow_status == WORKFLOW_REVIEW_DONE:
         next_command = None
     stage_counts = _stage_counts(stages)
@@ -822,10 +822,46 @@ def _derive_overall_status(blockers: list[str], warnings: list[str], stages: lis
     return "PASS"
 
 
-def _first_next_command(stages: list[dict[str, Any]]) -> str | None:
+def _first_next_command(stages: list[dict[str, Any]], *, workflow_status: str | None = None) -> str | None:
     for stage in stages:
+        if _is_stale_next_command_stage(stage, stages=stages, workflow_status=workflow_status):
+            continue
         if stage.get("status") in {READY, WARNING, UNKNOWN} and stage.get("next_command"):
             return str(stage["next_command"])
+    return None
+
+
+def _is_stale_next_command_stage(
+    stage: dict[str, Any],
+    *,
+    stages: list[dict[str, Any]],
+    workflow_status: str | None,
+) -> bool:
+    stage_name = str(stage.get("stage_name") or "")
+    daily_plan_done = _stage_status(stages, "DAILY_PLAN") == DONE
+    if stage_name == "DATA_FRESHNESS":
+        return daily_plan_done or str(workflow_status or "") not in {"", "NO_PLAN", "UNKNOWN_OR_INCOMPLETE"}
+    if stage_name == "DAILY_PLAN":
+        return daily_plan_done or str(workflow_status or "") not in {"", "NO_PLAN", "UNKNOWN_OR_INCOMPLETE"}
+    if stage_name in {
+        "MANUAL_EXECUTION_TEMPLATE",
+        "MANUAL_EXECUTION_PREVIEW",
+        "MANUAL_EXECUTION_COMMIT",
+        "MANUAL_EXECUTION_STATUS_SYNC",
+        "DAILY_REVIEW",
+        "MANUAL_REVIEW_TEMPLATE",
+        "MANUAL_REVIEW_PREVIEW",
+        "MANUAL_REVIEW_APPEND",
+        "MANUAL_REVIEW_STATUS_SYNC",
+    }:
+        return not daily_plan_done
+    return False
+
+
+def _stage_status(stages: list[dict[str, Any]], stage_name: str) -> str | None:
+    for stage in stages:
+        if stage.get("stage_name") == stage_name:
+            return str(stage.get("status") or "")
     return None
 
 
