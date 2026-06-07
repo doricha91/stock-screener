@@ -250,6 +250,41 @@ Rules:
 
 See [mfu_oper9_6_local_notion_reconciliation_matrix.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_6_local_notion_reconciliation_matrix.md) for the stage matrix.
 
+## OPER9 Closeout Addendum
+
+OPER9 is closed as the Python Daily Ops Orchestrator track.
+
+Final role split:
+
+- Python Orchestrator: stage judgment, local artifact checks, optional read-only Notion status, reconciliation, blockers, `next_action`, and risk metadata.
+- Local CSV/JSON/Markdown/SQLite: source of truth.
+- Notion: input UI, review UI, and status display UI only.
+- n8n: future OPER10/AUTO scheduling, notification, and approval layer.
+
+Current status CLI:
+
+```cmd
+python scripts\paper_daily_ops.py status --account-id <ACCOUNT_ID> --data-date <DATA_DATE> --trade-date <TRADE_DATE> --json
+```
+
+Supported options:
+
+- `--include-notion-read`
+- `--strict-exit`
+- `--write-status-report`
+- `--status-report-path <PATH>`
+
+Safety boundary:
+
+- do not automatically run Notion export/sync commands
+- do not automatically run `import_notion_executions.py --commit`
+- do not automatically run `import_notion_reviews.py --commit`
+- do not run broker/API/order commands
+- do not automate ledger or DB mutation
+- keep n8n implementation for OPER10/AUTO follow-up
+
+See [mfu_oper9_daily_ops_orchestrator_closeout.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_daily_ops_orchestrator_closeout.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 

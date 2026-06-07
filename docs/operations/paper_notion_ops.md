@@ -1,5 +1,23 @@
 # Paper Notion Operations Guide
 
+## OPER9 Closeout Note
+
+OPER9 closes the Python Daily Ops Orchestrator track. Notion remains an input UI, review UI, and status display UI; it is not the source of truth.
+
+Use the Orchestrator for daily stage judgment:
+
+```cmd
+python scripts\paper_daily_ops.py status --account-id <ACCOUNT_ID> --data-date <DATA_DATE> --trade-date <TRADE_DATE> --json
+```
+
+Optional read-only Notion status:
+
+```cmd
+--include-notion-read
+```
+
+Do not automatically run Notion export/sync, local commit/append, broker/order, ledger mutation, or DB mutation from this document. n8n scheduling, notification, and approval flow design belongs to OPER10/AUTO follow-up work.
+
 ## 1. Role of This Document
 
 이번 MFU-PAPER14-NOTION-OPS-ALIGNMENT는 `paper_notion_ops.md`를 최신 `paper_daily_ops.md`의 canonical daily loop와 source-of-truth/safety/status 정책에 맞춰 업데이트하는 작업이며, Python 코드 수정, Notion actual write/export, Manual Execution commit, Manual Review append, paper trading ledger 수정은 수행하지 않는다.
