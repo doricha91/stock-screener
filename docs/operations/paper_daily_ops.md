@@ -228,7 +228,27 @@
   - PAPER14 전체 범위 / 완료 / 보류 / 후속 결정 기록
 
 - [paper_notion_ops.md](/D:/python/StockScreener/docs/operations/paper_notion_ops.md)
+
   - Notion-specific operation detail
+
+## OPER9-6 Local Notion Reconciliation Addendum
+
+Daily Ops status can optionally combine local artifact status with read-only Notion status by using:
+
+```cmd
+python scripts\paper_daily_ops.py status --account-id <ACCOUNT_ID> --data-date <DATA_DATE> --trade-date <TRADE_DATE> --json --include-notion-read
+```
+
+Rules:
+
+- Local CSV, JSON, Markdown, and SQLite artifacts remain source-of-truth.
+- Notion rows are UI/input/review signals only.
+- Notion COMMITTED/SYNCED status without the matching local commit or append report is a reconciliation conflict.
+- Local commit, append, ledger, and snapshot evidence must not be inferred from Notion alone.
+- BLOCKED reconciliation suppresses risky next commands.
+- `REVIEW_DONE` keeps top-level and stage-level `next_command` and `next_action` null; unsynced Notion status is reported as a reconciliation warning/conflict.
+
+See [mfu_oper9_6_local_notion_reconciliation_matrix.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_6_local_notion_reconciliation_matrix.md) for the stage matrix.
 
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide

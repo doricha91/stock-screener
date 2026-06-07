@@ -204,6 +204,7 @@ def _notion_stage_report(
     status_counts: dict[str, int] | None = None,
     errors: list[str] | None = None,
     warnings: list[str] | None = None,
+    details: dict | None = None,
 ) -> dict:
     return {
         "status": status,
@@ -211,7 +212,7 @@ def _notion_stage_report(
         "status_counts": status_counts or {},
         "errors": errors or [],
         "warnings": warnings or [],
-        "details": {},
+        "details": details or {},
     }
 
 
@@ -348,7 +349,9 @@ def test_normal_input_generates_stage_list_and_read_only_flags(tmp_path: Path):
     assert "next_action" in payload
     assert "summary" in payload
     assert "stage_counts" in payload
+    assert payload["reconciliation_summary"]["checked"] is False
     assert all("notion_checked" in stage for stage in payload["stages"])
+    assert all("reconciliation_checked" in stage for stage in payload["stages"])
 
 
 def test_notion_live_read_module_uses_read_only_client():
@@ -419,6 +422,9 @@ def test_include_notion_read_improves_daily_plan_export_stage(tmp_path: Path):
     assert stage["status"] == "DONE"
     assert stage["notion_checked"] is True
     assert stage["notion_row_count"] == 1
+    assert stage["local_stage_status"] == "UNKNOWN"
+    assert stage["reconciliation_status"] == "DONE"
+    assert stage["reconciliation_rule_id"] == "OPER9_6_DAILY_PLAN_LOCAL_AND_NOTION_PRESENT"
 
 
 def test_notion_ready_manual_execution_preserves_preview_recommendation(tmp_path: Path):
@@ -438,6 +444,8 @@ def test_notion_ready_manual_execution_preserves_preview_recommendation(tmp_path
     assert stage["status"] == "READY"
     assert stage["next_action"]["command_type"] == "READ_ONLY"
     assert stage["notion_checked"] is True
+    assert stage["reconciliation_status"] == "READY"
+    assert payload["reconciliation_summary"]["recommended_operator_action"] == "RUN_PREVIEW"
 
 
 def test_local_commit_with_unsynced_notion_status_keeps_sync_recommendation(tmp_path: Path):
@@ -463,9 +471,11 @@ def test_local_commit_with_unsynced_notion_status_keeps_sync_recommendation(tmp_
     )
     stage = _stage(payload, "MANUAL_EXECUTION_STATUS_SYNC")
 
-    assert stage["status"] == "WARNING"
+    assert stage["status"] == "READY"
     assert "sync_notion_execution_status.py" in stage["next_command"]
     assert stage["notion_warnings"]
+    assert stage["reconciliation_rule_id"] == "OPER9_6_EXEC_SYNC_LOCAL_COMMIT_UNSYNCED"
+    assert payload["reconciliation_summary"]["recommended_operator_action"] == "RUN_SYNC"
 
 
 def test_notion_mismatch_blocks_stage(tmp_path: Path):
@@ -490,6 +500,198 @@ def test_notion_mismatch_blocks_stage(tmp_path: Path):
 
     assert stage["status"] == "BLOCKED"
     assert stage["notion_errors"]
+    assert stage["next_command"] is None
+    assert payload["reconciliation_summary"]["blocking_conflict_count"] == 1
+
+
+def test_local_plan_without_notion_plan_reconciles_export_ready(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"DAILY_PLAN_NOTION_EXPORT": _notion_stage_report("UNKNOWN", row_count=0)}
+        ),
+    )
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["local_stage_status"] == "UNKNOWN"
+    assert stage["status"] == "READY"
+    assert stage["reconciliation_status"] == "READY"
+    assert "export_paper_to_notion.py" in stage["next_command"]
+
+
+def test_notion_plan_without_local_plan_is_reconciliation_warning(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"DAILY_PLAN_NOTION_EXPORT": _notion_stage_report("PASS", status_counts={"SYNCED": 1})}
+        ),
+    )
+    stage = _stage(payload, "DAILY_PLAN_NOTION_EXPORT")
+
+    assert stage["status"] == "WARNING"
+    assert stage["next_command"] is None
+    assert stage["reconciliation_rule_id"] == "OPER9_6_DAILY_PLAN_NOTION_WITHOUT_LOCAL"
+    assert payload["reconciliation_summary"]["warning_conflict_count"] == 1
+
+
+def test_notion_execution_ready_missing_actual_price_is_warning(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {
+                "MANUAL_EXECUTION_PREVIEW": _notion_stage_report(
+                    "WARNING",
+                    status_counts={"READY": 1},
+                    warnings=["Manual Execution READY rows include blank Actual Price values."],
+                    details={"missing_actual_price_count": 1},
+                )
+            },
+            status="WARNING",
+        ),
+    )
+    stage = _stage(payload, "MANUAL_EXECUTION_PREVIEW")
+
+    assert stage["status"] == "WARNING"
+    assert stage["reconciliation_rule_id"] == "OPER9_6_EXEC_PREVIEW_READY_MISSING_PRICE"
+    assert payload["reconciliation_summary"]["recommended_operator_action"] == "RESOLVE_CONFLICT"
+
+
+def test_notion_committed_without_local_commit_blocks_commit_recommendation(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_execution_preview(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_EXECUTION_COMMIT": _notion_stage_report("PASS", status_counts={"COMMITTED": 1})}
+        ),
+    )
+    stage = _stage(payload, "MANUAL_EXECUTION_COMMIT")
+
+    assert stage["status"] == "BLOCKED"
+    assert stage["next_command"] is None
+    assert stage["reconciliation_rule_id"] == "OPER9_6_EXEC_COMMIT_NOTION_COMMITTED_WITHOUT_LOCAL"
+
+
+def test_review_template_local_without_notion_rows_is_ready(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_review_ready(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_REVIEW_TEMPLATE": _notion_stage_report("UNKNOWN", row_count=0)}
+        ),
+    )
+    stage = _stage(payload, "MANUAL_REVIEW_TEMPLATE")
+
+    assert stage["status"] == "READY"
+    assert "export_paper_to_notion.py" in stage["next_command"]
+    assert stage["reconciliation_rule_id"] == "OPER9_6_REVIEW_TEMPLATE_LOCAL_ONLY"
+
+
+def test_notion_review_ready_without_local_preview_is_ready(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_review_ready(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_REVIEW_PREVIEW": _notion_stage_report("PASS", status_counts={"READY": 1})}
+        ),
+    )
+    stage = _stage(payload, "MANUAL_REVIEW_PREVIEW")
+
+    assert stage["status"] == "READY"
+    assert "import_notion_reviews.py" in stage["next_command"]
+    assert payload["reconciliation_summary"]["recommended_operator_action"] == "RUN_PREVIEW"
+
+
+def test_review_commit_with_unsynced_notion_status_reconciles_sync_ready(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_review_ready(root)
+    _write_review_preview(root)
+    _write_json(
+        root / "reports" / "manual_review_import_commit_20260608.json",
+        {
+            "account_id": "paper_ops",
+            "review_date": "2026-06-08",
+            "rows": [],
+        },
+    )
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_REVIEW_STATUS_SYNC": _notion_stage_report("WARNING", status_counts={"REVIEWED": 1})},
+            status="WARNING",
+        ),
+    )
+    stage = _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")
+
+    assert stage["status"] == "READY"
+    assert "sync_notion_review_status.py" in stage["next_command"]
+    assert stage["reconciliation_rule_id"] == "OPER9_6_REVIEW_SYNC_LOCAL_COMMIT_UNSYNCED"
+
+
+def test_review_done_with_unsynced_notion_keeps_next_commands_null_but_reports_conflict(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_review_ready(root)
+    _write_review_preview(root)
+    _write_review_commit(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_REVIEW_STATUS_SYNC": _notion_stage_report("WARNING", status_counts={"REVIEWED": 1})},
+            status="WARNING",
+        ),
+    )
+
+    assert payload["workflow_status"] == "REVIEW_DONE"
+    assert payload["next_command"] is None
+    assert payload["next_action"] is None
+    assert _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")["status"] == "WARNING"
+    assert _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")["next_command"] is None
+    assert payload["reconciliation_summary"]["warning_conflict_count"] == 1
+    assert payload["reconciliation_summary"]["recommended_operator_action"] == "RESOLVE_CONFLICT"
 
 
 def test_non_default_legacy_paper_test_plan_blocks_daily_plan_evidence(tmp_path: Path):

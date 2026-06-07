@@ -23,14 +23,12 @@ from core.paper_daily_ops_evidence import (
     evaluate_notion_evidence,
 )
 from core.paper_daily_ops_notion_status import (
-    BLOCKED as NOTION_BLOCKED,
-    PASS as NOTION_PASS,
     SKIPPED as NOTION_SKIPPED,
     UNKNOWN as NOTION_UNKNOWN,
-    WARNING as NOTION_WARNING,
     build_notion_live_read_status,
     skipped_notion_live_read_status,
 )
+from core.paper_daily_ops_reconciliation import apply_reconciliation
 from core.paper_status import WORKFLOW_REVIEW_DONE, run_paper_status
 
 
@@ -173,8 +171,9 @@ def build_daily_ops_status(
         _stage_manual_review_status_sync(stage_context),
         _stage_final_status(stage_context),
     ]
-    _apply_notion_report(stages, notion_report)
     workflow_status = _safe_workflow_status(root, normalized_trade_date)
+    _apply_notion_report(stages, notion_report)
+    reconciliation_summary = apply_reconciliation(stages, workflow_status=workflow_status)
     if workflow_status == WORKFLOW_REVIEW_DONE:
         for stage in stages:
             stage["next_command"] = None
@@ -229,6 +228,7 @@ def build_daily_ops_status(
         "next_action": _next_action(next_command),
         "summary": summary,
         "stage_counts": stage_counts,
+        "reconciliation_summary": reconciliation_summary,
         "stages": stages,
     }
 
@@ -338,6 +338,13 @@ def _stage(
         "notion_status_counts": {},
         "notion_errors": [],
         "notion_warnings": [],
+        "notion_details": {},
+        "local_stage_status": status,
+        "notion_stage_status": None,
+        "reconciliation_status": None,
+        "reconciliation_rule_id": None,
+        "reconciliation_reason": None,
+        "reconciliation_checked": False,
         "note": note,
     }
 
@@ -705,7 +712,6 @@ def _apply_notion_report(stages: list[dict[str, Any]], notion_report: dict[str, 
         if not stage or not isinstance(stage_report, dict):
             continue
         _attach_notion_fields(stage, stage_report)
-        _apply_notion_stage_status(stage, stage_report)
 
 
 def _attach_notion_fields(stage: dict[str, Any], stage_report: dict[str, Any]) -> None:
@@ -715,40 +721,7 @@ def _attach_notion_fields(stage: dict[str, Any], stage_report: dict[str, Any]) -
     stage["notion_status_counts"] = dict(stage_report.get("status_counts") or {})
     stage["notion_errors"] = list(stage_report.get("errors") or [])
     stage["notion_warnings"] = list(stage_report.get("warnings") or [])
-
-
-def _apply_notion_stage_status(stage: dict[str, Any], stage_report: dict[str, Any]) -> None:
-    notion_status = str(stage_report.get("status") or NOTION_UNKNOWN)
-    if notion_status == NOTION_BLOCKED:
-        stage["status"] = BLOCKED
-        stage["blockers"] = sorted(set([*stage.get("blockers", []), *stage.get("notion_errors", [])]))
-        stage["next_command"] = None
-        stage["next_action"] = None
-        return
-    if stage.get("status") == BLOCKED:
-        return
-    if notion_status == NOTION_PASS and stage.get("stage_name") in {
-        "DAILY_PLAN_NOTION_EXPORT",
-        "MANUAL_EXECUTION_TEMPLATE",
-        "MANUAL_EXECUTION_STATUS_SYNC",
-        "MANUAL_REVIEW_TEMPLATE",
-        "MANUAL_REVIEW_STATUS_SYNC",
-    }:
-        stage["status"] = DONE
-        stage["next_command"] = None
-        stage["next_action"] = None
-        return
-    if notion_status == NOTION_WARNING and stage.get("stage_name") in {
-        "DAILY_PLAN_NOTION_EXPORT",
-        "MANUAL_EXECUTION_TEMPLATE",
-        "MANUAL_EXECUTION_STATUS_SYNC",
-        "MANUAL_REVIEW_TEMPLATE",
-        "MANUAL_REVIEW_STATUS_SYNC",
-    }:
-        stage["status"] = WARNING
-        warnings = [*stage.get("warnings", []), *stage.get("notion_warnings", [])]
-        stage["warnings"] = sorted(set(warnings))
-        return
+    stage["notion_details"] = dict(stage_report.get("details") or {})
 
 
 def _safe_workflow_status(root: Path, trade_date: str) -> str | None:
