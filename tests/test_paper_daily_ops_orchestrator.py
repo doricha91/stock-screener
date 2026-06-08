@@ -551,7 +551,63 @@ def test_notion_live_read_api_exception_is_json_safe():
     assert report["called"] is True
     assert report["status"] == "WARNING"
     assert report["errors"] == []
-    assert any("read failed" in warning for warning in report["warnings"])
+    assert "Notion live read failed with an API warning; check Notion connectivity and schema configuration." in report["warnings"]
+
+
+def test_notion_account_select_option_missing_warning_is_structured():
+    exc = NotionAPIError(
+        "POST /data_sources/<redacted>/query failed -> HTTP 400",
+        status_code=400,
+        response_body='{"message":"Option \\"paper_ops\\" not found for property \\"Account ID\\" select."}',
+    )
+
+    report = build_notion_live_read_status(
+        account_id="paper_ops",
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        client=_FakeNotionClient(exc=exc),
+        settings=_notion_settings(),
+        mapping_root=_notion_mapping(),
+        env={"NOTION_TOKEN": "token"},
+    )
+
+    stage = report["stages"]["MANUAL_EXECUTION_TEMPLATE"]
+    assert report["status"] == "WARNING"
+    assert stage["status"] == "WARNING"
+    assert stage["errors"] == []
+    assert stage["warnings"] == [
+        "Notion Account ID select option may be missing for this account; account-filtered live read returned HTTP 400."
+    ]
+    assert stage["details"]["warning_code"] == "NOTION_ACCOUNT_ID_SELECT_OPTION_MISSING"
+
+
+def test_account_select_option_warning_does_not_block_current_actionable_stage(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {
+                "MANUAL_EXECUTION_TEMPLATE": _notion_stage_report(
+                    "WARNING",
+                    row_count=0,
+                    warnings=[
+                        "Notion Account ID select option may be missing for this account; account-filtered live read returned HTTP 400."
+                    ],
+                    details={"warning_code": "NOTION_ACCOUNT_ID_SELECT_OPTION_MISSING"},
+                )
+            },
+            status="WARNING",
+        ),
+    )
+
+    assert payload["operator_summary"]["current_step"] == "DAILY_PLAN_NOTION_EXPORT"
+    assert payload["operator_summary"]["recommended_operator_action"] == "RUN_NEXT_COMMAND"
+    assert payload["operator_summary"]["has_reconciliation_conflicts"] is False
+    assert "Notion Account ID select option may be missing for this account." in payload["operator_summary"]["warnings"]
 
 
 def test_include_notion_read_improves_daily_plan_export_stage(tmp_path: Path):
@@ -720,6 +776,77 @@ def test_stage_advancement_matrix_execution_preview_to_commit_to_sync_to_review(
     _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
     sync_done = build_daily_ops_status(**_base_kwargs(root, legacy))
     _assert_operator_next(sync_done, "DAILY_REVIEW", "paper.py review")
+
+
+def test_manual_execution_draft_rows_wait_for_notion_input(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {
+                "MANUAL_EXECUTION_TEMPLATE": _notion_stage_report(
+                    "PASS",
+                    row_count=3,
+                    status_counts={"DRAFT": 3, "NOT_IMPORTED": 3},
+                    details={"missing_actual_price_count": 3},
+                )
+            }
+        ),
+    )
+
+    assert payload["next_command"] is None
+    assert payload["operator_summary"]["current_step"] == "MANUAL_EXECUTION_TEMPLATE"
+    assert payload["operator_summary"]["current_step"] != "FINAL_STATUS"
+    assert payload["operator_summary"]["recommended_operator_action"] == "WAIT_FOR_INPUT"
+    assert payload["operator_summary"]["next_command"] is None
+    assert payload["operator_summary"]["operator_message"] == (
+        "Enter Actual Price and set Status to READY in Notion before running the execution preview."
+    )
+
+
+def test_manual_execution_post_sync_ready_absence_is_not_conflict(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {
+                "MANUAL_EXECUTION_PREVIEW": _notion_stage_report(
+                    "PASS",
+                    row_count=7,
+                    status_counts={"IMPORTED": 7, "COMMITTED": 7},
+                ),
+                "MANUAL_EXECUTION_STATUS_SYNC": _notion_stage_report(
+                    "PASS",
+                    row_count=7,
+                    status_counts={"IMPORTED": 7, "COMMITTED": 7},
+                ),
+            }
+        ),
+    )
+
+    preview_stage = _stage(payload, "MANUAL_EXECUTION_PREVIEW")
+    assert preview_stage["status"] == "DONE"
+    assert preview_stage["reconciliation_rule_id"] == "OPER9_13_EXEC_PREVIEW_POST_COMMIT_NO_READY_ROWS"
+    assert preview_stage["_reconciliation_conflict"] is False
+    assert payload["reconciliation_summary"]["has_conflicts"] is False
+    assert payload["operator_summary"]["has_reconciliation_conflicts"] is False
+    _assert_operator_next(payload, "DAILY_REVIEW", "paper.py review")
+    assert payload["operator_summary"]["recommended_operator_action"] == "RUN_NEXT_COMMAND"
 
 
 def test_stage_advancement_matrix_daily_review_to_manual_review_template(tmp_path: Path):

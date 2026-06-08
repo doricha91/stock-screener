@@ -24,7 +24,8 @@ ACTION_RUN_COMMIT = "RUN_COMMIT"
 ACTION_RUN_SYNC = "RUN_SYNC"
 ACTION_RESOLVE_CONFLICT = "RESOLVE_CONFLICT"
 
-SYNCED_STATUSES = {"COMMITTED", "SYNCED", "STATUS_SYNCED", "IMPORT_SYNCED"}
+SYNCED_STATUSES = {"COMMITTED", "IMPORTED", "SYNCED", "STATUS_SYNCED", "IMPORT_SYNCED"}
+EXECUTION_POST_SYNC_STATUSES = SYNCED_STATUSES
 READY_STATUSES = {"READY"}
 EXECUTION_TEMPLATE_STATUSES = {"DRAFT", "READY", "COMMITTED", "SYNCED"}
 REVIEW_TEMPLATE_STATUSES = {"PENDING", "READY", "REVIEWED", "COMMITTED", "SYNCED"}
@@ -85,7 +86,7 @@ def _reconcile_stage(
     if name == "MANUAL_EXECUTION_TEMPLATE":
         return _manual_execution_template(stage, by_name)
     if name == "MANUAL_EXECUTION_PREVIEW":
-        return _manual_execution_preview(stage)
+        return _manual_execution_preview(stage, by_name)
     if name == "MANUAL_EXECUTION_COMMIT":
         return _manual_execution_commit(stage)
     if name == "MANUAL_EXECUTION_STATUS_SYNC":
@@ -139,11 +140,22 @@ def _manual_execution_template(stage: dict[str, Any], by_name: dict[str, dict[st
     return _result(READY, "OPER9_6_EXEC_TEMPLATE_LOCAL_PLAN_ONLY", "Local Daily Plan exists; Manual Execution template export is still needed.")
 
 
-def _manual_execution_preview(stage: dict[str, Any]) -> dict[str, Any]:
+def _manual_execution_preview(stage: dict[str, Any], by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
     local = _local_status(stage)
     ready_rows = _count_status(stage, READY_STATUSES)
     missing_price = int((stage.get("notion_details") or {}).get("missing_actual_price_count") or 0)
     if local in {DONE, WARNING} and ready_rows == 0:
+        commit_done = _local_status(by_name.get("MANUAL_EXECUTION_COMMIT")) == DONE
+        sync_done = _local_status(by_name.get("MANUAL_EXECUTION_STATUS_SYNC")) == DONE
+        post_sync_rows = _has_any_status(stage, EXECUTION_POST_SYNC_STATUSES)
+        if commit_done or sync_done or post_sync_rows:
+            return _result(
+                local,
+                "OPER9_13_EXEC_PREVIEW_POST_COMMIT_NO_READY_ROWS",
+                "Execution preview is already followed by local commit or synced Notion rows; READY rows are not expected after commit/sync.",
+                suppress_next=True,
+                conflict=local == WARNING,
+            )
         return _result(
             WARNING,
             "OPER9_6_EXEC_PREVIEW_LOCAL_WITHOUT_READY_NOTION",

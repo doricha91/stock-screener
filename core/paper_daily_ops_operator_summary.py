@@ -13,11 +13,13 @@ ACTION_RUN_COMMIT = "RUN_COMMIT"
 ACTION_RUN_SYNC = "RUN_SYNC"
 ACTION_RESOLVE_CONFLICT = "RESOLVE_CONFLICT"
 ACTION_RESOLVE_BLOCKERS = "RESOLVE_BLOCKERS"
+ACTION_WAIT_FOR_INPUT = "WAIT_FOR_INPUT"
 
 SUMMARY_ACTION_MAP = {
     "NONE": ACTION_NONE,
     "RUN_NEXT_COMMAND": ACTION_RUN_NEXT_COMMAND,
     "CHECK_NOTION": ACTION_CHECK_NOTION,
+    "WAIT_FOR_INPUT": ACTION_WAIT_FOR_INPUT,
     "REVIEW_WARNINGS": ACTION_CHECK_NOTION,
     "RESOLVE_BLOCKERS": ACTION_RESOLVE_BLOCKERS,
 }
@@ -46,6 +48,7 @@ def build_operator_summary(payload: dict[str, Any]) -> dict[str, Any]:
         reconciliation_summary=reconciliation_summary,
         summary=summary,
         next_action=next_action,
+        current_stage=current_stage,
     )
     current_step = str(current_stage.get("stage_name")) if current_stage else None
     current_step_status = str(current_stage.get("status")) if current_stage else "UNKNOWN"
@@ -70,7 +73,7 @@ def build_operator_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "command_type": next_action.get("command_type") if next_action else None,
         "risk_level": next_action.get("risk_level") if next_action else None,
         "requires_manual_approval": bool(next_action.get("requires_manual_approval")) if next_action else False,
-        "warnings": list(payload.get("warnings") or []),
+        "warnings": _operator_warnings(payload, stages),
         "blockers": list(payload.get("blockers") or []),
         "ready_count": int(stage_counts.get("READY") or 0),
         "blocked_count": int(stage_counts.get("BLOCKED") or 0),
@@ -102,6 +105,9 @@ def _select_current_stage(
         command_stage = _stage_for_next_command(stages, str(next_command))
         if command_stage:
             return command_stage
+    wait_stage = _first_manual_input_wait_stage(stages)
+    if wait_stage:
+        return wait_stage
     for status in ("BLOCKED", "WARNING", "READY", "UNKNOWN"):
         stage = _first_stage_with_status(stages, status)
         if stage:
@@ -115,12 +121,15 @@ def _recommended_operator_action(
     reconciliation_summary: dict[str, Any],
     summary: dict[str, Any],
     next_action: dict[str, Any] | None,
+    current_stage: dict[str, Any] | None,
 ) -> str:
     if terminal:
         return ACTION_NONE
     reconciliation_action = str(reconciliation_summary.get("recommended_operator_action") or "")
     if reconciliation_action == ACTION_RESOLVE_CONFLICT:
         return reconciliation_action
+    if current_stage and _is_manual_input_wait_stage(current_stage):
+        return ACTION_WAIT_FOR_INPUT
     if next_action:
         command_type = str(next_action.get("command_type") or "")
         if command_type == "READ_ONLY":
@@ -129,6 +138,8 @@ def _recommended_operator_action(
             return ACTION_RUN_COMMIT
         if command_type in {"NOTION_WRITE", "STATUS_SYNC"}:
             return ACTION_RUN_SYNC if "sync" in str(next_action.get("command") or "").lower() else ACTION_RUN_NEXT_COMMAND
+        if command_type == "UNKNOWN" and str(next_action.get("risk_level") or "") != "DANGEROUS":
+            return ACTION_RUN_NEXT_COMMAND
     summary_action = str(summary.get("recommended_operator_action") or ACTION_NONE)
     return SUMMARY_ACTION_MAP.get(summary_action, ACTION_CHECK_NOTION)
 
@@ -154,6 +165,8 @@ def _operator_message(
         return "Daily Plan is ready to generate after data freshness passes."
     if name in {"MANUAL_EXECUTION_STATUS_SYNC", "MANUAL_REVIEW_STATUS_SYNC"} and status == "READY":
         return "Local commit exists. Notion status sync is still needed."
+    if _is_manual_execution_draft_wait_stage(stage):
+        return "Enter Actual Price and set Status to READY in Notion before running the execution preview."
     if status == "BLOCKED":
         return "Daily ops is blocked. Resolve blockers before running the next command."
     if status == "WARNING":
@@ -165,6 +178,17 @@ def _operator_message(
     if status == "DONE":
         return "The current daily ops step is done."
     return "Daily ops status needs review."
+
+
+def _operator_warnings(payload: dict[str, Any], stages: list[dict[str, Any]]) -> list[str]:
+    warnings = list(payload.get("warnings") or [])
+    for stage in stages:
+        details = stage.get("notion_details") if isinstance(stage.get("notion_details"), dict) else {}
+        if details.get("warning_code") == "NOTION_ACCOUNT_ID_SELECT_OPTION_MISSING":
+            warning = "Notion Account ID select option may be missing for this account."
+            if warning not in warnings:
+                warnings.append(warning)
+    return warnings
 
 
 def _stage_by_name(stages: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
@@ -190,6 +214,26 @@ def _first_conflict_stage(stages: list[dict[str, Any]]) -> dict[str, Any] | None
         ),
         None,
     )
+
+
+def _first_manual_input_wait_stage(stages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((stage for stage in stages if _is_manual_input_wait_stage(stage)), None)
+
+
+def _is_manual_input_wait_stage(stage: dict[str, Any]) -> bool:
+    return _is_manual_execution_draft_wait_stage(stage)
+
+
+def _is_manual_execution_draft_wait_stage(stage: dict[str, Any]) -> bool:
+    if stage.get("stage_name") != "MANUAL_EXECUTION_TEMPLATE":
+        return False
+    if int(stage.get("notion_row_count") or 0) <= 0:
+        return False
+    counts = stage.get("notion_status_counts") or {}
+    draft_count = int(counts.get("DRAFT") or counts.get("draft") or 0)
+    ready_count = int(counts.get("READY") or counts.get("ready") or 0)
+    missing_price = int((stage.get("notion_details") or {}).get("missing_actual_price_count") or 0)
+    return draft_count > 0 and ready_count == 0 and missing_price > 0
 
 
 def _first_stage_with_status(stages: list[dict[str, Any]], status: str) -> dict[str, Any] | None:

@@ -169,17 +169,51 @@ def _read_stage(ctx: NotionReadContext, reader: Any) -> dict[str, Any]:
     try:
         return reader()
     except NotionAPIError as exc:
+        warning, details = _structured_notion_api_warning(exc)
         return {
             "status": WARNING,
             "row_count": 0,
             "status_counts": {},
             "errors": [],
-            "warnings": [str(exc)],
+            "warnings": [warning],
             "details": {
                 "account_id": ctx.account_id,
                 "trade_date": ctx.trade_date,
+                **details,
             },
         }
+
+
+def _structured_notion_api_warning(exc: NotionAPIError) -> tuple[str, dict[str, Any]]:
+    body = str(getattr(exc, "response_body", "") or "")
+    text = f"{exc} {body}"
+    lowered = text.lower()
+    if (
+        getattr(exc, "status_code", None) == 400
+        and "account id" in lowered
+        and "select" in lowered
+        and ("option" in lowered or "not found" in lowered or "does not contain" in lowered)
+    ):
+        return (
+            "Notion Account ID select option may be missing for this account; account-filtered live read returned HTTP 400.",
+            {
+                "warning_code": "NOTION_ACCOUNT_ID_SELECT_OPTION_MISSING",
+                "notion_http_status": 400,
+            },
+        )
+    if getattr(exc, "status_code", None):
+        return (
+            f"Notion live read returned HTTP {exc.status_code}; check the detailed schema/mapping audit.",
+            {
+                "warning_code": "NOTION_API_HTTP_WARNING",
+                "notion_http_status": exc.status_code,
+            },
+        )
+    return (
+        "Notion live read failed with an API warning; check Notion connectivity and schema configuration.",
+        {"warning_code": "NOTION_API_WARNING"},
+    )
+
 
 def skipped_notion_live_read_status() -> dict[str, Any]:
     return {

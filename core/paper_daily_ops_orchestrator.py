@@ -823,6 +823,8 @@ def _derive_overall_status(blockers: list[str], warnings: list[str], stages: lis
 
 
 def _first_next_command(stages: list[dict[str, Any]], *, workflow_status: str | None = None) -> str | None:
+    if _has_manual_execution_input_wait(stages):
+        return None
     for stage in stages:
         if _is_stale_next_command_stage(stage, stages=stages, workflow_status=workflow_status):
             continue
@@ -893,6 +895,19 @@ def _stage_status(stages: list[dict[str, Any]], stage_name: str) -> str | None:
         if stage.get("stage_name") == stage_name:
             return str(stage.get("status") or "")
     return None
+
+
+def _has_manual_execution_input_wait(stages: list[dict[str, Any]]) -> bool:
+    if _stage_status(stages, "DAILY_PLAN_NOTION_EXPORT") != DONE:
+        return False
+    stage = next((item for item in stages if item.get("stage_name") == "MANUAL_EXECUTION_TEMPLATE"), None)
+    if not stage or stage.get("status") != DONE or int(stage.get("notion_row_count") or 0) <= 0:
+        return False
+    counts = stage.get("notion_status_counts") or {}
+    draft_count = int(counts.get("DRAFT") or counts.get("draft") or 0)
+    ready_count = int(counts.get("READY") or counts.get("ready") or 0)
+    missing_price = int((stage.get("notion_details") or {}).get("missing_actual_price_count") or 0)
+    return draft_count > 0 and ready_count == 0 and missing_price > 0
 
 
 def _stage_counts(stages: list[dict[str, Any]]) -> dict[str, int]:

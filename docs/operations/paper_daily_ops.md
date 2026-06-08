@@ -370,6 +370,17 @@ Still forbidden:
 
 See [mfu_oper9_10_notion_env_loading_alignment.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_10_notion_env_loading_alignment.md).
 
+## OPER9-13 Manual Execution Reconciliation Addendum
+
+Manual Execution operator state handling includes two additional rules:
+
+- DRAFT Manual Execution rows with blank Actual Price and no READY rows are a Notion input wait state, not a command-ready state. `operator_summary.recommended_operator_action` may be `WAIT_FOR_INPUT`, and `next_command` should be `null`.
+- After local execution preview, commit, or status sync has completed, READY rows are no longer required in Notion. COMMITTED, IMPORTED, or SYNCED rows are normal post-sync evidence and must not create a false `RESOLVE_CONFLICT` recommendation.
+
+Notion live-read warnings for a missing `Account ID` select option should be surfaced as a structured operator warning without exposing token, data source id, page id, or row contents. This warning does not block a safe upstream next command by itself.
+
+See [mfu_oper9_13_manual_execution_state_reconciliation_hardening.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_13_manual_execution_state_reconciliation_hardening.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 
