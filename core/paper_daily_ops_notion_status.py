@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from core.notion_client import NotionAPIError, NotionClient
+from core.notion_account_keys import build_daily_plan_external_key
 from core.notion_mapping import (
     NotionMappingError,
     get_mapping_section,
@@ -55,61 +56,84 @@ def build_notion_live_read_status(
     try:
         resolved_settings = settings or load_notion_settings(allow_missing=True)
         if not resolved_settings.enabled:
-            return _blocked_report(ctx, "Notion settings are disabled or missing.")
+            missing_errors = _env_only_requirement_errors(resolved_settings, env=env)
+            if missing_errors:
+                return _blocked_report(ctx, "; ".join(missing_errors))
         resolved_mapping = mapping_root or load_notion_property_mapping()
         resolved_client = client or NotionClient(
             get_notion_token(resolved_settings, env=env),
             timeout=timeout_seconds,
         )
         stages = {
-            "DAILY_PLAN_NOTION_EXPORT": _read_daily_plan(
-                resolved_client,
-                resolved_settings,
-                resolved_mapping,
+            "DAILY_PLAN_NOTION_EXPORT": _read_stage(
                 ctx,
-                env=env,
+                lambda: _read_daily_plan(
+                    resolved_client,
+                    resolved_settings,
+                    resolved_mapping,
+                    ctx,
+                    env=env,
+                ),
             ),
-            "MANUAL_EXECUTION_TEMPLATE": _read_manual_executions_template(
-                resolved_client,
-                resolved_settings,
-                resolved_mapping,
+            "MANUAL_EXECUTION_TEMPLATE": _read_stage(
                 ctx,
-                env=env,
+                lambda: _read_manual_executions_template(
+                    resolved_client,
+                    resolved_settings,
+                    resolved_mapping,
+                    ctx,
+                    env=env,
+                ),
             ),
-            "MANUAL_EXECUTION_PREVIEW": _read_manual_executions_preview(
-                resolved_client,
-                resolved_settings,
-                resolved_mapping,
+            "MANUAL_EXECUTION_PREVIEW": _read_stage(
                 ctx,
-                env=env,
+                lambda: _read_manual_executions_preview(
+                    resolved_client,
+                    resolved_settings,
+                    resolved_mapping,
+                    ctx,
+                    env=env,
+                ),
             ),
-            "MANUAL_EXECUTION_STATUS_SYNC": _read_manual_executions_status_sync(
-                resolved_client,
-                resolved_settings,
-                resolved_mapping,
+            "MANUAL_EXECUTION_STATUS_SYNC": _read_stage(
                 ctx,
-                env=env,
+                lambda: _read_manual_executions_status_sync(
+                    resolved_client,
+                    resolved_settings,
+                    resolved_mapping,
+                    ctx,
+                    env=env,
+                ),
             ),
-            "MANUAL_REVIEW_TEMPLATE": _read_manual_reviews_template(
-                resolved_client,
-                resolved_settings,
-                resolved_mapping,
+            "MANUAL_REVIEW_TEMPLATE": _read_stage(
                 ctx,
-                env=env,
+                lambda: _read_manual_reviews_template(
+                    resolved_client,
+                    resolved_settings,
+                    resolved_mapping,
+                    ctx,
+                    env=env,
+                ),
             ),
-            "MANUAL_REVIEW_PREVIEW": _read_manual_reviews_preview(
-                resolved_client,
-                resolved_settings,
-                resolved_mapping,
+            "MANUAL_REVIEW_PREVIEW": _read_stage(
                 ctx,
-                env=env,
+                lambda: _read_manual_reviews_preview(
+                    resolved_client,
+                    resolved_settings,
+                    resolved_mapping,
+                    ctx,
+                    env=env,
+                ),
             ),
-            "MANUAL_REVIEW_STATUS_SYNC": _read_manual_reviews_status_sync(
-                resolved_client,
-                resolved_settings,
-                resolved_mapping,
+            "MANUAL_REVIEW_STATUS_SYNC": _read_stage(
                 ctx,
-                env=env,
+                lambda: _read_manual_reviews_status_sync(
+                    resolved_client,
+                    resolved_settings,
+                    resolved_mapping,
+                    ctx,
+                    env=env,
+                ),
             ),
         }
         errors = [error for stage in stages.values() for error in stage["errors"]]
@@ -127,7 +151,7 @@ def build_notion_live_read_status(
             },
             "stages": stages,
         }
-    except (NotionSettingsError, NotionMappingError, NotionAPIError) as exc:
+    except (NotionSettingsError, NotionMappingError) as exc:
         return _blocked_report(ctx, str(exc))
     except Exception as exc:
         return {
@@ -140,6 +164,22 @@ def build_notion_live_read_status(
             "stages": {},
         }
 
+
+def _read_stage(ctx: NotionReadContext, reader: Any) -> dict[str, Any]:
+    try:
+        return reader()
+    except NotionAPIError as exc:
+        return {
+            "status": WARNING,
+            "row_count": 0,
+            "status_counts": {},
+            "errors": [],
+            "warnings": [str(exc)],
+            "details": {
+                "account_id": ctx.account_id,
+                "trade_date": ctx.trade_date,
+            },
+        }
 
 def skipped_notion_live_read_status() -> dict[str, Any]:
     return {
@@ -170,6 +210,26 @@ def _blocked_report(ctx: NotionReadContext, error: str) -> dict[str, Any]:
     }
 
 
+def _env_only_requirement_errors(settings: NotionSettings, *, env: dict[str, str] | None) -> list[str]:
+    errors: list[str] = []
+    try:
+        get_notion_token(settings, env=env)
+    except NotionSettingsError as exc:
+        errors.append(str(exc))
+
+    required_sources = {
+        "daily_plans": "NOTION_DAILY_PLANS_DATA_SOURCE_ID",
+        "manual_executions": "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID",
+        "manual_reviews": "NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID",
+    }
+    for key, env_override in required_sources.items():
+        try:
+            get_notion_data_source_id(settings, key, env=env, env_override=env_override)
+        except NotionSettingsError:
+            errors.append(f"Missing required Notion env override: {env_override}.")
+    return errors
+
+
 def _read_daily_plan(
     client: Any,
     settings: NotionSettings,
@@ -179,13 +239,10 @@ def _read_daily_plan(
     env: dict[str, str] | None,
 ) -> dict[str, Any]:
     mapping = get_mapping_section(mapping_root, "daily_plans")
-    pages = _query_date_account(
-        client,
+    pages = client.query_by_external_key(
         _data_source_id(settings, "daily_plans", "NOTION_DAILY_PLANS_DATA_SOURCE_ID", env),
-        mapping=mapping,
-        date_key="plan_date",
-        date_value=ctx.trade_date,
-        account_id=ctx.account_id,
+        build_daily_plan_external_key(ctx.account_id, ctx.trade_date),
+        resolve_notion_property_name(mapping, "external_key"),
     )
     return _stage_from_pages(
         pages,

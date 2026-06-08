@@ -269,6 +269,18 @@ class _FakeNotionClient:
         self.pages = pages or []
         self.exc = exc
         self.calls: list[tuple[str, dict | None]] = []
+        self.external_key_calls: list[tuple[str, str, str]] = []
+
+    def query_by_external_key(
+        self,
+        data_source_id: str,
+        external_key: str,
+        external_key_property: str,
+    ) -> list[dict]:
+        self.external_key_calls.append((data_source_id, external_key, external_key_property))
+        if self.exc:
+            raise self.exc
+        return list(self.pages)
 
     def query_data_source(self, data_source_id: str, *, filter_payload: dict | None = None, **_: object) -> list[dict]:
         self.calls.append((data_source_id, filter_payload))
@@ -292,6 +304,7 @@ def _notion_settings() -> NotionSettings:
 def _notion_mapping() -> dict[str, dict[str, str]]:
     return {
         "daily_plans": {
+            "external_key": "External Key",
             "account_id": "Account ID",
             "plan_date": "Plan Date",
             "sync_status": "Sync Status",
@@ -390,12 +403,44 @@ def test_notion_live_read_module_uses_read_only_client():
         client=client,
         settings=_notion_settings(),
         mapping_root=_notion_mapping(),
+        env={},
     )
 
     assert report["called"] is True
     assert client.calls
-    assert len(client.calls) == 7
+    assert client.external_key_calls == [("daily-plans", "daily_plan:paper_ops:2026-06-08", "External Key")]
+    assert len(client.calls) == 6
     assert report["stages"]["DAILY_PLAN_NOTION_EXPORT"]["row_count"] == 1
+
+
+def test_notion_live_read_env_only_settings_are_allowed_when_overrides_exist():
+    page = _fake_notion_page(date_key="plan_date", date_value="2026-06-08")
+    client = _FakeNotionClient([page])
+    env = {
+        "NOTION_TOKEN": "test-token",
+        "NOTION_DAILY_PLANS_DATA_SOURCE_ID": "env-daily-plans",
+        "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID": "env-manual-executions",
+        "NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID": "env-manual-reviews",
+    }
+
+    report = build_notion_live_read_status(
+        account_id="paper_ops",
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        client=client,
+        settings=NotionSettings(enabled=False, token_env="NOTION_TOKEN", data_sources={}),
+        mapping_root=_notion_mapping(),
+        env=env,
+    )
+
+    assert report["called"] is True
+    assert report["status"] in {"PASS", "WARNING", "UNKNOWN"}
+    assert report["errors"] == []
+    assert client.external_key_calls == [("env-daily-plans", "daily_plan:paper_ops:2026-06-08", "External Key")]
+    assert {call[0] for call in client.calls} == {
+        "env-manual-executions",
+        "env-manual-reviews",
+    }
 
 
 def test_notion_live_read_disabled_settings_is_blocked():
@@ -406,11 +451,91 @@ def test_notion_live_read_disabled_settings_is_blocked():
         client=_FakeNotionClient(),
         settings=NotionSettings(enabled=False, token_env="NOTION_TOKEN", data_sources={}),
         mapping_root=_notion_mapping(),
+        env={},
     )
 
     assert report["called"] is True
     assert report["status"] == "BLOCKED"
     assert report["errors"]
+    assert "Missing Notion token in environment variable: NOTION_TOKEN." in report["errors"][0]
+
+
+def test_notion_live_read_env_only_missing_token_is_blocked():
+    report = build_notion_live_read_status(
+        account_id="paper_ops",
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        client=_FakeNotionClient(),
+        settings=NotionSettings(enabled=False, token_env="NOTION_TOKEN", data_sources={}),
+        mapping_root=_notion_mapping(),
+        env={
+            "NOTION_DAILY_PLANS_DATA_SOURCE_ID": "env-daily-plans",
+            "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID": "env-manual-executions",
+            "NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID": "env-manual-reviews",
+        },
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert report["errors"] == ["Missing Notion token in environment variable: NOTION_TOKEN."]
+
+
+def test_notion_live_read_env_only_missing_data_source_names_key():
+    report = build_notion_live_read_status(
+        account_id="paper_ops",
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        client=_FakeNotionClient(),
+        settings=NotionSettings(enabled=False, token_env="NOTION_TOKEN", data_sources={}),
+        mapping_root=_notion_mapping(),
+        env={
+            "NOTION_TOKEN": "test-token",
+            "NOTION_DAILY_PLANS_DATA_SOURCE_ID": "env-daily-plans",
+            "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID": "env-manual-executions",
+        },
+    )
+
+    assert report["status"] == "BLOCKED"
+    assert "Missing required Notion env override: NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID." in report["errors"][0]
+
+
+def test_status_cli_loads_root_dotenv_for_notion_read(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    calls: list[str] = []
+
+    def fake_load_dotenv() -> None:
+        calls.append("loaded")
+
+    def fake_build_status(**kwargs: object) -> dict:
+        assert kwargs["include_notion_read"] is True
+        return {
+            "schema_version": "mfu_oper9_daily_ops_status.v1",
+            "overall_status": "PASS",
+            "account_id": kwargs["account_id"],
+            "data_date": "2026-06-05",
+            "trade_date": "2026-06-08",
+            "next_command": None,
+            "stages": [],
+        }
+
+    monkeypatch.setattr(paper_daily_ops, "_load_root_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(paper_daily_ops, "build_daily_ops_status", fake_build_status)
+
+    exit_code = paper_daily_ops.main(
+        [
+            "status",
+            "--account-id",
+            "paper_ops",
+            "--data-date",
+            "2026-06-05",
+            "--trade-date",
+            "2026-06-08",
+            "--include-notion-read",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == ["loaded"]
+    assert json.loads(capsys.readouterr().out)["overall_status"] == "PASS"
 
 
 def test_notion_live_read_api_exception_is_json_safe():
@@ -424,8 +549,9 @@ def test_notion_live_read_api_exception_is_json_safe():
     )
 
     assert report["called"] is True
-    assert report["status"] == "BLOCKED"
-    assert "read failed" in report["errors"][0]
+    assert report["status"] == "WARNING"
+    assert report["errors"] == []
+    assert any("read failed" in warning for warning in report["warnings"])
 
 
 def test_include_notion_read_improves_daily_plan_export_stage(tmp_path: Path):

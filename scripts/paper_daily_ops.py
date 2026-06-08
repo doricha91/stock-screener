@@ -5,11 +5,20 @@ import json
 from pathlib import Path
 import sys
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.paper_daily_ops_orchestrator import OpsEvidencePaths, build_daily_ops_status  # noqa: E402
+
+
+def _load_root_dotenv() -> None:
+    load_dotenv(ROOT / ".env")
+
+
+_load_root_dotenv()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def handle_status(args: argparse.Namespace) -> int:
+    _load_root_dotenv()
     evidence = OpsEvidencePaths(
         execution_preview_json=Path(args.execution_preview_json) if args.execution_preview_json else None,
         execution_commit_report=Path(args.execution_commit_report) if args.execution_commit_report else None,

@@ -347,6 +347,29 @@ n8n usage:
 
 See [mfu_oper9_9_orchestrator_stage_advancement_matrix_audit.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_9_orchestrator_stage_advancement_matrix_audit.md).
 
+## OPER9-10 Notion Env Loading Addendum
+
+`paper_daily_ops.py status --include-notion-read` uses the same root `.env` loading pattern as the existing Notion export/import/sync scripts.
+
+Rules:
+
+- `.env` may provide `NOTION_TOKEN`, `NOTION_DAILY_PLANS_DATA_SOURCE_ID`, `NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID`, and `NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID`.
+- `config/notion_settings.json` remains supported.
+- Environment override values take priority over settings file data source values.
+- If `config/notion_settings.json` is missing or disabled, env-only Notion live read is allowed when the required env values exist.
+- Missing configuration errors should identify the missing env variable or data source key without printing secret values.
+- `--include-notion-read` remains read-only and opt-in.
+
+Still forbidden:
+
+- Notion create/update/delete from the orchestrator status command.
+- automatic `export_paper_to_notion.py`, `sync_notion_*`, or `import_notion_* --commit` execution.
+- broker/API/order execution.
+- ledger or DB mutation.
+- committing `.env`, Notion tokens, data source ids, or generated status output.
+
+See [mfu_oper9_10_notion_env_loading_alignment.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_10_notion_env_loading_alignment.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 
