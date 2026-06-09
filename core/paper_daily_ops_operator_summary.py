@@ -167,6 +167,8 @@ def _operator_message(
         return "Local commit exists. Notion status sync is still needed."
     if _is_manual_execution_draft_wait_stage(stage):
         return "Enter Actual Price and set Status to READY in Notion before running the execution preview."
+    if _is_manual_review_pending_wait_stage(stage):
+        return "Manual Review rows are pending. Enter Manual Answer and set Review Status to READY/REVIEWED in Notion before running review preview."
     if status == "BLOCKED":
         return "Daily ops is blocked. Resolve blockers before running the next command."
     if status == "WARNING":
@@ -221,7 +223,7 @@ def _first_manual_input_wait_stage(stages: list[dict[str, Any]]) -> dict[str, An
 
 
 def _is_manual_input_wait_stage(stage: dict[str, Any]) -> bool:
-    return _is_manual_execution_draft_wait_stage(stage)
+    return _is_manual_execution_draft_wait_stage(stage) or _is_manual_review_pending_wait_stage(stage)
 
 
 def _is_manual_execution_draft_wait_stage(stage: dict[str, Any]) -> bool:
@@ -234,6 +236,20 @@ def _is_manual_execution_draft_wait_stage(stage: dict[str, Any]) -> bool:
     ready_count = int(counts.get("READY") or counts.get("ready") or 0)
     missing_price = int((stage.get("notion_details") or {}).get("missing_actual_price_count") or 0)
     return draft_count > 0 and ready_count == 0 and missing_price > 0
+
+
+def _is_manual_review_pending_wait_stage(stage: dict[str, Any]) -> bool:
+    if stage.get("stage_name") not in {"MANUAL_REVIEW_TEMPLATE", "MANUAL_REVIEW_PREVIEW"}:
+        return False
+    if int(stage.get("notion_row_count") or 0) <= 0:
+        return False
+    counts = stage.get("notion_status_counts") or {}
+    pending_count = int(counts.get("PENDING") or counts.get("pending") or 0)
+    draft_count = int(counts.get("DRAFT") or counts.get("draft") or 0)
+    ready_count = int(counts.get("READY") or counts.get("ready") or 0)
+    reviewed_count = int(counts.get("REVIEWED") or counts.get("reviewed") or 0)
+    answered_count = int(counts.get("ANSWERED") or counts.get("answered") or 0)
+    return (pending_count > 0 or draft_count > 0) and ready_count == 0 and reviewed_count == 0 and answered_count == 0
 
 
 def _first_stage_with_status(stages: list[dict[str, Any]], status: str) -> dict[str, Any] | None:

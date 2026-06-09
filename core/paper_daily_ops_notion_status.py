@@ -489,6 +489,11 @@ def _stage_from_pages(
     )
     status_counts = _status_counts(pages, mapping=mapping, status_keys=status_keys)
     missing_actual_price_count = _missing_number_count(pages, mapping.get("actual_price"))
+    details = {
+        "missing_actual_price_count": missing_actual_price_count,
+    }
+    if "review_status" in mapping or "manual_answer" in mapping:
+        details.update(_manual_review_details(pages, mapping=mapping, status_counts=status_counts))
     if errors:
         status = BLOCKED
     elif row_count > 0 and pass_when_rows_exist:
@@ -503,9 +508,7 @@ def _stage_from_pages(
         "status_counts": status_counts,
         "errors": errors,
         "warnings": [],
-        "details": {
-            "missing_actual_price_count": missing_actual_price_count,
-        },
+        "details": details,
     }
 
 
@@ -600,6 +603,32 @@ def _missing_number_count(pages: list[dict[str, Any]], property_name: str | None
     return count
 
 
+def _manual_review_details(
+    pages: list[dict[str, Any]],
+    *,
+    mapping: dict[str, str],
+    status_counts: dict[str, int],
+) -> dict[str, int]:
+    return {
+        "pending_review_count": int(status_counts.get("PENDING") or 0),
+        "draft_import_status_count": int(status_counts.get("DRAFT") or 0),
+        "ready_review_count": int(status_counts.get("READY") or 0),
+        "reviewed_count": int(status_counts.get("REVIEWED") or 0),
+        "missing_manual_answer_count": _missing_rich_text_count(pages, mapping.get("manual_answer")),
+    }
+
+
+def _missing_rich_text_count(pages: list[dict[str, Any]], property_name: str | None) -> int:
+    if not property_name:
+        return 0
+    count = 0
+    for page in pages:
+        value = _extract_rich_text((page.get("properties") or {}), property_name)
+        if not value:
+            count += 1
+    return count
+
+
 def _extract_select(properties: dict[str, Any], property_name: str) -> str:
     payload = properties.get(property_name) or {}
     if payload.get("type") == "select":
@@ -607,6 +636,14 @@ def _extract_select(properties: dict[str, Any], property_name: str) -> str:
     if payload.get("select"):
         return str((payload.get("select") or {}).get("name") or "").strip()
     return ""
+
+
+def _extract_rich_text(properties: dict[str, Any], property_name: str) -> str:
+    payload = properties.get(property_name) or {}
+    values = payload.get("rich_text") or []
+    if not isinstance(values, list):
+        return ""
+    return "".join(str(item.get("plain_text") or "") for item in values if isinstance(item, dict)).strip()
 
 
 def _extract_date(properties: dict[str, Any], property_name: str) -> str:

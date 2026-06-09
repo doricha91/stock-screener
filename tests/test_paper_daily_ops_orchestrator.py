@@ -321,6 +321,7 @@ def _notion_mapping() -> dict[str, dict[str, str]]:
             "review_date": "Review Date",
             "review_status": "Review Status",
             "import_status": "Import Status",
+            "manual_answer": "Manual Answer",
         },
     }
 
@@ -908,6 +909,96 @@ def test_stage_advancement_matrix_manual_review_preview_append_and_sync(tmp_path
     )
     append_done = build_daily_ops_status(**_base_kwargs(root, legacy))
     _assert_operator_next(append_done, "MANUAL_REVIEW_STATUS_SYNC", "sync_notion_review_status.py")
+
+
+def test_manual_review_pending_rows_wait_for_notion_input(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+    _write_review_ready(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_REVIEW_TEMPLATE)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {
+                "MANUAL_REVIEW_TEMPLATE": _notion_stage_report(
+                    "PASS",
+                    row_count=10,
+                    status_counts={"PENDING": 10, "DRAFT": 10},
+                    details={"pending_review_count": 10, "draft_import_status_count": 10},
+                ),
+                "MANUAL_REVIEW_PREVIEW": _notion_stage_report(
+                    "PASS",
+                    row_count=10,
+                    status_counts={"PENDING": 10, "DRAFT": 10},
+                    details={"pending_review_count": 10, "draft_import_status_count": 10},
+                ),
+            }
+        ),
+    )
+
+    assert payload["next_command"] is None
+    assert payload["operator_summary"]["current_step"] in {"MANUAL_REVIEW_TEMPLATE", "MANUAL_REVIEW_PREVIEW"}
+    assert payload["operator_summary"]["current_step"] != "FINAL_STATUS"
+    assert payload["operator_summary"]["recommended_operator_action"] == "WAIT_FOR_INPUT"
+    assert payload["operator_summary"]["next_command"] is None
+    assert payload["operator_summary"]["operator_message"] == (
+        "Manual Review rows are pending. Enter Manual Answer and set Review Status to READY/REVIEWED in Notion before running review preview."
+    )
+
+
+def test_manual_review_ready_rows_recommend_preview_not_final_status(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+    _write_review_ready(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_REVIEW_TEMPLATE)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_REVIEW_PREVIEW": _notion_stage_report("PASS", row_count=2, status_counts={"READY": 2})}
+        ),
+    )
+
+    _assert_operator_next(payload, "MANUAL_REVIEW_PREVIEW", "import_notion_reviews.py")
+    assert "--preview" in payload["next_command"]
+    assert payload["operator_summary"]["recommended_operator_action"] == "RUN_NEXT_COMMAND"
+    assert payload["operator_summary"]["current_step"] != "FINAL_STATUS"
+
+
+def test_manual_review_preview_artifact_recommends_append_with_manual_approval(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC)
+    _write_review_ready(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_REVIEW_TEMPLATE)
+    _write_review_preview(root)
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+
+    _assert_operator_next(payload, "MANUAL_REVIEW_APPEND", "import_notion_reviews.py")
+    assert "--commit" in payload["next_command"]
+    assert "--preview-json" in payload["next_command"]
+    assert payload["operator_summary"]["requires_manual_approval"] is True
 
 
 def test_stage_advancement_matrix_review_done_terminal_suppresses_all_commands(tmp_path: Path):

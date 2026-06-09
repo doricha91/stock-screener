@@ -825,6 +825,8 @@ def _derive_overall_status(blockers: list[str], warnings: list[str], stages: lis
 def _first_next_command(stages: list[dict[str, Any]], *, workflow_status: str | None = None) -> str | None:
     if _has_manual_execution_input_wait(stages):
         return None
+    if _has_manual_review_input_wait(stages):
+        return None
     for stage in stages:
         if _is_stale_next_command_stage(stage, stages=stages, workflow_status=workflow_status):
             continue
@@ -908,6 +910,23 @@ def _has_manual_execution_input_wait(stages: list[dict[str, Any]]) -> bool:
     ready_count = int(counts.get("READY") or counts.get("ready") or 0)
     missing_price = int((stage.get("notion_details") or {}).get("missing_actual_price_count") or 0)
     return draft_count > 0 and ready_count == 0 and missing_price > 0
+
+
+def _has_manual_review_input_wait(stages: list[dict[str, Any]]) -> bool:
+    if _stage_status(stages, "MANUAL_REVIEW_TEMPLATE") != DONE:
+        return False
+    preview = next((item for item in stages if item.get("stage_name") == "MANUAL_REVIEW_PREVIEW"), None)
+    if not preview or int(preview.get("notion_row_count") or 0) <= 0:
+        return False
+    if preview.get("status") in {DONE, WARNING}:
+        return False
+    counts = preview.get("notion_status_counts") or {}
+    pending_count = int(counts.get("PENDING") or counts.get("pending") or 0)
+    draft_count = int(counts.get("DRAFT") or counts.get("draft") or 0)
+    ready_count = int(counts.get("READY") or counts.get("ready") or 0)
+    reviewed_count = int(counts.get("REVIEWED") or counts.get("reviewed") or 0)
+    answered_count = int(counts.get("ANSWERED") or counts.get("answered") or 0)
+    return (pending_count > 0 or draft_count > 0) and ready_count == 0 and reviewed_count == 0 and answered_count == 0
 
 
 def _stage_counts(stages: list[dict[str, Any]]) -> dict[str, int]:

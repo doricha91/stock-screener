@@ -381,6 +381,18 @@ Notion live-read warnings for a missing `Account ID` select option should be sur
 
 See [mfu_oper9_13_manual_execution_state_reconciliation_hardening.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_13_manual_execution_state_reconciliation_hardening.md).
 
+## OPER9-14 Manual Review Wait State Addendum
+
+Manual Review operator state handling includes the same command-vs-input distinction:
+
+- PENDING/DRAFT Manual Review rows with no READY/REVIEWED rows are a Notion review input wait state. `operator_summary.recommended_operator_action` may be `WAIT_FOR_INPUT`, and `next_command` should be `null`.
+- The operator should fill Manual Answer and set Review Status to READY/REVIEWED in Notion before running `import_notion_reviews.py --preview`.
+- READY/REVIEWED Manual Review rows should advance to the review preview command.
+- A local review preview artifact with no review commit report should advance to the review append command, with manual approval required.
+- `FINAL_STATUS` should not become the operator-facing step while Manual Review input is pending.
+
+See [mfu_oper9_14_manual_review_wait_state_reconciliation_hardening.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_14_manual_review_wait_state_reconciliation_hardening.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 
