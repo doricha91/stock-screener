@@ -276,11 +276,9 @@ def _manual_review_status_sync(stage: dict[str, Any], *, workflow_status: str | 
         return _result(DONE, "OPER9_6_REVIEW_SYNC_NOTION_SYNCED", "Local review commit report exists and Notion review status is committed/synced.", suppress_next=True)
     if workflow_status == WORKFLOW_REVIEW_DONE:
         return _result(
-            WARNING,
-            "OPER9_6_REVIEW_SYNC_REVIEW_DONE_NOTION_UNSYNCED",
-            "Local workflow_status is REVIEW_DONE, but Notion review status sync is not fully reflected.",
-            suppress_next=True,
-            conflict=True,
+            READY,
+            "OPER9_15_REVIEW_SYNC_REVIEW_DONE_NOTION_UNSYNCED",
+            "Local review commit report exists and Notion review status sync is still needed before terminal closeout.",
         )
     return _result(READY, "OPER9_6_REVIEW_SYNC_LOCAL_COMMIT_UNSYNCED", "Local review commit report exists; Notion review status sync is still needed.")
 
@@ -332,10 +330,10 @@ def _summary(stages: list[dict[str, Any]], *, workflow_status: str | None) -> di
         action = ACTION_RESOLVE_CONFLICT
     elif warning:
         action = ACTION_RESOLVE_CONFLICT
-    elif workflow_status == WORKFLOW_REVIEW_DONE:
-        action = ACTION_NONE
     elif ready:
         action = _action_for_ready_stage(str(ready[0].get("stage_name") or ""))
+    elif workflow_status == WORKFLOW_REVIEW_DONE:
+        action = ACTION_NONE
     else:
         action = ACTION_NONE
     return {

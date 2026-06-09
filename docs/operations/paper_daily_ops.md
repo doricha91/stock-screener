@@ -393,6 +393,18 @@ Manual Review operator state handling includes the same command-vs-input distinc
 
 See [mfu_oper9_14_manual_review_wait_state_reconciliation_hardening.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_14_manual_review_wait_state_reconciliation_hardening.md).
 
+## OPER9-15 Manual Review Status Sync Terminal Addendum
+
+Manual Review append completion does not always mean operator terminal completion.
+
+- If `manual_review_import_commit_<YYYYMMDD>.json` exists but Notion Manual Review rows are still READY/REVIEWED, `MANUAL_REVIEW_STATUS_SYNC` remains the next operator-facing step.
+- In that state `operator_summary.terminal=false`, `recommended_operator_action=RUN_SYNC`, and `next_command` should point to `sync_notion_review_status.py`.
+- This state is not a reconciliation conflict; it is a required status sync step.
+- `REVIEW_DONE` may be terminal when Notion live-read is skipped/local-only, or when Notion review status sync is confirmed as COMMITTED/SYNCED/IMPORTED.
+- `terminal=true` must not be paired with `has_reconciliation_conflicts=true`.
+
+See [mfu_oper9_15_manual_review_post_commit_status_sync_reconciliation_fix.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_15_manual_review_post_commit_status_sync_reconciliation_fix.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 

@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.paper_status import WORKFLOW_REVIEW_DONE
-
-
 ACTION_NONE = "NONE"
 ACTION_RUN_NEXT_COMMAND = "RUN_NEXT_COMMAND"
 ACTION_CHECK_NOTION = "CHECK_NOTION"
@@ -36,7 +33,7 @@ def build_operator_summary(payload: dict[str, Any]) -> dict[str, Any]:
         payload.get("reconciliation_summary") if isinstance(payload.get("reconciliation_summary"), dict) else {}
     )
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    terminal = bool(summary.get("terminal")) or payload.get("workflow_status") == WORKFLOW_REVIEW_DONE
+    terminal = bool(summary.get("terminal"))
     current_stage = _select_current_stage(
         stages,
         next_command=next_command,

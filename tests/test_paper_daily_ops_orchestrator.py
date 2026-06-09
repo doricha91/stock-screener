@@ -1249,7 +1249,7 @@ def test_review_commit_with_unsynced_notion_status_reconciles_sync_ready(tmp_pat
     assert stage["reconciliation_rule_id"] == "OPER9_6_REVIEW_SYNC_LOCAL_COMMIT_UNSYNCED"
 
 
-def test_review_done_with_unsynced_notion_keeps_next_commands_null_but_reports_conflict(tmp_path: Path):
+def test_review_done_with_unsynced_notion_recommends_review_status_sync(tmp_path: Path):
     root = _root(tmp_path)
     legacy = _legacy_root(tmp_path)
     _write_plan(root)
@@ -1269,16 +1269,45 @@ def test_review_done_with_unsynced_notion_keeps_next_commands_null_but_reports_c
     )
 
     assert payload["workflow_status"] == "REVIEW_DONE"
+    assert payload["operator_summary"]["terminal"] is False
+    assert payload["operator_summary"]["current_step"] == "MANUAL_REVIEW_STATUS_SYNC"
+    assert payload["operator_summary"]["recommended_operator_action"] == "RUN_SYNC"
+    assert "sync_notion_review_status.py" in payload["operator_summary"]["next_command"]
+    assert payload["operator_summary"]["has_reconciliation_conflicts"] is False
+    assert payload["reconciliation_summary"]["conflict_count"] == 0
+    assert payload["reconciliation_summary"]["recommended_operator_action"] == "RUN_SYNC"
+    assert _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")["status"] == "READY"
+    assert _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")["reconciliation_rule_id"] == (
+        "OPER9_15_REVIEW_SYNC_REVIEW_DONE_NOTION_UNSYNCED"
+    )
+
+
+def test_review_done_with_synced_notion_remains_terminal_without_conflicts(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    _write_execution_preview(root)
+    _write_execution_commit(root)
+    _write_review_ready(root)
+    _write_review_preview(root)
+    _write_review_commit(root)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {"MANUAL_REVIEW_STATUS_SYNC": _notion_stage_report("PASS", status_counts={"IMPORTED": 1})}
+        ),
+    )
+
+    assert payload["workflow_status"] == "REVIEW_DONE"
     assert payload["next_command"] is None
     assert payload["next_action"] is None
     assert payload["operator_summary"]["terminal"] is True
     assert payload["operator_summary"]["current_step"] == "FINAL_STATUS"
-    assert payload["operator_summary"]["next_command"] is None
-    assert payload["operator_summary"]["operator_message"] == "Daily ops loop is complete."
-    assert _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")["status"] == "WARNING"
-    assert _stage(payload, "MANUAL_REVIEW_STATUS_SYNC")["next_command"] is None
-    assert payload["reconciliation_summary"]["warning_conflict_count"] == 1
-    assert payload["reconciliation_summary"]["recommended_operator_action"] == "RESOLVE_CONFLICT"
+    assert payload["operator_summary"]["recommended_operator_action"] == "NONE"
+    assert payload["operator_summary"]["has_reconciliation_conflicts"] is False
+    assert payload["reconciliation_summary"]["conflict_count"] == 0
 
 
 def test_operator_summary_exists_when_notion_read_is_blocked(tmp_path: Path):

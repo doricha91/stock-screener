@@ -175,18 +175,20 @@ def build_daily_ops_status(
     workflow_status = _safe_workflow_status(root, normalized_trade_date)
     _apply_notion_report(stages, notion_report)
     reconciliation_summary = apply_reconciliation(stages, workflow_status=workflow_status)
-    if workflow_status == WORKFLOW_REVIEW_DONE:
+    terminal = _is_terminal_workflow(workflow_status, stages)
+    if terminal:
         for stage in stages:
             stage["next_command"] = None
             stage["next_action"] = None
 
     overall_status = _derive_overall_status(blockers, warnings, stages)
     next_command = _first_next_command(stages, workflow_status=workflow_status)
-    if workflow_status == WORKFLOW_REVIEW_DONE:
+    if terminal:
         next_command = None
     stage_counts = _stage_counts(stages)
     summary = _summary(
         workflow_status=workflow_status,
+        terminal=terminal,
         blockers=blockers,
         warnings=warnings,
         stages=stages,
@@ -888,7 +890,7 @@ def _is_stale_next_command_stage(
     if stage_name == "MANUAL_REVIEW_APPEND":
         return review_sync_done or str(workflow_status or "") == WORKFLOW_REVIEW_DONE
     if stage_name == "MANUAL_REVIEW_STATUS_SYNC":
-        return str(workflow_status or "") == WORKFLOW_REVIEW_DONE
+        return str(workflow_status or "") == WORKFLOW_REVIEW_DONE and stage.get("status") != READY
     return False
 
 
@@ -929,6 +931,20 @@ def _has_manual_review_input_wait(stages: list[dict[str, Any]]) -> bool:
     return (pending_count > 0 or draft_count > 0) and ready_count == 0 and reviewed_count == 0 and answered_count == 0
 
 
+def _is_terminal_workflow(workflow_status: str | None, stages: list[dict[str, Any]]) -> bool:
+    return workflow_status == WORKFLOW_REVIEW_DONE and not _has_required_status_sync(stages)
+
+
+def _has_required_status_sync(stages: list[dict[str, Any]]) -> bool:
+    return any(
+        stage.get("stage_name") in {"MANUAL_EXECUTION_STATUS_SYNC", "MANUAL_REVIEW_STATUS_SYNC"}
+        and stage.get("reconciliation_checked")
+        and stage.get("status") == READY
+        and bool(stage.get("next_command"))
+        for stage in stages
+    )
+
+
 def _stage_counts(stages: list[dict[str, Any]]) -> dict[str, int]:
     counts = {status: 0 for status in (DONE, READY, BLOCKED, WARNING, UNKNOWN, NOT_STARTED)}
     for stage in stages:
@@ -941,6 +957,7 @@ def _stage_counts(stages: list[dict[str, Any]]) -> dict[str, int]:
 def _summary(
     *,
     workflow_status: str | None,
+    terminal: bool,
     blockers: list[str],
     warnings: list[str],
     stages: list[dict[str, Any]],
@@ -949,7 +966,6 @@ def _summary(
     has_blockers = bool(blockers) or any(stage.get("status") == BLOCKED for stage in stages)
     has_warnings = bool(warnings) or any(stage.get("status") == WARNING for stage in stages)
     has_unknowns = any(stage.get("status") == UNKNOWN for stage in stages)
-    terminal = workflow_status == WORKFLOW_REVIEW_DONE
     if terminal:
         recommended = RECOMMENDED_ACTION_NONE
     elif has_blockers:
