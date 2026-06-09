@@ -405,6 +405,25 @@ Manual Review append completion does not always mean operator terminal completio
 
 See [mfu_oper9_15_manual_review_post_commit_status_sync_reconciliation_fix.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_15_manual_review_post_commit_status_sync_reconciliation_fix.md).
 
+## OPER9 Final Closeout After Smoke Hardening
+
+OPER9 is closed as the Python Daily Ops Orchestrator completion track after smoke hardening through OPER9-15.
+
+Final operator-facing policy:
+
+- `operator_summary` is the compact contract for n8n and notification renderers.
+- n8n should render `operator_summary` and should not re-derive stage decisions from raw `stages`.
+- `WAIT_FOR_INPUT` means human Notion input is required and `next_command` should be `null`.
+- `RUN_NEXT_COMMAND` means an operator-facing command is available.
+- `RUN_COMMIT` and `RUN_SYNC` require manual approval and are not automatic n8n execution targets.
+- `RESOLVE_CONFLICT` suppresses risky commands until the conflict is resolved.
+- `NONE` means terminal or no actionable next step.
+- Clean terminal state is `workflow_status=REVIEW_DONE`, `current_step=FINAL_STATUS`, `recommended_operator_action=NONE`, `next_command=null`, `terminal=true`, and `has_reconciliation_conflicts=false`.
+
+OPER10/AUTO should start with read-only n8n design that calls `paper_daily_ops.py status`, parses `operator_summary`, and sends notifications or approval prompts without executing writes.
+
+See [mfu_oper9_daily_ops_orchestrator_closeout.md](/D:/python/StockScreener/docs/TRD/mfu_oper9_daily_ops_orchestrator_closeout.md).
+
 - `paper_daily_ops.md`
   - 매일 보는 canonical daily operation guide
 
