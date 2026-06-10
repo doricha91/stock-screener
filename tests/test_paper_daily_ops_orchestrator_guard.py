@@ -170,3 +170,59 @@ def test_current_review_artifacts_allow_daily_review_done():
         assert daily_review["status"] == "DONE"
     finally:
         shutil.rmtree(tmp_path)
+
+
+def test_no_execution_candidates_skips_manual_execution_loop():
+    tmp_path = Path("_tmp_test_orchestrator_guard_no_exec")
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
+    tmp_path.mkdir(parents=True)
+    try:
+        root = _root(tmp_path)
+        # Write plan with items but no candidates
+        _write(root / "daily_action_plan_20260609.md", "# plan 2026-06-09\n")
+        _write_json(
+            root / "daily_action_plan_20260609.json",
+            {
+                "account_id": "paper_ops",
+                "data_date": "2026-06-08",
+                "trade_date": "2026-06-09",
+                "plan_date": "2026-06-09",
+                "items": [
+                    {"symbol": "AAPL", "action": "HOLD", "status": "PENDING"},
+                    {"symbol": "GOOG", "action": "EXECUTE", "status": "COMPLETED", "side": "BUY"},
+                    {"symbol": "MSFT", "action": "EXECUTE", "status": "PENDING", "side": "OTHER"},
+                ]
+            },
+        )
+        _write_json(root / "config_snapshots" / "paper_config_snapshot_20260609.json", {"ok": True})
+
+        # DAILY_PLAN_NOTION_EXPORT is DONE (mocked by evidence or ignore it for this test)
+        # We don't write evidence here to see if plan-based count works
+
+        payload = build_daily_ops_status(**_base_kwargs(root))
+        
+        template = _stage(payload, "MANUAL_EXECUTION_TEMPLATE")
+        preview = _stage(payload, "MANUAL_EXECUTION_PREVIEW")
+        commit = _stage(payload, "MANUAL_EXECUTION_COMMIT")
+        sync = _stage(payload, "MANUAL_EXECUTION_STATUS_SYNC")
+
+        assert template["status"] == "DONE"
+        assert template["no_execution_candidates"] is True
+        assert template["execution_candidate_count"] == 0
+        
+        assert preview["status"] == "DONE"
+        assert preview["no_execution_candidates"] is True
+        
+        assert commit["status"] == "DONE"
+        assert commit["no_execution_candidates"] is True
+        
+        assert sync["status"] == "DONE"
+        assert sync["no_execution_candidates"] is True
+
+        # Should advance to DAILY_REVIEW
+        assert payload["operator_summary"]["current_step"] == "DAILY_REVIEW"
+        assert "paper.py review" in payload["operator_summary"]["next_command"]
+        assert payload["operator_summary"]["recommended_operator_action"] == "RUN_NEXT_COMMAND"
+    finally:
+        shutil.rmtree(tmp_path)

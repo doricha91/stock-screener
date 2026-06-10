@@ -663,3 +663,24 @@ Guard Policy:
 - Validation report `PASS` alone is insufficient; the linked template must also be current.
 
 This guard ensures that stale files left over from a previous operational cycle do not falsely satisfy the completion criteria for a new cycle.
+
+## 19. OPER9-17 No-Execution-Candidates Advancement Guard Addendum
+
+OPER9-17 handles days with no execution candidates (BUY/SELL) in the Daily Plan.
+
+Guard Policy:
+
+- If the Daily Plan JSON (`daily_action_plan_YYYYMMDD.json`) contains zero execution candidates (action="EXECUTE", status="PENDING", side="BUY" or "SELL"), the Manual Execution loop is safely skipped.
+- Skipped stages:
+  - `MANUAL_EXECUTION_TEMPLATE`
+  - `MANUAL_EXECUTION_PREVIEW`
+  - `MANUAL_EXECUTION_COMMIT`
+  - `MANUAL_EXECUTION_STATUS_SYNC`
+- These stages are marked as `DONE` with `no_execution_candidates=True` in the status JSON.
+- `operator_summary.current_step` advances to `DAILY_REVIEW`.
+- `next_command` correctly points to `paper.py review ...` instead of recommending repeated Notion exports.
+- Local Notion evidence sidecars (`manual_execution_template_export_YYYYMMDD.json`) with `candidate_count=0` are also accepted as no-op success evidence.
+- Reconciliation rules ensure that the absence of Notion rows on a no-action day is not treated as a conflict or a pending export requirement.
+- This advancement only applies when execution candidates are zero; days with at least one candidate still require the full manual execution loop.
+
+This guard prevents the orchestrator from getting stuck on `MANUAL_EXECUTION_TEMPLATE` when there is nothing to export, allowing a smooth transition to the daily review phase.

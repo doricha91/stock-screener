@@ -123,6 +123,8 @@ def _daily_plan_export(stage: dict[str, Any], by_name: dict[str, dict[str, Any]]
 
 
 def _manual_execution_template(stage: dict[str, Any], by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    if stage.get("no_execution_candidates"):
+        return _result(DONE, "OPER9_17_EXEC_TEMPLATE_NO_CANDIDATES", "Skipped: No execution candidates found in Daily Plan.", suppress_next=True)
     plan_status = _local_status(by_name.get("DAILY_PLAN"))
     has_rows = _has_any_status(stage, EXECUTION_TEMPLATE_STATUSES) or _has_rows(stage)
     if plan_status != DONE and has_rows:
@@ -141,6 +143,8 @@ def _manual_execution_template(stage: dict[str, Any], by_name: dict[str, dict[st
 
 
 def _manual_execution_preview(stage: dict[str, Any], by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    if stage.get("no_execution_candidates"):
+        return _result(DONE, "OPER9_17_EXEC_PREVIEW_SKIPPED_NO_CANDIDATES", "Skipped: No execution candidates.", suppress_next=True)
     local = _local_status(stage)
     ready_rows = _count_status(stage, READY_STATUSES)
     missing_price = int((stage.get("notion_details") or {}).get("missing_actual_price_count") or 0)
@@ -178,6 +182,8 @@ def _manual_execution_preview(stage: dict[str, Any], by_name: dict[str, dict[str
 
 
 def _manual_execution_commit(stage: dict[str, Any]) -> dict[str, Any]:
+    if stage.get("no_execution_candidates"):
+        return _result(DONE, "OPER9_17_EXEC_COMMIT_SKIPPED_NO_CANDIDATES", "Skipped: No execution candidates.", suppress_next=True)
     local = _local_status(stage)
     if local == DONE:
         return _result(DONE, "OPER9_6_EXEC_COMMIT_LOCAL_REPORT_PRESENT", "Local execution commit report exists.", suppress_next=True)
@@ -197,6 +203,8 @@ def _manual_execution_commit(stage: dict[str, Any]) -> dict[str, Any]:
 
 
 def _manual_execution_status_sync(stage: dict[str, Any], *, workflow_status: str | None) -> dict[str, Any]:
+    if stage.get("no_execution_candidates"):
+        return _result(DONE, "OPER9_17_EXEC_SYNC_SKIPPED_NO_CANDIDATES", "Skipped: No execution candidates.", suppress_next=True)
     local = _local_status(stage)
     if local == BLOCKED and _has_any_status(stage, SYNCED_STATUSES):
         return _result(

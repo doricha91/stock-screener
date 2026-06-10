@@ -320,11 +320,12 @@ def _stage(
     next_command: str | None = None,
     evidence: EvidenceEvaluation | None = None,
     note: str = "",
+    **kwargs: Any,
 ) -> dict[str, Any]:
     required_paths = required or []
     existing = [path for path in required_paths if path.exists()]
     missing = [path for path in required_paths if not path.exists()]
-    return {
+    payload = {
         "stage_name": name,
         "status": status,
         "blockers": blockers or [],
@@ -353,6 +354,8 @@ def _stage(
         "reconciliation_checked": False,
         "note": note,
     }
+    payload.update(kwargs)
+    return payload
 
 
 def _stage_data_freshness(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -430,11 +433,45 @@ def _stage_daily_plan_notion_export(ctx: dict[str, Any]) -> dict[str, Any]:
 def _stage_manual_execution_template(ctx: dict[str, Any]) -> dict[str, Any]:
     if _stage_daily_plan(ctx)["status"] != DONE:
         return _stage("MANUAL_EXECUTION_TEMPLATE", BLOCKED, blockers=["Daily Plan JSON sidecar is required."])
+
+    plan_json = ctx["artifacts"]["daily_plan_json"]
+    candidate_count = _daily_plan_execution_candidate_count(plan_json)
+
     command = (
         f"python scripts\\export_paper_to_notion.py --manual-execution-template --account-id {ctx['account_id']} "
         f"--date {ctx['trade_date']} --confirm-actual --json"
     )
     evidence = _notion_evidence(ctx, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
+    evidence_payload = _read_json(evidence.path) if evidence.checked and evidence.path else None
+
+    # NO-CANDIDATES GUARD
+    if candidate_count == 0:
+        return _stage(
+            "MANUAL_EXECUTION_TEMPLATE",
+            DONE,
+            note="Skipped: No execution candidates found in Daily Plan.",
+            no_execution_candidates=True,
+            execution_candidate_count=0,
+            plan_candidate_source="daily_plan_json",
+            evidence=evidence
+        )
+    if evidence.checked and evidence.evidence_status == "PASS" and evidence_payload and evidence_payload.get("candidate_count") == 0:
+        return _stage(
+            "MANUAL_EXECUTION_TEMPLATE",
+            DONE,
+            note="Skipped: Evidence confirms 0 execution candidates.",
+            no_execution_candidates=True,
+            execution_candidate_count=0,
+            plan_candidate_source="export_evidence",
+            evidence=evidence
+        )
+
+    extra_kwargs = {
+        "execution_candidate_count": candidate_count,
+        "plan_candidate_source": "daily_plan_json" if candidate_count is not None else "unknown",
+        "no_execution_candidates": False
+    }
+
     if evidence.checked:
         return _stage(
             "MANUAL_EXECUTION_TEMPLATE",
@@ -443,6 +480,7 @@ def _stage_manual_execution_template(ctx: dict[str, Any]) -> dict[str, Any]:
             warnings=list(evidence.warnings),
             evidence=evidence,
             note="Local Notion evidence sidecar was evaluated.",
+            **extra_kwargs
         )
     return _stage(
         "MANUAL_EXECUTION_TEMPLATE",
@@ -450,10 +488,21 @@ def _stage_manual_execution_template(ctx: dict[str, Any]) -> dict[str, Any]:
         next_command=command,
         evidence=evidence,
         note="No local export sidecar proves Manual Execution DRAFT rows were exported.",
+        **extra_kwargs
     )
 
 
 def _stage_manual_execution_preview(ctx: dict[str, Any]) -> dict[str, Any]:
+    template = _stage_manual_execution_template(ctx)
+    if template.get("no_execution_candidates"):
+        return _stage(
+            "MANUAL_EXECUTION_PREVIEW",
+            DONE,
+            required=[],
+            note="Skipped: No execution candidates.",
+            no_execution_candidates=True
+        )
+
     artifacts = ctx["artifacts"]
     required = [artifacts["execution_preview_json"]]
     if artifacts["execution_preview_json"].exists():
@@ -477,6 +526,16 @@ def _stage_manual_execution_preview(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stage_manual_execution_commit(ctx: dict[str, Any]) -> dict[str, Any]:
+    template = _stage_manual_execution_template(ctx)
+    if template.get("no_execution_candidates"):
+        return _stage(
+            "MANUAL_EXECUTION_COMMIT",
+            DONE,
+            required=[],
+            note="Skipped: No execution candidates.",
+            no_execution_candidates=True
+        )
+
     artifacts = ctx["artifacts"]
     required = [artifacts["execution_commit_json"]]
     commit_exists = artifacts["execution_commit_json"].exists()
@@ -506,6 +565,16 @@ def _stage_manual_execution_commit(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stage_manual_execution_status_sync(ctx: dict[str, Any]) -> dict[str, Any]:
+    template = _stage_manual_execution_template(ctx)
+    if template.get("no_execution_candidates"):
+        return _stage(
+            "MANUAL_EXECUTION_STATUS_SYNC",
+            DONE,
+            required=[],
+            note="Skipped: No execution candidates.",
+            no_execution_candidates=True
+        )
+
     artifacts = ctx["artifacts"]
     if not artifacts["execution_commit_json"].exists():
         return _stage("MANUAL_EXECUTION_STATUS_SYNC", BLOCKED, required=[artifacts["execution_commit_json"]], blockers=["Execution commit report is required for status sync."])
@@ -579,7 +648,10 @@ def _stage_daily_review(ctx: dict[str, Any]) -> dict[str, Any]:
             note="Existing review artifacts are stale or invalid; review generation is recommended.",
         )
 
-    if not artifacts["execution_commit_json"].exists() and not _snapshots_exist(artifacts, trade_date):
+    template = _stage_manual_execution_template(ctx)
+    no_candidates = template.get("no_execution_candidates")
+
+    if not artifacts["execution_commit_json"].exists() and not _snapshots_exist(artifacts, trade_date) and not no_candidates:
         return _stage(
             "DAILY_REVIEW",
             BLOCKED,
@@ -1152,3 +1224,26 @@ def _get_markdown_date(path: Path, labels: list[str]) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _daily_plan_execution_candidate_count(plan_json_path: Path) -> int | None:
+    if not plan_json_path.exists():
+        return None
+    try:
+        payload = json.loads(plan_json_path.read_text(encoding="utf-8"))
+        if "items" not in payload:
+            return None
+        items = payload["items"]
+        if not isinstance(items, list):
+            return None
+        count = 0
+        for item in items:
+            action = str(item.get("action") or "").upper()
+            status = str(item.get("status") or "").upper()
+            side = str(item.get("side") or "").upper()
+            if action == "EXECUTE" and status == "PENDING" and side in {"BUY", "SELL"}:
+                count += 1
+        return count
+    except Exception:
+        return None
+
