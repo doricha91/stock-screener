@@ -55,6 +55,7 @@ gemini_cli_update
 | OPER9-13 | Manual Execution reconciliation hardening | Added DRAFT wait state, structured Account ID warning, and post-sync false-conflict fix. |
 | OPER9-14 | Manual Review wait state hardening | Added PENDING/DRAFT review wait state and READY/REVIEWED preview recommendation. |
 | OPER9-15 | Manual Review post-commit sync terminal fix | Required review status sync before terminal closeout when Notion sync is still pending. |
+| OPER9-16 | Date-scoped review artifact guard | Added internal date verification for review artifacts with fixed filenames to prevent stale-file completion misjudgment. |
 
 ## 3. Smoke Account Verification
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -535,30 +536,91 @@ def _stage_manual_execution_status_sync(ctx: dict[str, Any]) -> dict[str, Any]:
 
 def _stage_daily_review(ctx: dict[str, Any]) -> dict[str, Any]:
     artifacts = ctx["artifacts"]
+    trade_date = ctx["trade_date"]
     required = [
         artifacts["daily_review_summary"],
         artifacts["performance_summary"],
         artifacts["review_template_csv"],
         artifacts["review_validation_report"],
     ]
-    if all(path.exists() for path in required) and _validation_passed(artifacts["review_validation_report"]):
-        return _stage("DAILY_REVIEW", DONE, required=required)
-    if not artifacts["execution_commit_json"].exists() and not _snapshots_exist(artifacts, ctx["trade_date"]):
-        return _stage("DAILY_REVIEW", BLOCKED, required=required, blockers=["Execution commit evidence is required before review generation."])
+    if all(path.exists() for path in required):
+        date_blockers = []
+        date_warnings = []
+
+        template_dates = _get_csv_dates(artifacts["review_template_csv"], "review_date")
+        if not template_dates:
+            date_blockers.append("Review template CSV has no review_date column or is empty.")
+        elif any(d != trade_date for d in template_dates):
+            date_blockers.append(f"Review template CSV date mismatch: {sorted(list(template_dates))} != {trade_date}")
+
+        if not _validation_passed(artifacts["review_validation_report"]):
+            date_blockers.append("Review validation report did not PASS.")
+
+        summary_date = _get_markdown_date(artifacts["daily_review_summary"], ["Latest snapshot date"])
+        if summary_date != trade_date:
+            date_blockers.append(f"Daily review summary date mismatch: {summary_date} != {trade_date}")
+
+        perf_date = _get_markdown_date(
+            artifacts["performance_summary"], ["Latest Snapshot Date", "Latest Date", "Snapshot Date"]
+        )
+        if perf_date != trade_date:
+            date_warnings.append(f"Performance summary date mismatch: {perf_date} != {trade_date}")
+
+        if not date_blockers:
+            return _stage("DAILY_REVIEW", DONE, required=required, warnings=date_warnings)
+
+        return _stage(
+            "DAILY_REVIEW",
+            READY,
+            required=required,
+            blockers=date_blockers,
+            warnings=date_warnings,
+            next_command=f"python scripts\\paper.py review --account-id {ctx['account_id']} --date {trade_date}",
+            note="Existing review artifacts are stale or invalid; review generation is recommended.",
+        )
+
+    if not artifacts["execution_commit_json"].exists() and not _snapshots_exist(artifacts, trade_date):
+        return _stage(
+            "DAILY_REVIEW",
+            BLOCKED,
+            required=required,
+            blockers=["Execution commit evidence is required before review generation."],
+        )
     return _stage(
         "DAILY_REVIEW",
         READY,
         required=required,
-        next_command=f"python scripts\\paper.py review --account-id {ctx['account_id']} --date {ctx['trade_date']}",
+        next_command=f"python scripts\\paper.py review --account-id {ctx['account_id']} --date {trade_date}",
     )
 
 
 def _stage_manual_review_template(ctx: dict[str, Any]) -> dict[str, Any]:
-    if not ctx["artifacts"]["review_template_csv"].exists():
-        return _stage("MANUAL_REVIEW_TEMPLATE", BLOCKED, required=[ctx["artifacts"]["review_template_csv"]], blockers=["Review template CSV is required."])
+    path = ctx["artifacts"]["review_template_csv"]
+    trade_date = ctx["trade_date"]
+    if not path.exists():
+        return _stage(
+            "MANUAL_REVIEW_TEMPLATE", BLOCKED, required=[path], blockers=["Review template CSV is required."]
+        )
+
+    template_dates = _get_csv_dates(path, "review_date")
+    if not template_dates:
+        return _stage(
+            "MANUAL_REVIEW_TEMPLATE",
+            BLOCKED,
+            required=[path],
+            blockers=["Review template CSV has no review_date column or is empty."],
+        )
+    if any(d != trade_date for d in template_dates):
+        return _stage(
+            "MANUAL_REVIEW_TEMPLATE",
+            BLOCKED,
+            required=[path],
+            blockers=[f"Review template CSV date mismatch: {sorted(list(template_dates))} != {trade_date}"],
+        )
+
     command = (
         f"python scripts\\export_paper_to_notion.py --manual-review-template --account-id {ctx['account_id']} "
-        f"--date {ctx['trade_date']} --confirm-actual --json"
+        f"--date {trade_date} --confirm-actual --json"
     )
     evidence = _notion_evidence(ctx, EVIDENCE_MANUAL_REVIEW_TEMPLATE)
     if evidence.checked:
@@ -1070,3 +1132,23 @@ def _next_action(command: str | None) -> dict[str, Any] | None:
 
 def _path_str(path: Path) -> str:
     return str(path).replace("/", "\\")
+
+
+def _get_csv_dates(path: Path, column: str) -> set[str]:
+    return {str(row.get(column) or "").strip() for row in _read_csv_rows(path) if column in row}
+
+
+def _get_markdown_date(path: Path, labels: list[str]) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+        for label in labels:
+            # Look for "Label: YYYY-MM-DD" or "Label:YYYY-MM-DD"
+            pattern = rf"{re.escape(label)}\s*[:]?\s*(\d{{4}}-\d{{2}}-\d{{2}})"
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return None

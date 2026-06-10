@@ -647,3 +647,19 @@ Operational policy:
 - Notion/local mismatch is not treated as DONE.
 - Notion read failure is reported in JSON and does not imply an operational write failure.
 - `REVIEW_DONE` still suppresses `next_command` and `next_action`.
+
+## 18. OPER9-16 Date-Scoped Review Artifact Guard Addendum
+
+OPER9-16 adds internal date verification for review artifacts with fixed filenames.
+
+Guard Policy:
+
+- Review artifacts with fixed filenames (`paper_daily_review_summary.md`, `paper_manual_review_log_template.csv`, etc.) are only considered "current" if their internal date matches the requested `trade_date`.
+- `paper_manual_review_log_template.csv`: Every row's `review_date` column must match `trade_date`.
+- `paper_daily_review_summary.md`: "Latest snapshot date" field must match `trade_date`.
+- `paper_performance_summary.md`: "Latest Snapshot Date", "Latest Date", or "Snapshot Date" field must match `trade_date`.
+- If artifacts are stale (match a previous date), `DAILY_REVIEW` is not `DONE`, preventing accidental advancement to downstream stages.
+- A stale review template blocks the `MANUAL_REVIEW_TEMPLATE` stage to prevent exporting old data to Notion.
+- Validation report `PASS` alone is insufficient; the linked template must also be current.
+
+This guard ensures that stale files left over from a previous operational cycle do not falsely satisfy the completion criteria for a new cycle.

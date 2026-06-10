@@ -119,8 +119,8 @@ def _write_execution_commit(root: Path) -> None:
 
 
 def _write_review_ready(root: Path) -> None:
-    _write(root / "reports" / "paper_daily_review_summary.md", "# summary\n")
-    _write(root / "reports" / "paper_performance_summary.md", "# perf\n")
+    _write(root / "reports" / "paper_daily_review_summary.md", "# summary\nLatest snapshot date: 2026-06-08\n")
+    _write(root / "reports" / "paper_performance_summary.md", "# perf\nLatest Snapshot Date: 2026-06-08\n")
     _write(
         root / "reviews" / "paper_manual_review_log_template.csv",
         "review_date,symbol,question_id,manual_answer,review_status\n"
