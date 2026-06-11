@@ -606,6 +606,8 @@ def _stage_manual_execution_status_sync(ctx: dict[str, Any]) -> dict[str, Any]:
 def _stage_daily_review(ctx: dict[str, Any]) -> dict[str, Any]:
     artifacts = ctx["artifacts"]
     trade_date = ctx["trade_date"]
+    template = _stage_manual_execution_template(ctx)
+    no_candidates = bool(template.get("no_execution_candidates"))
     required = [
         artifacts["daily_review_summary"],
         artifacts["performance_summary"],
@@ -627,7 +629,11 @@ def _stage_daily_review(ctx: dict[str, Any]) -> dict[str, Any]:
 
         summary_date = _get_markdown_date(artifacts["daily_review_summary"], ["Latest snapshot date"])
         if summary_date != trade_date:
-            date_blockers.append(f"Daily review summary date mismatch: {summary_date} != {trade_date}")
+            message = f"Daily review summary date mismatch: {summary_date} != {trade_date}"
+            if no_candidates:
+                date_warnings.append(message)
+            else:
+                date_blockers.append(message)
 
         perf_date = _get_markdown_date(
             artifacts["performance_summary"], ["Latest Snapshot Date", "Latest Date", "Snapshot Date"]
@@ -635,8 +641,17 @@ def _stage_daily_review(ctx: dict[str, Any]) -> dict[str, Any]:
         if perf_date != trade_date:
             date_warnings.append(f"Performance summary date mismatch: {perf_date} != {trade_date}")
 
+        review_template_current = bool(template_dates) and all(d == trade_date for d in template_dates)
+        snapshot_mismatch_allowed = no_candidates and summary_date != trade_date
+        date_scope = {
+            "no_action_day_review_guard": no_candidates,
+            "review_template_date_current": review_template_current,
+            "snapshot_date_mismatch_allowed": snapshot_mismatch_allowed,
+            "daily_review_snapshot_date": summary_date,
+            "performance_snapshot_date": perf_date,
+        }
         if not date_blockers:
-            return _stage("DAILY_REVIEW", DONE, required=required, warnings=date_warnings)
+            return _stage("DAILY_REVIEW", DONE, required=required, warnings=date_warnings, **date_scope)
 
         return _stage(
             "DAILY_REVIEW",
@@ -646,10 +661,8 @@ def _stage_daily_review(ctx: dict[str, Any]) -> dict[str, Any]:
             warnings=date_warnings,
             next_command=f"python scripts\\paper.py review --account-id {ctx['account_id']} --date {trade_date}",
             note="Existing review artifacts are stale or invalid; review generation is recommended.",
+            **date_scope,
         )
-
-    template = _stage_manual_execution_template(ctx)
-    no_candidates = template.get("no_execution_candidates")
 
     if not artifacts["execution_commit_json"].exists() and not _snapshots_exist(artifacts, trade_date) and not no_candidates:
         return _stage(
@@ -1246,4 +1259,3 @@ def _daily_plan_execution_candidate_count(plan_json_path: Path) -> int | None:
         return count
     except Exception:
         return None
-

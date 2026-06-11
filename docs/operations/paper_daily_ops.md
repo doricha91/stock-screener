@@ -684,3 +684,19 @@ Guard Policy:
 - This advancement only applies when execution candidates are zero; days with at least one candidate still require the full manual execution loop.
 
 This guard prevents the orchestrator from getting stuck on `MANUAL_EXECUTION_TEMPLATE` when there is nothing to export, allowing a smooth transition to the daily review phase.
+
+## 20. OPER9-18 No-Action Day Daily Review Completion Guard Addendum
+
+OPER9-18 completes the no-action day review path after `paper.py review` succeeds.
+
+Guard Policy:
+
+- On no-action days (`no_execution_candidates=True`), a same-day execution commit and same-day account snapshot are not required for `DAILY_REVIEW` completion.
+- `DAILY_REVIEW` is `DONE` when the review template exists, every template `review_date` equals `trade_date`, validation is `PASS`, and both daily review/performance summary files exist.
+- `paper_daily_review_summary.md` `Latest snapshot date != trade_date` is a warning on no-action days, not a blocker.
+- `paper_performance_summary.md` snapshot date mismatch remains a warning.
+- The review template date guard is unchanged: stale `review_date` values still block `DAILY_REVIEW` and `MANUAL_REVIEW_TEMPLATE`.
+- Review template CSV parsing handles UTF-8 BOM headers via `utf-8-sig`.
+- After no-action day review completion, `operator_summary.current_step` advances to `MANUAL_REVIEW_TEMPLATE` and the next command is the manual review template Notion export command.
+
+This preserves OPER9-16 stale artifact protection for normal execution days while preventing repeated `paper.py review` recommendations when a no-action day review is already current and valid.
