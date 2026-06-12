@@ -36,6 +36,11 @@ from core.paths import (
 )
 
 
+def _display_date(date_str: str) -> str:
+    clean_date = _normalize_date(date_str)
+    return f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}"
+
+
 def _normalize_date(date_str: str) -> str:
     clean_date = date_str.replace("-", "").strip()
     if len(clean_date) != 8 or not clean_date.isdigit():
@@ -171,6 +176,34 @@ def load_paper_execution_rows(
         return list(csv.DictReader(handle))
 
 
+def _latest_current_state_date(root: Path) -> str | None:
+    dates = []
+    for path in root.glob("paper_current_state_*.json"):
+        clean = path.stem.replace("paper_current_state_", "")
+        if len(clean) == 8 and clean.isdigit():
+            dates.append(f"{clean[:4]}-{clean[4:6]}-{clean[6:]}")
+    return max(dates) if dates else None
+
+
+def _latest_csv_date(path: Path, column: str) -> str | None:
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    dates = [str(row.get(column) or "").strip() for row in rows if str(row.get(column) or "").strip()]
+    return max(dates) if dates else None
+
+
+def _latest_source_snapshot_date(paths: dict[str, Path]) -> str | None:
+    candidates = [
+        _latest_current_state_date(paths["paper_state"].parent),
+        _latest_csv_date(paths["paper_account_snapshot"], "snapshot_date"),
+        _latest_csv_date(paths["paper_position_snapshot"], "snapshot_date"),
+    ]
+    found = [date for date in candidates if date]
+    return max(found) if found else None
+
+
 def build_paper_account_preview_from_log(
     log_path: Path,
     initial_cash: float = 100000.0,
@@ -219,6 +252,14 @@ def run_paper_eod_dry_run(
     position_snapshot_save_result: dict[str, Any] | None = None
     market_valuation = None
     market_valuation_error: str | None = None
+
+    target_snapshot_date = _display_date(date_str)
+    source_snapshot_date = _latest_source_snapshot_date(paths)
+    pre_existing_execution_rows_for_date = [
+        row
+        for row in load_paper_execution_rows(paths["paper_execution_log"], account_paths=account_paths)
+        if str(row.get("date") or "").strip() == target_snapshot_date
+    ]
 
     if report_exists:
         try:
@@ -365,6 +406,38 @@ def run_paper_eod_dry_run(
     print(f"  {paths['paper_execution_log']}")
     print(f"  {paths['paper_account_snapshot']}")
     print(f"  {paths['paper_position_snapshot']}")
+    print()
+    no_action_day = (
+        report_exists
+        and parser_mode in {"strict", "fallback_preview"}
+        and len(journal_rows) == 0
+        and len(paper_trade_previews) == 0
+        and len(rows_to_append) == 0
+        and len(pre_existing_execution_rows_for_date) == 0
+    )
+    would_write_current_state = account_preview_error is None and paper_account_state is not None
+    would_write_account_snapshot = (
+        account_preview_error is None
+        and snapshot_save_error is None
+        and snapshot_row is not None
+    )
+    would_write_position_snapshot = (
+        position_snapshot_save_error is None
+        and market_valuation is not None
+        and position_snapshot_rows is not None
+    )
+    print("EOD roll-forward intent:")
+    print(f"  account_id: {account_paths.account_id if account_paths is not None else 'paper_default'}")
+    print(f"  date: {target_snapshot_date}")
+    print(f"  execution_candidate_count: {len(journal_rows)}")
+    print(f"  ready_preview_count: {len(paper_trade_previews)}")
+    print(f"  no_action_day: {str(no_action_day).lower()}")
+    print(f"  would_append_execution_log: {str(bool(rows_to_append)).lower()}")
+    print(f"  would_write_current_state: {str(would_write_current_state).lower()}")
+    print(f"  would_write_account_snapshot: {str(would_write_account_snapshot).lower()}")
+    print(f"  would_write_position_snapshot: {str(would_write_position_snapshot).lower()}")
+    print(f"  source_snapshot_date: {source_snapshot_date or '-'}")
+    print(f"  target_snapshot_date: {target_snapshot_date}")
     print()
     if report_exists and parser_mode in {"strict", "fallback_preview"}:
         summary = _preview_summary(journal_rows)

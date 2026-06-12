@@ -717,3 +717,38 @@ Scope Boundary:
 
 - This addendum only fixes account scope before EOD preflight.
 - It does not implement no-action day EOD roll-forward or terminal closure policy. That remains a separate OPER9-19B task.
+
+## 22. OPER9-19B No-Action Day EOD Roll-Forward Addendum
+
+OPER9-19B adopts no-action EOD roll-forward as the paper account closure policy.
+
+No-Action Definition:
+
+- Account-scoped Daily Plan exists.
+- Execution candidates and READY paper trade previews are zero.
+- No execution log rows exist for the target date.
+- Prior account state can be reconstructed from the account execution log.
+
+Dry-Run Policy:
+
+- Dry-run remains read-only.
+- It prints `EOD roll-forward intent` with `no_action_day`, candidate counts, write intents, source snapshot date, and target snapshot date.
+- On no-action days, expected intent is `would_append_execution_log=false` and current-state/account/position snapshot write intents `true`.
+
+Commit Policy:
+
+- Commit writes target-date `paper_current_state_YYYYMMDD.json`.
+- Commit appends or replaces target-date rows in account and position snapshots through the existing writer path.
+- Commit does not add execution log rows when there are no READY paper trades.
+- Cash and holdings are carried forward from the reconstructed paper account state; market valuation can update for the target date.
+
+Closure Policy:
+
+- After no-action roll-forward and completed review, `paper.py status` can reach `REVIEW_DONE` instead of staying at `PLAN_READY`.
+- Daily Ops Orchestrator can close at `FINAL_STATUS` with `terminal=true`, `recommended_operator_action=NONE`, and no next command.
+
+Safety Boundary:
+
+- Live no-action EOD commit is not part of OPER9-19B.
+- Same-date replacement remains gated by the existing `paper.py commit --replace` path.
+- Live account roll-forward should be executed only in a follow-up task with explicit approval.

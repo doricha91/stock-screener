@@ -1024,6 +1024,48 @@ def test_stage_advancement_matrix_review_done_terminal_suppresses_all_commands(t
     assert all(stage["next_command"] is None for stage in payload["stages"])
 
 
+def test_no_action_roll_forward_review_done_terminal_closure(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write(root / "daily_action_plan_20260608.md", "# no action plan\n")
+    _write_json(
+        root / "daily_action_plan_20260608.json",
+        {
+            "account_id": "paper_ops",
+            "data_date": "2026-06-05",
+            "trade_date": "2026-06-08",
+            "plan_date": "2026-06-08",
+            "items": [],
+        },
+    )
+    _write_json(root / "config_snapshots" / "paper_config_snapshot_20260608.json", {"ok": True})
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+    _write_review_ready(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_REVIEW_TEMPLATE)
+    _write_review_preview(root)
+    _write_review_commit(root)
+    _write_notion_evidence(root, EVIDENCE_MANUAL_REVIEW_STATUS_SYNC)
+    _write(root / "paper_current_state_20260608.json", "{}\n")
+    _write(
+        root / "paper_account_snapshot.csv",
+        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols\n"
+        "2026-06-08,100,100,0,0,\n",
+    )
+    _write(root / "paper_position_snapshot.csv", "snapshot_date,symbol\n2026-06-08,AAPL\n")
+    _write(root / "paper_execution_log.csv", "date,source,symbol\n")
+
+    payload = build_daily_ops_status(**_base_kwargs(root, legacy))
+
+    assert payload["workflow_status"] == "REVIEW_DONE"
+    assert payload["operator_summary"]["current_step"] == "FINAL_STATUS"
+    assert payload["operator_summary"]["current_step_status"] == "DONE"
+    assert payload["operator_summary"]["terminal"] is True
+    assert payload["operator_summary"]["next_command"] is None
+    assert payload["operator_summary"]["recommended_operator_action"] == "NONE"
+    assert payload["operator_summary"]["has_reconciliation_conflicts"] is False
+    assert payload["reconciliation_summary"]["conflict_count"] == 0
+
+
 def test_local_commit_with_unsynced_notion_status_keeps_sync_recommendation(tmp_path: Path):
     root = _root(tmp_path)
     legacy = _legacy_root(tmp_path)
