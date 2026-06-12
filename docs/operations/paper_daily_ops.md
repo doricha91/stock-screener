@@ -700,3 +700,20 @@ Guard Policy:
 - After no-action day review completion, `operator_summary.current_step` advances to `MANUAL_REVIEW_TEMPLATE` and the next command is the manual review template Notion export command.
 
 This preserves OPER9-16 stale artifact protection for normal execution days while preventing repeated `paper.py review` recommendations when a no-action day review is already current and valid.
+
+## 21. OPER9-19A EOD Preflight Account Scope Alignment Addendum
+
+OPER9-19A aligns EOD preflight with the selected paper account.
+
+Guard Policy:
+
+- `paper.py eod --account-id <account> --dry-run` resolves account paths before running EOD preflight.
+- EOD preflight receives the same `account_paths` later passed to the EOD runner.
+- For non-default accounts, `daily_action_plan_exists` is evaluated against `account_paths.daily_action_plan_path(date)`, not the legacy/default paper root.
+- Dry-run uses `create=False`; the account root must already exist.
+- The commit path keeps `create=True` setup behavior, but actual EOD commit execution remains manually gated.
+
+Scope Boundary:
+
+- This addendum only fixes account scope before EOD preflight.
+- It does not implement no-action day EOD roll-forward or terminal closure policy. That remains a separate OPER9-19B task.

@@ -584,11 +584,18 @@ def handle_eod(args: argparse.Namespace) -> int:
     if not getattr(args, "guard_checked", False):
         if _guard_writer_account(args.account_id, "paper.py eod", allow_non_default=True) != 0:
             return 1
-    summary = run_preflight(
+
+    commit = bool(args.commit)
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=commit)
+
+    summary = _call_preflight(
         stage="eod",
         date_str=args.date,
         strict=False,
         write_report=False,
+        account_paths=account_paths,
     )
     if summary["result"] == "FAIL":
         print("Paper EOD aborted because preflight failed.")
@@ -596,11 +603,8 @@ def handle_eod(args: argparse.Namespace) -> int:
     if summary["result"] == "PASS_WITH_WARNINGS":
         print("Paper EOD continues with preflight warnings.")
 
-    commit = bool(args.commit)
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=commit)
-    return run_paper_eod_dry_run(
+    return _call_with_optional_account_paths(
+        run_paper_eod_dry_run,
         args.date,
         allow_empty_journal=True,
         commit=commit,
@@ -663,7 +667,7 @@ def handle_reports(args: argparse.Namespace) -> int:
     account_paths = None
     if args.account_id and args.account_id != "paper_default":
         account_paths = build_paper_account_paths(args.account_id, create=True)
-    results = run_report_chain(account_paths=account_paths)
+    results = _call_with_optional_account_paths(run_report_chain, account_paths=account_paths)
     print("PAPER REPORTS")
     for item in results:
         print(
@@ -708,7 +712,7 @@ def handle_review_validate(args: argparse.Namespace) -> int:
     account_paths = None
     if args.account_id and args.account_id != "paper_default":
         account_paths = build_paper_account_paths(args.account_id, create=True)
-    result = validate_paper_manual_review_log(account_paths=account_paths)
+    result = _call_with_optional_account_paths(validate_paper_manual_review_log, account_paths=account_paths)
     summary = result["summary"]
     print("PAPER REVIEW VALIDATE")
     print(f"  input_path: {result['input_path']}")
