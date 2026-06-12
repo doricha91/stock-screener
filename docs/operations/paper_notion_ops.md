@@ -243,6 +243,13 @@ status 필드:
 - `WARNING`은 기본 차단
 - `--allow-warnings`가 있을 때만 append 허용
 
+OPER9 post-15 note:
+
+- Manual Review preview candidates require `Import Status = READY`.
+- `Review Status = reviewed` plus a filled Manual Answer is not enough if `Import Status` remains `DRAFT`.
+- The expected operator-ready combination is `Review Status = reviewed` and `Import Status = READY`.
+- After append/sync, Python commit reports and local `paper_manual_review_log.csv` remain source of truth; Notion status is UI/status evidence.
+
 예시 명령:
 
 ```cmd

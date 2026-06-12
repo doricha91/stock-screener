@@ -752,3 +752,50 @@ Safety Boundary:
 - Live no-action EOD commit is not part of OPER9-19B.
 - Same-date replacement remains gated by the existing `paper.py commit --replace` path.
 - Live account roll-forward should be executed only in a follow-up task with explicit approval.
+
+## 23. OPER9 Post-15 No-Action Closure Operating Summary
+
+OPER9-16 through OPER9-19C complete the no-action day closure path for the Python Daily Ops Orchestrator.
+
+Validated no-action operating flow:
+
+1. Generate the Daily Plan.
+2. Export the Daily Plan to Notion.
+3. Detect zero Manual Execution candidates.
+4. Treat Manual Execution Template / Preview / Commit / Status Sync as no-op `DONE`.
+5. Generate Daily Review.
+6. Export Manual Review Template.
+7. Complete Notion review input.
+8. Run Manual Review Preview.
+9. Run Manual Review Append.
+10. Run Manual Review Status Sync.
+11. Run EOD no-action roll-forward only after explicit approval.
+12. Verify `paper.py status` reaches `REVIEW_DONE`.
+13. Verify Daily Ops Orchestrator reaches `FINAL_STATUS` with `terminal=true`.
+
+No-action EOD policy:
+
+- No execution log rows are appended when there are no READY paper trades.
+- EOD roll-forward writes target-date `paper_current_state_YYYYMMDD.json`, account snapshot row, and position snapshot rows.
+- Cash, holdings, and cost basis carry forward from the reconstructed paper account state.
+- Market valuation can update for the target date.
+- This separates "no trade occurred" from "account state was closed for the date".
+
+2026-06-09 smoke result:
+
+- account: `paper_orch_smoke_202606`
+- EOD commit was explicitly user-approved for the no-action smoke.
+- `rows_appended=0`
+- target-date current state/account snapshot/position snapshot writes succeeded.
+- `paper.py status` returned `workflow_status=REVIEW_DONE`.
+- Daily Ops Orchestrator returned `overall_status=PASS`, `current_step=FINAL_STATUS`, `terminal=true`, `next_command=null`, and no reconciliation conflicts.
+- Local-only closeout re-check still reaches `FINAL_STATUS` with `terminal=true`.
+- If opt-in Notion live read later reports WARNING/conflict, treat it as a Notion UI/status reconciliation follow-up unless local source-of-truth artifacts disagree.
+
+Safety boundary:
+
+- OPER9 is a judgment and verification layer, not automatic trading.
+- Notion is UI/staging/status, not source of truth.
+- Local CSV/JSON/Markdown/SQLite artifacts remain source of truth.
+- n8n automation is deferred to OPER10/AUTO.
+- Broker/API/order execution is outside this operating loop.

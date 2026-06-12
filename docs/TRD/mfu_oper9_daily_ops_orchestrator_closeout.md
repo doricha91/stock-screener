@@ -379,3 +379,29 @@ Priority 4: OPER11 Approval-based Execution
 OPER9 is closed as the Python Daily Ops Orchestrator completion track.
 
 The Orchestrator is now ready to be consumed by OPER10/AUTO read-only n8n design. The Orchestrator remains the judgment source; Notion remains UI; local artifacts remain source of truth.
+
+## 15. Post-15 Addendum Summary
+
+The original closeout baseline captured the OPER9-15 terminal sync hardening state. Additional real-cycle hardening was completed afterward and is documented in:
+
+```text
+docs/TRD/mfu_oper9_post15_closeout_addendum.md
+```
+
+Post-15 scope:
+
+- OPER9-16: date-scoped review artifact guard for fixed-name review outputs.
+- OPER9-17: no-execution-candidates advancement guard.
+- OPER9-18: no-action day Daily Review completion guard.
+- OPER9-19A: account-scoped EOD preflight alignment.
+- OPER9-19B: no-action EOD roll-forward policy and fixture verification.
+- OPER9-19C: user-approved live no-action EOD roll-forward smoke.
+
+Post-15 final smoke result:
+
+- account: `paper_orch_smoke_202606`
+- trade_date: `2026-06-09`
+- `paper.py status`: `workflow_status=REVIEW_DONE`
+- Daily Ops Orchestrator: `overall_status=PASS`, `current_step=FINAL_STATUS`, `terminal=true`, `next_command=null`, `has_reconciliation_conflicts=false`
+
+This addendum does not change the OPER9 safety boundary: Python remains the judgment layer, local artifacts remain source of truth, Notion remains UI/staging/status, and n8n remains OPER10/AUTO follow-up scope.
