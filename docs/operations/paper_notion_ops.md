@@ -1,5 +1,15 @@
 # Paper Notion Operations Guide
 
+## Current Daily Notion Runbook
+
+For the current Manual Execution and Manual Review Notion fields, READY/import-status rules, preview/commit/sync commands, and approval boundaries, use:
+
+```text
+docs/operations/paper_daily_cycle_commands.md
+```
+
+This file remains the broader Notion operations guide. The daily cycle runbook is the first reference for day-to-day operation.
+
 ## OPER9 Closeout Note
 
 OPER9 closes the Python Daily Ops Orchestrator track. Notion remains an input UI, review UI, and status display UI; it is not the source of truth.

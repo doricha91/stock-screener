@@ -4,6 +4,12 @@
 
 OPER9-15 closed the first full Python Daily Ops Orchestrator hardening pass. The post-15 work, OPER9-16 through OPER9-19C, closed the remaining real-cycle edge cases found while running the orchestrator against the `paper_orch_smoke_202606` account.
 
+The day-to-day operator command runbook is:
+
+```text
+docs/operations/paper_daily_cycle_commands.md
+```
+
 The post-15 hardening focused on four problems:
 
 1. Preventing fixed-name review artifacts from being reused across dates.

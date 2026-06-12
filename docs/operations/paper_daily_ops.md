@@ -1,5 +1,15 @@
 # Paper Daily Operation Guide
 
+## Current Operator Runbook
+
+For the current Windows CMD daily command sequence, approval boundaries, Notion input fields, no-action day handling, and final status checks, use:
+
+```text
+docs/operations/paper_daily_cycle_commands.md
+```
+
+That runbook is the practical daily operating manual. This file remains the broader historical operations guide and contains legacy sections.
+
 ## 1. Purpose / Scope
 
 이번 MFU-PAPER14-DAILY-OPS-REFACTOR는 `paper_daily_ops.md`를 최신 PAPER14 Notion daily loop 기준으로 리팩토링하는 작업이며, Python 코드 수정, Notion actual write/export, Manual Execution commit, Manual Review append, paper trading ledger 수정은 수행하지 않는다.

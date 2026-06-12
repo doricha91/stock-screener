@@ -4,6 +4,12 @@
 
 MFU-OPER9 completes the Python Daily Ops Orchestrator as the judgment engine before n8n automation.
 
+Daily operator command runbook:
+
+```text
+docs/operations/paper_daily_cycle_commands.md
+```
+
 The goal was not automatic write, commit, append, broker, or n8n workflow execution. The final goal was:
 
 - read-only stage status judgment
