@@ -820,3 +820,46 @@ Safety boundary:
 - Local CSV/JSON/Markdown/SQLite artifacts remain source of truth.
 - n8n automation is deferred to OPER10/AUTO.
 - Broker/API/order execution is outside this operating loop.
+
+## 24. OPER9-20D-B EOD Accounting Close Addendum
+
+OPER9-20D-B hardens EOD idempotency by making the default EOD role an accounting close.
+
+Default EOD role:
+
+- `paper.py eod --dry-run` previews close intent from the selected account.
+- `paper.py eod --commit` closes state and snapshots from the already committed `paper_execution_log.csv`.
+- Default EOD does not append Daily Plan-derived `paper_virtual_fill` rows.
+- Manual Execution commit owns trade append.
+
+Normal execution day policy:
+
+- Daily Plan execution candidates are official JSON `items[]` rows with `action=BUY/SELL` and `quantity > 0`.
+- If candidates exist, target-date execution rows must already exist in `paper_execution_log.csv` before EOD close.
+- If candidates exist but no committed rows and no Manual Execution commit report exist, EOD blocks with a Manual Execution commit required message.
+- If a Manual Execution commit report exists but committed rows are missing, EOD blocks as inconsistent evidence.
+
+No-action day policy:
+
+- If candidate count is zero, EOD appends no execution rows.
+- EOD can roll-forward current state, account snapshot, and position snapshot for the target date.
+- This preserves the OPER9-19B no-action closure policy.
+
+Expected EOD intent fields:
+
+- `eod_mode=accounting_close`
+- `execution_candidate_count`
+- `execution_log_rows_for_date`
+- `manual_execution_commit_report_exists`
+- `no_action_day`
+- `would_append_execution_log=false`
+- `would_write_current_state`
+- `would_write_account_snapshot`
+- `would_write_position_snapshot`
+
+Operational boundary:
+
+- Do not use EOD as a substitute for Manual Execution commit on execution days.
+- Run Manual Execution preview and commit first when the Daily Plan has BUY/SELL candidates.
+- Run EOD only after reviewing dry-run intent.
+- Legacy virtual fill append is disabled in default EOD and is not an operator path unless a future explicit mode is added.

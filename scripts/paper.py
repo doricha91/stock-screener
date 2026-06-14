@@ -888,7 +888,11 @@ def build_parser() -> argparse.ArgumentParser:
     eod_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     eod_mode_group = eod_parser.add_mutually_exclusive_group(required=True)
     eod_mode_group.add_argument("--dry-run", action="store_true", help="Run read-only EOD preview wrapper")
-    eod_mode_group.add_argument("--commit", action="store_true", help="Run EOD commit wrapper that may modify paper ledger files")
+    eod_mode_group.add_argument(
+        "--commit",
+        action="store_true",
+        help="Run EOD accounting close; writes paper state/snapshots without appending execution rows",
+    )
     eod_parser.set_defaults(handler=handle_eod)
 
     reports_parser = subparsers.add_parser(

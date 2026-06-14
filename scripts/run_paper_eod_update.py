@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from core.paper_position_snapshot import (
 )
 from core.paper_account_state import PaperAccountState, build_paper_state_from_trades
 from core.paper_current_state_storage import save_paper_current_state
-from core.paper_execution_log import append_paper_execution_log
+from core.paper_daily_plan_candidates import count_daily_plan_execution_candidates
 from core.paper_safety import assert_paper_path
 from core.paper_trade_preview import build_paper_trade_previews, can_resolve_paper_actual_fill
 from core.paths import (
@@ -204,6 +205,21 @@ def _latest_source_snapshot_date(paths: dict[str, Path]) -> str | None:
     return max(found) if found else None
 
 
+def _load_daily_plan_candidate_count(plan_markdown_path: Path, fallback_count: int) -> tuple[int, str]:
+    json_path = plan_markdown_path.with_suffix(".json")
+    if not json_path.exists():
+        return fallback_count, "markdown_journal_fallback"
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return fallback_count, "markdown_journal_fallback_json_unreadable"
+    return count_daily_plan_execution_candidates(payload), "daily_plan_json_items"
+
+
+def _manual_execution_commit_report_path(paths: dict[str, Path], clean_date: str) -> Path:
+    return paths["paper_execution_log"].parent / "reports" / f"manual_execution_import_commit_{clean_date}.json"
+
+
 def build_paper_account_preview_from_log(
     log_path: Path,
     initial_cash: float = 100000.0,
@@ -225,6 +241,7 @@ def run_paper_eod_dry_run(
     plan_path: str | Path | None = None,
     account_paths: PaperAccountPaths | None = None,
 ) -> int:
+    clean_date = _normalize_date(date_str)
     if account_paths is not None and account_paths.account_id != "paper_default":
         paths = build_account_aware_paper_eod_paths(date_str, account_paths, plan_path=plan_path)
     else:
@@ -239,6 +256,7 @@ def run_paper_eod_dry_run(
     rows_to_append: list[dict[str, Any]] = []
     append_warnings: list[str] = []
     parser_error: str | None = None
+    accounting_close_error: str | None = None
     account_preview_error: str | None = None
     paper_state_save_error: str | None = None
     snapshot_save_error: str | None = None
@@ -255,6 +273,7 @@ def run_paper_eod_dry_run(
 
     target_snapshot_date = _display_date(date_str)
     source_snapshot_date = _latest_source_snapshot_date(paths)
+    manual_execution_commit_report_exists = _manual_execution_commit_report_path(paths, clean_date).exists()
     pre_existing_execution_rows_for_date = [
         row
         for row in load_paper_execution_rows(paths["paper_execution_log"], account_paths=account_paths)
@@ -295,26 +314,43 @@ def run_paper_eod_dry_run(
 
     if report_exists and parser_mode in {"strict", "fallback_preview"}:
         paper_trade_previews, preview_warnings = build_paper_trade_previews(journal_rows)
-        allowed_root = (
-            account_paths.root
-            if account_paths is not None and account_paths.account_id != "paper_default"
-            else None
-        )
-        rows_to_append, append_warnings = append_paper_execution_log(
-            paper_trade_previews,
-            paths["paper_execution_log"],
-            commit=commit,
-            allowed_root=allowed_root,
-        )
 
     paper_log_exists = paths["paper_execution_log"].exists()
-    try:
-        paper_account_state = build_paper_account_preview_from_log(
-            paths["paper_execution_log"],
-            account_paths=account_paths,
-        )
-    except ValueError as exc:
-        account_preview_error = str(exc)
+    execution_candidate_count, candidate_count_source = _load_daily_plan_candidate_count(
+        paths["input_report"],
+        fallback_count=len(journal_rows),
+    )
+    no_action_day = (
+        report_exists
+        and parser_mode in {"strict", "fallback_preview"}
+        and execution_candidate_count == 0
+        and len(pre_existing_execution_rows_for_date) == 0
+    )
+    if (
+        report_exists
+        and parser_mode in {"strict", "fallback_preview"}
+        and execution_candidate_count > 0
+        and len(pre_existing_execution_rows_for_date) == 0
+    ):
+        if manual_execution_commit_report_exists:
+            accounting_close_error = (
+                "EOD accounting close blocked: manual execution commit report exists but no "
+                "committed execution rows were found for the target date."
+            )
+        else:
+            accounting_close_error = (
+                "EOD accounting close blocked: execution candidates exist but no committed "
+                "execution rows were found. Run Manual Execution commit first."
+            )
+
+    if accounting_close_error is None:
+        try:
+            paper_account_state = build_paper_account_preview_from_log(
+                paths["paper_execution_log"],
+                account_paths=account_paths,
+            )
+        except ValueError as exc:
+            account_preview_error = str(exc)
 
     if commit and account_preview_error is None and paper_account_state is not None:
         try:
@@ -407,32 +443,34 @@ def run_paper_eod_dry_run(
     print(f"  {paths['paper_account_snapshot']}")
     print(f"  {paths['paper_position_snapshot']}")
     print()
-    no_action_day = (
-        report_exists
-        and parser_mode in {"strict", "fallback_preview"}
-        and len(journal_rows) == 0
-        and len(paper_trade_previews) == 0
-        and len(rows_to_append) == 0
-        and len(pre_existing_execution_rows_for_date) == 0
+    would_write_current_state = (
+        accounting_close_error is None
+        and account_preview_error is None
+        and paper_account_state is not None
     )
-    would_write_current_state = account_preview_error is None and paper_account_state is not None
     would_write_account_snapshot = (
-        account_preview_error is None
+        accounting_close_error is None
+        and account_preview_error is None
         and snapshot_save_error is None
         and snapshot_row is not None
     )
     would_write_position_snapshot = (
-        position_snapshot_save_error is None
+        accounting_close_error is None
+        and position_snapshot_save_error is None
         and market_valuation is not None
         and position_snapshot_rows is not None
     )
     print("EOD roll-forward intent:")
+    print("  eod_mode: accounting_close")
     print(f"  account_id: {account_paths.account_id if account_paths is not None else 'paper_default'}")
     print(f"  date: {target_snapshot_date}")
-    print(f"  execution_candidate_count: {len(journal_rows)}")
+    print(f"  execution_candidate_count: {execution_candidate_count}")
+    print(f"  candidate_count_source: {candidate_count_source}")
+    print(f"  execution_log_rows_for_date: {len(pre_existing_execution_rows_for_date)}")
+    print(f"  manual_execution_commit_report_exists: {str(manual_execution_commit_report_exists).lower()}")
     print(f"  ready_preview_count: {len(paper_trade_previews)}")
     print(f"  no_action_day: {str(no_action_day).lower()}")
-    print(f"  would_append_execution_log: {str(bool(rows_to_append)).lower()}")
+    print("  would_append_execution_log: false")
     print(f"  would_write_current_state: {str(would_write_current_state).lower()}")
     print(f"  would_write_account_snapshot: {str(would_write_account_snapshot).lower()}")
     print(f"  would_write_position_snapshot: {str(would_write_position_snapshot).lower()}")
@@ -489,15 +527,15 @@ def run_paper_eod_dry_run(
             1 for warning in append_warnings if warning.startswith("Skipping duplicate paper trade:")
         )
         print("Paper execution log:")
-        print(f"  mode: {'COMMIT' if commit else 'DRY-RUN'}")
+        print("  mode: ACCOUNTING_CLOSE")
         print(f"  log_path: {paths['paper_execution_log']}")
         print(f"  ready_previews: {len(paper_trade_previews)}")
         if commit:
-            print(f"  rows_appended: {len(rows_to_append)}")
+            print("  rows_appended: 0")
         else:
-            print(f"  rows_to_append: {len(rows_to_append)}")
+            print("  rows_to_append: 0")
         print(f"  duplicates_skipped: {duplicate_count}")
-        print(f"  write_performed: {commit and bool(rows_to_append)}")
+        print("  write_performed: false")
         other_append_warnings = [
             warning for warning in append_warnings
             if not warning.startswith("Skipping duplicate paper trade:")
@@ -509,7 +547,11 @@ def run_paper_eod_dry_run(
                 print(f"  - {warning}")
         print()
     print("Paper account preview:")
-    if account_preview_error is not None:
+    if accounting_close_error is not None:
+        print("  skipped")
+        print(f"  {accounting_close_error}")
+        print()
+    elif account_preview_error is not None:
         print("  failed")
         print(f"  {account_preview_error}")
         print()
@@ -658,6 +700,9 @@ def run_paper_eod_dry_run(
         return 1
     print("  path separation OK")
     print("  paper execution preview OK")
+    if accounting_close_error is not None:
+        print(f"  ERROR: {accounting_close_error}")
+        return 1
     if account_preview_error is not None:
         print("  ERROR: paper account preview failed")
         print("  invalid paper execution log must be fixed before account state can be previewed")
@@ -668,8 +713,6 @@ def run_paper_eod_dry_run(
     if snapshot_save_error is not None:
         print("  ERROR: paper account snapshot save failed")
         return 1
-    if commit and rows_to_append:
-        print("  paper execution log append committed")
     if commit and paper_state_save_result is not None:
         print("  paper_current_state write committed")
     if commit and snapshot_save_result is not None:
@@ -722,7 +765,7 @@ def main() -> int:
     parser.add_argument(
         "--commit",
         action="store_true",
-        help="Append READY_FOR_PAPER_TRADE previews to outputs/paper_test/paper_execution_log.csv.",
+        help="Close paper accounting snapshots from the committed execution log without appending execution rows.",
     )
     args = parser.parse_args()
     return run_paper_eod_dry_run(
