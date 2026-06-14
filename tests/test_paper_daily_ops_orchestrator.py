@@ -658,6 +658,51 @@ def test_notion_ready_manual_execution_preserves_preview_recommendation(tmp_path
     assert payload["operator_summary"]["current_step"] == "DAILY_PLAN_NOTION_EXPORT"
 
 
+def test_notion_ready_manual_execution_rows_prevent_no_candidates_skip(tmp_path: Path):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write(root / "daily_action_plan_20260608.md", "# plan\n")
+    _write_json(
+        root / "daily_action_plan_20260608.json",
+        {
+            "account_id": "paper_ops",
+            "data_date": "2026-06-05",
+            "trade_date": "2026-06-08",
+            "plan_date": "2026-06-08",
+            "items": [],
+        },
+    )
+    _write_json(root / "config_snapshots" / "paper_config_snapshot_20260608.json", {"ok": True})
+    _write_notion_evidence(root, EVIDENCE_DAILY_PLAN_NOTION_EXPORT)
+
+    payload = build_daily_ops_status(
+        **_base_kwargs(root, legacy),
+        include_notion_read=True,
+        notion_status_report=_notion_report(
+            {
+                "MANUAL_EXECUTION_TEMPLATE": _notion_stage_report(
+                    "PASS",
+                    row_count=9,
+                    status_counts={"READY": 9, "NOT_IMPORTED": 9},
+                    details={"missing_actual_price_count": 0},
+                ),
+                "MANUAL_EXECUTION_PREVIEW": _notion_stage_report(
+                    "PASS",
+                    row_count=9,
+                    status_counts={"READY": 9, "NOT_IMPORTED": 9},
+                    details={"missing_actual_price_count": 0},
+                ),
+            }
+        ),
+    )
+
+    preview = _stage(payload, "MANUAL_EXECUTION_PREVIEW")
+    assert preview["status"] == "READY"
+    assert preview["reconciliation_rule_id"] == "OPER9_6_EXEC_PREVIEW_READY_ROWS"
+    assert preview["reconciliation_rule_id"] != "OPER9_17_EXEC_PREVIEW_SKIPPED_NO_CANDIDATES"
+    _assert_operator_next(payload, "MANUAL_EXECUTION_PREVIEW", "import_notion_executions.py")
+
+
 def test_plan_ready_advances_past_data_freshness_for_top_level_next_command(tmp_path: Path):
     root = _root(tmp_path)
     legacy = _legacy_root(tmp_path)

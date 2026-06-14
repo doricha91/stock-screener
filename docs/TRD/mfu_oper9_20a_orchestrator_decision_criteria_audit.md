@@ -338,3 +338,23 @@ Sample item shape:
 - ledger/DB mutation 명령
 
 이번 감사 중 생성된 `outputs\orch_status_audit_20260615.json`은 read-only status 조회 결과물이며 git commit 대상이 아니다.
+
+## 13. MFU-OPER9-20C Update
+
+20A의 execution candidate count audit는 20A 당시 코드 기준의 mismatch를 기록한 것이다. MFU-OPER9-20C 이후 현재 기준은 아래와 같이 정렬되었다.
+
+- Official Daily Plan execution candidate schema:
+  - source: `daily_action_plan_YYYYMMDD.json` `items[]`
+  - `action in {"BUY", "SELL"}` after trim/uppercase normalization
+  - `quantity > 0`
+  - `symbol` present
+- `action=EXECUTE`, `status=PENDING`, `side=BUY/SELL`는 official Daily Plan schema가 아니며 현재 주 기준으로 사용하지 않는다.
+- Shared helper:
+  - `core.paper_daily_plan_candidates.is_daily_plan_execution_candidate(item)`
+  - `core.paper_daily_plan_candidates.extract_daily_plan_execution_candidates(plan)`
+  - `core.paper_daily_plan_candidates.count_daily_plan_execution_candidates(plan)`
+  - `CANDIDATE_COUNT_RULE = "items.action_in_buy_sell_quantity_positive.v1"`
+- Orchestrator and Manual Execution Notion export now use the shared helper.
+- Preview/commit artifacts and Manual Execution Notion rows suppress no-candidates skip.
+- If an execution commit report exists, `MANUAL_EXECUTION_STATUS_SYNC` is evaluated normally and is not hidden by no-candidates skip.
+- The 2026-06-15 shape (`BUY=7`, `SELL=2`) is now counted as 9 candidates.

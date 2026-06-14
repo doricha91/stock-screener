@@ -85,7 +85,7 @@ def _write_execution_candidate_plan_20260609(root: Path) -> None:
             "trade_date": "2026-06-09",
             "plan_date": "2026-06-09",
             "items": [
-                {"symbol": "AAPL", "action": "EXECUTE", "status": "PENDING", "side": "BUY"},
+                {"symbol": "AAPL", "action": "BUY", "quantity": 10},
             ],
         },
     )
@@ -350,8 +350,8 @@ def test_no_execution_candidates_skips_manual_execution_loop():
                 "plan_date": "2026-06-09",
                 "items": [
                     {"symbol": "AAPL", "action": "HOLD", "status": "PENDING"},
-                    {"symbol": "GOOG", "action": "EXECUTE", "status": "COMPLETED", "side": "BUY"},
-                    {"symbol": "MSFT", "action": "EXECUTE", "status": "PENDING", "side": "OTHER"},
+                    {"symbol": "GOOG", "action": "BUY", "quantity": 0},
+                    {"symbol": "MSFT", "action": "SELL", "quantity": None},
                 ]
             },
         )
@@ -386,3 +386,77 @@ def test_no_execution_candidates_skips_manual_execution_loop():
         assert payload["operator_summary"]["recommended_operator_action"] == "RUN_NEXT_COMMAND"
     finally:
         shutil.rmtree(tmp_path)
+
+
+def test_current_schema_execution_candidates_do_not_skip_manual_execution_loop(tmp_path: Path):
+    root = _root(tmp_path)
+    _write(root / "daily_action_plan_20260609.md", "# plan 2026-06-09\n")
+    _write_json(
+        root / "daily_action_plan_20260609.json",
+        {
+            "account_id": "paper_ops",
+            "data_date": "2026-06-08",
+            "trade_date": "2026-06-09",
+            "plan_date": "2026-06-09",
+            "items": [
+                {"action": "SELL", "symbol": "AMT", "quantity": 51},
+                {"action": "BUY", "symbol": "BF-B", "quantity": 353},
+                {"action": "SELL", "symbol": "AVB", "quantity": 52},
+                {"action": "BUY", "symbol": "PLD", "quantity": 65},
+                {"action": "BUY", "symbol": "AMCR", "quantity": 243},
+                {"action": "BUY", "symbol": "CCL", "quantity": 120},
+                {"action": "BUY", "symbol": "LIN", "quantity": 10},
+                {"action": "BUY", "symbol": "LYV", "quantity": 40},
+                {"action": "BUY", "symbol": "SW", "quantity": 200},
+            ],
+        },
+    )
+    _write_json(root / "config_snapshots" / "paper_config_snapshot_20260609.json", {"ok": True})
+
+    payload = build_daily_ops_status(**_base_kwargs(root))
+    template = _stage(payload, "MANUAL_EXECUTION_TEMPLATE")
+    preview = _stage(payload, "MANUAL_EXECUTION_PREVIEW")
+
+    assert template["execution_candidate_count"] == 9
+    assert template["no_execution_candidates"] is False
+    assert template["candidate_count_rule"] == "items.action_in_buy_sell_quantity_positive.v1"
+    assert template["reconciliation_rule_id"] != "OPER9_17_EXEC_TEMPLATE_NO_CANDIDATES"
+    assert preview.get("no_execution_candidates") is not True
+
+
+def test_execution_commit_artifact_prevents_no_candidates_status_sync_skip(tmp_path: Path):
+    root = _root(tmp_path)
+    _write(root / "daily_action_plan_20260609.md", "# plan 2026-06-09\n")
+    _write_json(
+        root / "daily_action_plan_20260609.json",
+        {
+            "account_id": "paper_ops",
+            "data_date": "2026-06-08",
+            "trade_date": "2026-06-09",
+            "plan_date": "2026-06-09",
+            "items": [],
+        },
+    )
+    _write_json(root / "config_snapshots" / "paper_config_snapshot_20260609.json", {"ok": True})
+    _write_json(
+        root / "reports" / "manual_execution_import_commit_20260609.json",
+        {
+            "account_id": "paper_ops",
+            "execution_date": "2026-06-09",
+            "committed_rows": [{"symbol": "AAPL", "side": "BUY", "quantity": 1}],
+        },
+    )
+
+    payload = build_daily_ops_status(**_base_kwargs(root))
+    template = _stage(payload, "MANUAL_EXECUTION_TEMPLATE")
+    commit = _stage(payload, "MANUAL_EXECUTION_COMMIT")
+    sync = _stage(payload, "MANUAL_EXECUTION_STATUS_SYNC")
+
+    assert template["no_execution_candidates"] is False
+    assert template["execution_candidate_count"] == 0
+    assert commit["status"] == "DONE"
+    assert commit.get("no_execution_candidates") is not True
+    assert sync["status"] == "UNKNOWN"
+    assert sync.get("no_execution_candidates") is not True
+    assert sync["next_command"]
+    assert sync["reconciliation_rule_id"] != "OPER9_17_EXEC_SYNC_SKIPPED_NO_CANDIDATES"

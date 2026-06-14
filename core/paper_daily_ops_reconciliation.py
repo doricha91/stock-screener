@@ -88,9 +88,9 @@ def _reconcile_stage(
     if name == "MANUAL_EXECUTION_PREVIEW":
         return _manual_execution_preview(stage, by_name)
     if name == "MANUAL_EXECUTION_COMMIT":
-        return _manual_execution_commit(stage)
+        return _manual_execution_commit(stage, by_name)
     if name == "MANUAL_EXECUTION_STATUS_SYNC":
-        return _manual_execution_status_sync(stage, workflow_status=workflow_status)
+        return _manual_execution_status_sync(stage, by_name, workflow_status=workflow_status)
     if name == "MANUAL_REVIEW_TEMPLATE":
         return _manual_review_template(stage, by_name)
     if name == "MANUAL_REVIEW_PREVIEW":
@@ -123,7 +123,7 @@ def _daily_plan_export(stage: dict[str, Any], by_name: dict[str, dict[str, Any]]
 
 
 def _manual_execution_template(stage: dict[str, Any], by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    if stage.get("no_execution_candidates"):
+    if stage.get("no_execution_candidates") and not _has_rows(stage):
         return _result(DONE, "OPER9_17_EXEC_TEMPLATE_NO_CANDIDATES", "Skipped: No execution candidates found in Daily Plan.", suppress_next=True)
     plan_status = _local_status(by_name.get("DAILY_PLAN"))
     has_rows = _has_any_status(stage, EXECUTION_TEMPLATE_STATUSES) or _has_rows(stage)
@@ -143,11 +143,28 @@ def _manual_execution_template(stage: dict[str, Any], by_name: dict[str, dict[st
 
 
 def _manual_execution_preview(stage: dict[str, Any], by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    if stage.get("no_execution_candidates"):
+    if stage.get("no_execution_candidates") and not _has_rows(stage):
         return _result(DONE, "OPER9_17_EXEC_PREVIEW_SKIPPED_NO_CANDIDATES", "Skipped: No execution candidates.", suppress_next=True)
-    local = _local_status(stage)
     ready_rows = _count_status(stage, READY_STATUSES)
     missing_price = int((stage.get("notion_details") or {}).get("missing_actual_price_count") or 0)
+    if stage.get("no_execution_candidates") and _has_rows(stage):
+        if ready_rows > 0 and missing_price > 0:
+            return _result(
+                WARNING,
+                "OPER9_6_EXEC_PREVIEW_READY_MISSING_PRICE",
+                "Notion READY rows include blank Actual Price values.",
+                conflict=True,
+            )
+        if ready_rows > 0:
+            return _result(READY, "OPER9_6_EXEC_PREVIEW_READY_ROWS", "Notion READY rows exist and local execution preview is missing.")
+        return _result(
+            WARNING,
+            "OPER9_6_EXEC_PREVIEW_LOCAL_WITHOUT_READY_NOTION",
+            "Manual Execution rows exist, so no-candidates skip is not applied; review the row statuses.",
+            suppress_next=True,
+            conflict=True,
+        )
+    local = _local_status(stage)
     if local in {DONE, WARNING} and ready_rows == 0:
         commit_done = _local_status(by_name.get("MANUAL_EXECUTION_COMMIT")) == DONE
         sync_done = _local_status(by_name.get("MANUAL_EXECUTION_STATUS_SYNC")) == DONE
@@ -181,9 +198,20 @@ def _manual_execution_preview(stage: dict[str, Any], by_name: dict[str, dict[str
     return _result(UNKNOWN, "OPER9_6_EXEC_PREVIEW_NO_READY_ROWS", "No Notion READY rows or local execution preview were found.", suppress_next=True)
 
 
-def _manual_execution_commit(stage: dict[str, Any]) -> dict[str, Any]:
-    if stage.get("no_execution_candidates"):
+def _manual_execution_commit(stage: dict[str, Any], by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    manual_execution_rows_exist = _has_manual_execution_rows(by_name)
+    if stage.get("no_execution_candidates") and not manual_execution_rows_exist:
         return _result(DONE, "OPER9_17_EXEC_COMMIT_SKIPPED_NO_CANDIDATES", "Skipped: No execution candidates.", suppress_next=True)
+    if stage.get("no_execution_candidates") and manual_execution_rows_exist:
+        if _has_any_status(stage, SYNCED_STATUSES):
+            return _result(
+                BLOCKED,
+                "OPER9_6_EXEC_COMMIT_NOTION_COMMITTED_WITHOUT_LOCAL",
+                "Notion is COMMITTED/SYNCED, but the local source-of-truth commit report is missing.",
+                suppress_next=True,
+                conflict=True,
+            )
+        return _result(BLOCKED, "OPER9_6_EXEC_COMMIT_PREVIEW_MISSING", "Execution preview is required before commit recommendation.", suppress_next=True)
     local = _local_status(stage)
     if local == DONE:
         return _result(DONE, "OPER9_6_EXEC_COMMIT_LOCAL_REPORT_PRESENT", "Local execution commit report exists.", suppress_next=True)
@@ -202,9 +230,25 @@ def _manual_execution_commit(stage: dict[str, Any]) -> dict[str, Any]:
     return _result(BLOCKED, "OPER9_6_EXEC_COMMIT_PREVIEW_MISSING", "Execution preview is required before commit recommendation.", suppress_next=True)
 
 
-def _manual_execution_status_sync(stage: dict[str, Any], *, workflow_status: str | None) -> dict[str, Any]:
-    if stage.get("no_execution_candidates"):
+def _manual_execution_status_sync(
+    stage: dict[str, Any],
+    by_name: dict[str, dict[str, Any]],
+    *,
+    workflow_status: str | None,
+) -> dict[str, Any]:
+    manual_execution_rows_exist = _has_manual_execution_rows(by_name)
+    if stage.get("no_execution_candidates") and not manual_execution_rows_exist:
         return _result(DONE, "OPER9_17_EXEC_SYNC_SKIPPED_NO_CANDIDATES", "Skipped: No execution candidates.", suppress_next=True)
+    if stage.get("no_execution_candidates") and manual_execution_rows_exist:
+        if _has_any_status(stage, SYNCED_STATUSES):
+            return _result(
+                BLOCKED,
+                "OPER9_6_EXEC_SYNC_NOTION_SYNCED_WITHOUT_LOCAL_COMMIT",
+                "Notion is COMMITTED/SYNCED, but the local execution commit report is missing.",
+                suppress_next=True,
+                conflict=True,
+            )
+        return _result(BLOCKED, "OPER9_6_EXEC_SYNC_LOCAL_COMMIT_MISSING", "Execution commit report is required for status sync.", suppress_next=True)
     local = _local_status(stage)
     if local == BLOCKED and _has_any_status(stage, SYNCED_STATUSES):
         return _result(
@@ -391,6 +435,18 @@ def _local_status(stage: dict[str, Any] | None) -> str:
 
 def _has_rows(stage: dict[str, Any]) -> bool:
     return int(stage.get("notion_row_count") or 0) > 0
+
+
+def _has_manual_execution_rows(by_name: dict[str, dict[str, Any]]) -> bool:
+    return any(
+        _has_rows(by_name.get(name) or {})
+        for name in (
+            "MANUAL_EXECUTION_TEMPLATE",
+            "MANUAL_EXECUTION_PREVIEW",
+            "MANUAL_EXECUTION_COMMIT",
+            "MANUAL_EXECUTION_STATUS_SYNC",
+        )
+    )
 
 
 def _count_status(stage: dict[str, Any], statuses: set[str]) -> int:

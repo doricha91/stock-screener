@@ -680,7 +680,9 @@ OPER9-17 handles days with no execution candidates (BUY/SELL) in the Daily Plan.
 
 Guard Policy:
 
-- If the Daily Plan JSON (`daily_action_plan_YYYYMMDD.json`) contains zero execution candidates (action="EXECUTE", status="PENDING", side="BUY" or "SELL"), the Manual Execution loop is safely skipped.
+- The official Daily Plan execution candidate schema is `items[]` with `action in {"BUY", "SELL"}` and `quantity > 0`.
+- `action="EXECUTE"`, `status="PENDING"`, and `side="BUY"/"SELL"` are not the official Daily Plan candidate schema.
+- If the Daily Plan JSON (`daily_action_plan_YYYYMMDD.json`) contains zero official execution candidates, the Manual Execution loop is safely skipped.
 - Skipped stages:
   - `MANUAL_EXECUTION_TEMPLATE`
   - `MANUAL_EXECUTION_PREVIEW`
@@ -692,8 +694,17 @@ Guard Policy:
 - Local Notion evidence sidecars (`manual_execution_template_export_YYYYMMDD.json`) with `candidate_count=0` are also accepted as no-op success evidence.
 - Reconciliation rules ensure that the absence of Notion rows on a no-action day is not treated as a conflict or a pending export requirement.
 - This advancement only applies when execution candidates are zero; days with at least one candidate still require the full manual execution loop.
+- Manual Execution preview/commit artifacts or Notion Manual Execution rows suppress no-candidates skip so real execution days are not treated as no-action days.
+- If an execution commit report exists, `MANUAL_EXECUTION_STATUS_SYNC` is evaluated normally; no-candidates skip must not hide a required Notion status sync.
 
 This guard prevents the orchestrator from getting stuck on `MANUAL_EXECUTION_TEMPLATE` when there is nothing to export, allowing a smooth transition to the daily review phase.
+
+OPER9-20C alignment:
+
+- Candidate counting is shared through `core/paper_daily_plan_candidates.py`.
+- `is_daily_plan_execution_candidate(item)` returns true only for official Daily Plan BUY/SELL items with positive quantity and a symbol.
+- Orchestrator and Manual Execution Notion export use the same helper.
+- The status JSON includes `candidate_count_rule=items.action_in_buy_sell_quantity_positive.v1`.
 
 ## 20. OPER9-18 No-Action Day Daily Review Completion Guard Addendum
 

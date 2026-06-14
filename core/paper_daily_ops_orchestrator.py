@@ -31,6 +31,7 @@ from core.paper_daily_ops_notion_status import (
 )
 from core.paper_daily_ops_operator_summary import build_operator_summary
 from core.paper_daily_ops_reconciliation import apply_reconciliation
+from core.paper_daily_plan_candidates import CANDIDATE_COUNT_RULE, count_daily_plan_execution_candidates
 from core.paper_status import WORKFLOW_REVIEW_DONE, run_paper_status
 
 
@@ -176,6 +177,8 @@ def build_daily_ops_status(
     workflow_status = _safe_workflow_status(root, normalized_trade_date)
     _apply_notion_report(stages, notion_report)
     reconciliation_summary = apply_reconciliation(stages, workflow_status=workflow_status)
+    _suppress_manual_execution_no_candidate_skips_when_notion_rows_exist(stages)
+    _ensure_ready_stage_commands(stages, stage_context)
     terminal = _is_terminal_workflow(workflow_status, stages)
     if terminal:
         for stage in stages:
@@ -443,9 +446,13 @@ def _stage_manual_execution_template(ctx: dict[str, Any]) -> dict[str, Any]:
     )
     evidence = _notion_evidence(ctx, EVIDENCE_MANUAL_EXECUTION_TEMPLATE)
     evidence_payload = _read_json(evidence.path) if evidence.checked and evidence.path else None
+    downstream_evidence_exists = (
+        ctx["artifacts"]["execution_preview_json"].exists()
+        or ctx["artifacts"]["execution_commit_json"].exists()
+    )
 
     # NO-CANDIDATES GUARD
-    if candidate_count == 0:
+    if candidate_count == 0 and not downstream_evidence_exists:
         return _stage(
             "MANUAL_EXECUTION_TEMPLATE",
             DONE,
@@ -453,9 +460,16 @@ def _stage_manual_execution_template(ctx: dict[str, Any]) -> dict[str, Any]:
             no_execution_candidates=True,
             execution_candidate_count=0,
             plan_candidate_source="daily_plan_json",
+            candidate_count_rule=CANDIDATE_COUNT_RULE,
             evidence=evidence
         )
-    if evidence.checked and evidence.evidence_status == "PASS" and evidence_payload and evidence_payload.get("candidate_count") == 0:
+    if (
+        evidence.checked
+        and evidence.evidence_status == "PASS"
+        and evidence_payload
+        and evidence_payload.get("candidate_count") == 0
+        and not downstream_evidence_exists
+    ):
         return _stage(
             "MANUAL_EXECUTION_TEMPLATE",
             DONE,
@@ -463,13 +477,15 @@ def _stage_manual_execution_template(ctx: dict[str, Any]) -> dict[str, Any]:
             no_execution_candidates=True,
             execution_candidate_count=0,
             plan_candidate_source="export_evidence",
+            candidate_count_rule=CANDIDATE_COUNT_RULE,
             evidence=evidence
         )
 
     extra_kwargs = {
         "execution_candidate_count": candidate_count,
         "plan_candidate_source": "daily_plan_json" if candidate_count is not None else "unknown",
-        "no_execution_candidates": False
+        "no_execution_candidates": False,
+        "candidate_count_rule": CANDIDATE_COUNT_RULE,
     }
 
     if evidence.checked:
@@ -493,16 +509,6 @@ def _stage_manual_execution_template(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stage_manual_execution_preview(ctx: dict[str, Any]) -> dict[str, Any]:
-    template = _stage_manual_execution_template(ctx)
-    if template.get("no_execution_candidates"):
-        return _stage(
-            "MANUAL_EXECUTION_PREVIEW",
-            DONE,
-            required=[],
-            note="Skipped: No execution candidates.",
-            no_execution_candidates=True
-        )
-
     artifacts = ctx["artifacts"]
     required = [artifacts["execution_preview_json"]]
     if artifacts["execution_preview_json"].exists():
@@ -517,6 +523,16 @@ def _stage_manual_execution_preview(ctx: dict[str, Any]) -> dict[str, Any]:
         return _stage("MANUAL_EXECUTION_PREVIEW", status, required=required, warnings=warnings)
     if _has_legacy_for(ctx, ["execution_preview_json"]):
         return _stage("MANUAL_EXECUTION_PREVIEW", BLOCKED, required=required, blockers=["Legacy paper_test preview exists but cannot be used."])
+    template = _stage_manual_execution_template(ctx)
+    if template.get("no_execution_candidates"):
+        return _stage(
+            "MANUAL_EXECUTION_PREVIEW",
+            DONE,
+            required=[],
+            note="Skipped: No execution candidates.",
+            no_execution_candidates=True,
+            candidate_count_rule=template.get("candidate_count_rule"),
+        )
     return _stage(
         "MANUAL_EXECUTION_PREVIEW",
         READY,
@@ -526,16 +542,6 @@ def _stage_manual_execution_preview(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stage_manual_execution_commit(ctx: dict[str, Any]) -> dict[str, Any]:
-    template = _stage_manual_execution_template(ctx)
-    if template.get("no_execution_candidates"):
-        return _stage(
-            "MANUAL_EXECUTION_COMMIT",
-            DONE,
-            required=[],
-            note="Skipped: No execution candidates.",
-            no_execution_candidates=True
-        )
-
     artifacts = ctx["artifacts"]
     required = [artifacts["execution_commit_json"]]
     commit_exists = artifacts["execution_commit_json"].exists()
@@ -549,6 +555,16 @@ def _stage_manual_execution_commit(ctx: dict[str, Any]) -> dict[str, Any]:
             WARNING,
             required=required,
             warnings=["Execution ledger or snapshot evidence exists without a matching commit report; commit is not recommended."],
+        )
+    template = _stage_manual_execution_template(ctx)
+    if template.get("no_execution_candidates"):
+        return _stage(
+            "MANUAL_EXECUTION_COMMIT",
+            DONE,
+            required=[],
+            note="Skipped: No execution candidates.",
+            no_execution_candidates=True,
+            candidate_count_rule=template.get("candidate_count_rule"),
         )
     preview = _stage_manual_execution_preview(ctx)
     if preview["status"] not in {DONE, WARNING}:
@@ -565,18 +581,18 @@ def _stage_manual_execution_commit(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stage_manual_execution_status_sync(ctx: dict[str, Any]) -> dict[str, Any]:
-    template = _stage_manual_execution_template(ctx)
-    if template.get("no_execution_candidates"):
-        return _stage(
-            "MANUAL_EXECUTION_STATUS_SYNC",
-            DONE,
-            required=[],
-            note="Skipped: No execution candidates.",
-            no_execution_candidates=True
-        )
-
     artifacts = ctx["artifacts"]
     if not artifacts["execution_commit_json"].exists():
+        template = _stage_manual_execution_template(ctx)
+        if template.get("no_execution_candidates"):
+            return _stage(
+                "MANUAL_EXECUTION_STATUS_SYNC",
+                DONE,
+                required=[],
+                note="Skipped: No execution candidates.",
+                no_execution_candidates=True,
+                candidate_count_rule=template.get("candidate_count_rule"),
+            )
         return _stage("MANUAL_EXECUTION_STATUS_SYNC", BLOCKED, required=[artifacts["execution_commit_json"]], blockers=["Execution commit report is required for status sync."])
     command = (
         f"python scripts\\sync_notion_execution_status.py --date {ctx['trade_date']} --account-id {ctx['account_id']} "
@@ -984,6 +1000,122 @@ def _first_next_command(stages: list[dict[str, Any]], *, workflow_status: str | 
     return None
 
 
+def _ensure_ready_stage_commands(stages: list[dict[str, Any]], ctx: dict[str, Any]) -> None:
+    for stage in stages:
+        if stage.get("status") != READY or stage.get("next_command"):
+            continue
+        command = _default_ready_command(str(stage.get("stage_name") or ""), ctx)
+        if command:
+            stage["next_command"] = command
+            stage["next_action"] = _next_action(command)
+
+
+def _suppress_manual_execution_no_candidate_skips_when_notion_rows_exist(stages: list[dict[str, Any]]) -> None:
+    if not _manual_execution_notion_rows_exist(stages):
+        return
+    warning = "Manual Execution Notion rows exist; no-candidates skip was suppressed."
+    for stage in stages:
+        if stage.get("stage_name") not in {
+            "MANUAL_EXECUTION_TEMPLATE",
+            "MANUAL_EXECUTION_PREVIEW",
+            "MANUAL_EXECUTION_COMMIT",
+            "MANUAL_EXECUTION_STATUS_SYNC",
+        }:
+            continue
+        if not stage.get("no_execution_candidates"):
+            continue
+        stage["no_execution_candidates"] = False
+        warnings = list(stage.get("warnings") or [])
+        if warning not in warnings:
+            warnings.append(warning)
+        stage["warnings"] = warnings
+        if stage.get("stage_name") == "MANUAL_EXECUTION_PREVIEW" and _is_no_candidate_skip(stage):
+            stage["status"] = READY
+            stage["note"] = "Manual Execution Notion rows exist; run execution preview instead of no-op skip."
+        elif stage.get("stage_name") == "MANUAL_EXECUTION_COMMIT" and _is_no_candidate_skip(stage):
+            stage["status"] = BLOCKED
+            stage["blockers"] = ["Execution preview JSON is required before commit recommendation."]
+            stage["note"] = "Manual Execution Notion rows exist; commit cannot be skipped as no-action."
+        elif stage.get("stage_name") == "MANUAL_EXECUTION_STATUS_SYNC" and _is_no_candidate_skip(stage):
+            stage["status"] = BLOCKED
+            stage["blockers"] = ["Execution commit report is required for status sync."]
+            stage["note"] = "Manual Execution Notion rows exist; status sync cannot be skipped as no-action."
+
+
+def _manual_execution_notion_rows_exist(stages: list[dict[str, Any]]) -> bool:
+    return any(
+        stage.get("stage_name")
+        in {
+            "MANUAL_EXECUTION_TEMPLATE",
+            "MANUAL_EXECUTION_PREVIEW",
+            "MANUAL_EXECUTION_COMMIT",
+            "MANUAL_EXECUTION_STATUS_SYNC",
+        }
+        and int(stage.get("notion_row_count") or 0) > 0
+        for stage in stages
+    )
+
+
+def _is_no_candidate_skip(stage: dict[str, Any]) -> bool:
+    return (
+        stage.get("status") == DONE
+        and str(stage.get("note") or "").lower().startswith("skipped: no execution candidates")
+    )
+
+
+def _default_ready_command(stage_name: str, ctx: dict[str, Any]) -> str | None:
+    artifacts = ctx["artifacts"]
+    account_id = ctx["account_id"]
+    data_date = ctx["data_date"]
+    trade_date = ctx["trade_date"]
+    if stage_name == "DATA_FRESHNESS":
+        return f"python scripts\\paper.py data-freshness --date {data_date}"
+    if stage_name == "DAILY_PLAN":
+        return f"python scripts\\paper.py plan --data-date {data_date} --trade-date {trade_date} --account-id {account_id}"
+    if stage_name == "DAILY_PLAN_NOTION_EXPORT":
+        return (
+            f"python scripts\\export_paper_to_notion.py --daily-plan --account-id {account_id} "
+            f"--date {trade_date} --confirm-actual --json"
+        )
+    if stage_name == "MANUAL_EXECUTION_TEMPLATE":
+        return (
+            f"python scripts\\export_paper_to_notion.py --manual-execution-template --account-id {account_id} "
+            f"--date {trade_date} --confirm-actual --json"
+        )
+    if stage_name == "MANUAL_EXECUTION_PREVIEW":
+        return f"python scripts\\import_notion_executions.py --date {trade_date} --account-id {account_id} --preview --json"
+    if stage_name == "MANUAL_EXECUTION_COMMIT":
+        return (
+            f"python scripts\\import_notion_executions.py --date {trade_date} --account-id {account_id} "
+            f"--commit --preview-json \"{_path_str(artifacts['execution_preview_json'])}\" --json"
+        )
+    if stage_name == "MANUAL_EXECUTION_STATUS_SYNC":
+        return (
+            f"python scripts\\sync_notion_execution_status.py --date {trade_date} --account-id {account_id} "
+            f"--commit-report \"{_path_str(artifacts['execution_commit_json'])}\" --json"
+        )
+    if stage_name == "DAILY_REVIEW":
+        return f"python scripts\\paper.py review --account-id {account_id} --date {trade_date}"
+    if stage_name == "MANUAL_REVIEW_TEMPLATE":
+        return (
+            f"python scripts\\export_paper_to_notion.py --manual-review-template --account-id {account_id} "
+            f"--date {trade_date} --confirm-actual --json"
+        )
+    if stage_name == "MANUAL_REVIEW_PREVIEW":
+        return f"python scripts\\import_notion_reviews.py --date {trade_date} --account-id {account_id} --preview --json"
+    if stage_name == "MANUAL_REVIEW_APPEND":
+        return (
+            f"python scripts\\import_notion_reviews.py --date {trade_date} --account-id {account_id} "
+            f"--commit --preview-json \"{_path_str(artifacts['review_preview_json'])}\" --json"
+        )
+    if stage_name == "MANUAL_REVIEW_STATUS_SYNC":
+        return (
+            f"python scripts\\sync_notion_review_status.py --date {trade_date} --account-id {account_id} "
+            f"--commit-report \"{_path_str(artifacts['review_commit_json'])}\" --json"
+        )
+    return None
+
+
 def _is_stale_next_command_stage(
     stage: dict[str, Any],
     *,
@@ -1249,13 +1381,6 @@ def _daily_plan_execution_candidate_count(plan_json_path: Path) -> int | None:
         items = payload["items"]
         if not isinstance(items, list):
             return None
-        count = 0
-        for item in items:
-            action = str(item.get("action") or "").upper()
-            status = str(item.get("status") or "").upper()
-            side = str(item.get("side") or "").upper()
-            if action == "EXECUTE" and status == "PENDING" and side in {"BUY", "SELL"}:
-                count += 1
-        return count
+        return count_daily_plan_execution_candidates(payload)
     except Exception:
         return None

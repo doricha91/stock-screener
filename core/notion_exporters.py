@@ -38,6 +38,7 @@ from core.notion_client import (
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
 from core.paper_account_paths import build_paper_account_paths
+from core.paper_daily_plan_candidates import is_daily_plan_execution_candidate
 from core.paths import (
     paper_account_snapshot_path,
     paper_daily_action_plan_path,
@@ -834,12 +835,12 @@ def _manual_execution_template_candidates_from_sidecar(
         if not isinstance(item, dict):
             failed.append({"index": str(index), "error": "item is not an object"})
             continue
-        side = str(item.get("action") or item.get("type") or "").strip().upper()
+        side = str(item.get("action") or "").strip().upper()
         if side not in {"BUY", "SELL"}:
             continue
         symbol = str(item.get("symbol") or "").strip().upper()
-        quantity = _safe_float(item.get("quantity") if "quantity" in item else item.get("shares"))
-        if not symbol or quantity is None or quantity <= 0:
+        quantity = _safe_float(item.get("quantity"))
+        if not is_daily_plan_execution_candidate(item):
             failed.append(
                 {
                     "index": str(index),

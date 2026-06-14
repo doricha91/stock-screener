@@ -1297,6 +1297,34 @@ def test_manual_execution_template_export_empty_items_returns_zero_candidates(tm
     assert summary["failed_count"] == 0
 
 
+def test_manual_execution_template_export_uses_official_candidate_schema(tmp_path):
+    root = tmp_path / "paper_accounts" / "paper_pilot_202606"
+    _seed_daily_plan_sidecar(
+        root,
+        items=[
+            {"symbol": "AAPL", "action": "BUY", "quantity": 10, "price": 100.0},
+            {"symbol": "MSFT", "action": "SELL", "quantity": 2, "price": 200.0},
+            {"symbol": "NVDA", "type": "BUY", "shares": 1, "price": 300.0},
+            {"symbol": "TSLA", "action": "EXECUTE", "status": "PENDING", "side": "BUY", "quantity": 3},
+            {"symbol": "GOOG", "action": "BUY", "quantity": 0},
+        ],
+    )
+
+    summary = export_manual_execution_template_to_notion(
+        client=FakeManualReviewTemplateClient(),
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_pilot_202606",
+        paper_root=root,
+        date_str="2026-06-08",
+        dry_run=True,
+    )
+
+    assert summary["candidate_count"] == 2
+    assert [item["symbol"] for item in summary["candidates"]] == ["AAPL", "MSFT"]
+    assert summary["failed_count"] == 1
+
+
 def test_paper_default_legacy_page_can_be_reused(tmp_path):
     root = tmp_path / "paper_test"
     _seed_daily_plan(root)

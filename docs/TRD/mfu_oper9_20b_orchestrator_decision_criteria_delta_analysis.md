@@ -365,4 +365,27 @@ This task did not run:
 - broker/API/order commands
 - ledger/DB mutation commands
 
+## 15. MFU-OPER9-20C Resolution Note
+
+20B identified the no-execution-candidates schema mismatch and priority collision. MFU-OPER9-20C resolves the core implementation issues as follows.
+
+- Official Daily Plan execution candidate schema is now:
+  - source: `daily_action_plan_YYYYMMDD.json` `items[]`
+  - `action in {"BUY", "SELL"}`
+  - `quantity > 0`
+  - `symbol` present
+- The legacy-looking `action=EXECUTE/status=PENDING/side=BUY|SELL` shape is not the official candidate schema and is not the primary count rule.
+- Shared helper was added in `core.paper_daily_plan_candidates`:
+  - `is_daily_plan_execution_candidate(item)`
+  - `extract_daily_plan_execution_candidates(plan)`
+  - `count_daily_plan_execution_candidates(plan)`
+- Orchestrator and Manual Execution Notion export now share the same candidate helper.
+- `candidate_count_rule` is exposed as `items.action_in_buy_sell_quantity_positive.v1`.
+- No-candidates skip is suppressed when downstream execution evidence exists:
+  - execution preview artifact
+  - execution commit artifact
+  - Manual Execution Notion rows
+- If a commit report exists, `MANUAL_EXECUTION_STATUS_SYNC` stays actionable and is not skipped as no-action.
+- The 2026-06-15 case now counts 9 execution candidates and no longer sets `no_execution_candidates=true`.
+
 Read-only artifact inspection included existing JSON files under `outputs\paper_accounts\paper_orch_smoke_202606` and existing status snapshots. These operational outputs were not modified and are not included in this commit.
