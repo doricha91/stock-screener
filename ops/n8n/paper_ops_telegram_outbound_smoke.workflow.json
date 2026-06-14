@@ -1,0 +1,90 @@
+{
+  "id": "q7KpPaperOpsOutbound",
+  "name": "Paper Ops Telegram Outbound Smoke",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "9b7f6f51-8c89-4c94-874e-6b264ca68c76",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cat /workspace/stock_screener_ops/status_latest.txt"
+      },
+      "id": "09d33479-49ec-46a3-8913-5bc48c17bda4",
+      "name": "Read status_latest.txt",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "8025114939",
+        "text": "={{ '<pre>' + $json.stdout.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "7752afc4-a895-47fc-afec-a6c5af283996",
+      "name": "Send status to Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -80,
+        0
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "dxqXtI0CyciQr0PG",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read status_latest.txt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read status_latest.txt": {
+      "main": [
+        [
+          {
+            "node": "Send status to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

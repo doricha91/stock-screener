@@ -122,6 +122,38 @@ python scripts\n8n_paper_ops_runner.py status --workspace outputs\n8n_runner_smo
 python scripts\n8n_paper_ops_runner.py eod_dryrun --workspace outputs\n8n_runner_smoke
 ```
 
+### 0.5 Telegram outbound smoke
+
+Telegram Trigger는 public HTTPS `WEBHOOK_URL`이 없으면 activation이 실패할 수 있다. Trigger 문제와 Telegram outbound credential 문제를 분리하기 위해 수동 실행용 smoke workflow를 별도로 둔다.
+
+n8n workflow:
+
+```text
+Paper Ops Telegram Outbound Smoke
+```
+
+구조:
+
+```text
+Manual Trigger
+→ Execute Command
+→ Telegram Send Message
+```
+
+Execute Command는 아래 고정 명령만 실행한다.
+
+```sh
+cat /workspace/stock_screener_ops/status_latest.txt
+```
+
+Telegram Send Message:
+
+- Chat ID: `8025114939`
+- Text: stdout을 HTML `<pre>`로 감싼 값
+- Additional Fields: `parse_mode=HTML`, `appendAttribution=false`
+
+이 smoke workflow는 active 운영 workflow가 아니며, n8n UI 또는 CLI에서 수동 실행해 Telegram outbound만 검증한다.
+
 ## 1. Quick Start
 
 매일 먼저 운영 변수 3개를 정한다.

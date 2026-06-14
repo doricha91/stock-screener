@@ -1,0 +1,349 @@
+{
+  "id": "q7KpPaperOpsTgMvp",
+  "name": "Paper Ops Telegram Read MVP",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "0d4ea25b-0d13-4e09-9ff9-19e8fe0d4a1b",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -640,
+        0
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "dxqXtI0CyciQr0PG",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.message.text }}",
+                    "rightValue": "/context",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "context"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.message.text }}",
+                    "rightValue": "/status",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "status"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.message.text }}",
+                    "rightValue": "/eod_dryrun",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "eod_dryrun"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "default",
+          "ignoreCase": false
+        }
+      },
+      "id": "b055e7db-a21c-42f5-a64f-bfda226b7072",
+      "name": "Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cat /workspace/stock_screener_ops/context_latest.txt"
+      },
+      "id": "fe95ba53-0a42-4a7b-9273-b462a6237f04",
+      "name": "Read context_latest.txt",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -128,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cat /workspace/stock_screener_ops/status_latest.txt"
+      },
+      "id": "4f7ff133-605c-406f-b8e0-96c46324ff56",
+      "name": "Read status_latest.txt",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -128,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cat /workspace/stock_screener_ops/eod_dryrun_latest.txt"
+      },
+      "id": "ea7bd172-9576-4994-880e-fce3ca2e4bdb",
+      "name": "Read eod_dryrun_latest.txt",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -128,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "8025114939",
+        "text": "={{ '<pre>' + $json.stdout.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "08286226-a6a7-48ff-8979-03b770f49bfa",
+      "name": "Send context",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        144,
+        -240
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "dxqXtI0CyciQr0PG",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "8025114939",
+        "text": "={{ '<pre>' + $json.stdout.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "f9b040e0-4396-4e44-b3ec-b4b63a065e56",
+      "name": "Send status",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        144,
+        -80
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "dxqXtI0CyciQr0PG",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "8025114939",
+        "text": "={{ '<pre>' + $json.stdout.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "c8c466c3-90cd-4197-a884-4a5a29f98487",
+      "name": "Send eod_dryrun",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        144,
+        80
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "dxqXtI0CyciQr0PG",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "8025114939",
+        "text": "지원 명령:\n/context\n/status\n/eod_dryrun",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "343438fc-c1b4-4ab7-89d2-5335d1d2be49",
+      "name": "Send unsupported command",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -128,
+        264
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "dxqXtI0CyciQr0PG",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Read context_latest.txt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read status_latest.txt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read eod_dryrun_latest.txt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send unsupported command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read context_latest.txt": {
+      "main": [
+        [
+          {
+            "node": "Send context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read status_latest.txt": {
+      "main": [
+        [
+          {
+            "node": "Send status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read eod_dryrun_latest.txt": {
+      "main": [
+        [
+          {
+            "node": "Send eod_dryrun",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
