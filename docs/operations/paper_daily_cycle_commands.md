@@ -18,6 +18,110 @@
 - Notion은 입력, 검토, staging, 상태 표시 UI다.
 - broker/API/order 실행은 이 문서 범위가 아니다.
 
+## 0. n8n/Telegram File-Based Runner MVP
+
+Windows conda 환경은 n8n Docker container에서 직접 실행하지 않는다. n8n은 Windows runner script를 호출하거나 파일을 읽는 방식으로 연동하고, runner는 Telegram 전송용 txt와 원본 결과 파일을 아래 workspace에 저장한다.
+
+```text
+D:\n8n\workspace\stock_screener_ops
+```
+
+context 파일:
+
+```text
+D:\n8n\workspace\stock_screener_ops\context.json
+```
+
+context 필드:
+
+- `account_id`
+- `data_date`
+- `trade_date`
+
+초기 허용 command key는 아래 세 개뿐이다.
+
+- `context`
+- `status`
+- `eod_dryrun`
+
+runner는 raw shell command를 받지 않는다. 내부 allowlist에 묶인 Python argv만 `shell=False`로 실행한다. commit/sync/plan/prepare/review 계열 write command는 이 runner에서 구현하지 않는다.
+
+### 0.1 Context 저장
+
+```cmd
+cd /d D:\python\StockScreener
+conda activate HANTU311_64
+
+python scripts\n8n_paper_ops_runner.py context --account-id paper_pilot_202606 --data-date 2026-06-12 --trade-date 2026-06-15
+```
+
+생성/갱신 파일:
+
+- `D:\n8n\workspace\stock_screener_ops\context.json`
+- `D:\n8n\workspace\stock_screener_ops\context_latest.txt`
+
+### 0.2 Status 알림 생성
+
+```cmd
+python scripts\n8n_paper_ops_runner.py status
+```
+
+내부 실행 명령:
+
+```cmd
+python scripts\paper_daily_ops.py status --account-id <context.account_id> --data-date <context.data_date> --trade-date <context.trade_date> --json --include-notion-read
+```
+
+생성/갱신 파일:
+
+- `D:\n8n\workspace\stock_screener_ops\status_latest.txt`
+- `D:\n8n\workspace\stock_screener_ops\status_latest.json`
+
+Telegram은 `status_latest.txt`를 전송한다.
+
+### 0.3 EOD dry-run 알림 생성
+
+```cmd
+python scripts\n8n_paper_ops_runner.py eod_dryrun
+```
+
+내부 실행 명령:
+
+```cmd
+python scripts\paper.py eod --date <context.trade_date> --account-id <context.account_id> --dry-run
+```
+
+생성/갱신 파일:
+
+- `D:\n8n\workspace\stock_screener_ops\eod_dryrun_latest.txt`
+- `D:\n8n\workspace\stock_screener_ops\eod_dryrun_latest.raw.txt`
+
+Telegram은 `eod_dryrun_latest.txt`를 전송한다. `eod_dryrun` PASS 조건은 아래 필드를 모두 만족해야 한다.
+
+- `eod_mode=accounting_close`
+- `would_append_execution_log=false`
+- `would_write_current_state=true`
+- `would_write_account_snapshot=true`
+- `would_write_position_snapshot=true`
+
+조건을 만족하지 않거나 실행이 실패해도 runner는 Telegram 전송 가능한 error/fail txt를 생성한다.
+
+### 0.4 Smoke 명령 예시
+
+프로젝트 내부 검증:
+
+```cmd
+python -m pytest tests\test_n8n_paper_ops_runner.py --basetemp _tmp_pytest_n8n
+```
+
+실제 workspace를 건드리지 않는 임시 workspace smoke:
+
+```cmd
+python scripts\n8n_paper_ops_runner.py context --workspace outputs\n8n_runner_smoke --account-id paper_pilot_202606 --data-date 2026-06-12 --trade-date 2026-06-15
+python scripts\n8n_paper_ops_runner.py status --workspace outputs\n8n_runner_smoke
+python scripts\n8n_paper_ops_runner.py eod_dryrun --workspace outputs\n8n_runner_smoke
+```
+
 ## 1. Quick Start
 
 매일 먼저 운영 변수 3개를 정한다.
