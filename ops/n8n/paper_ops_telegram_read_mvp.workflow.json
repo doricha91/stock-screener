@@ -98,6 +98,29 @@
               },
               "renameOutput": true,
               "outputKey": "eod_dryrun"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.message.text }}",
+                    "rightValue": "/help",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "help"
             }
           ]
         },
@@ -238,9 +261,10 @@
         "resource": "message",
         "operation": "sendMessage",
         "chatId": "8025114939",
-        "text": "지원 명령:\n/context\n/status\n/eod_dryrun",
+        "text": "={{ '지원하지 않는 명령입니다.\\n\\n지원 명령:\\n/context - 현재 Paper Ops context 확인\\n/status - Daily Ops 상태 확인\\n/eod_dryrun - EOD dry-run 결과 확인\\n/help - 지원 명령 보기' }}",
         "additionalFields": {
-          "appendAttribution": false
+          "appendAttribution": false,
+          "parse_mode": "HTML"
         }
       },
       "id": "343438fc-c1b4-4ab7-89d2-5335d1d2be49",
@@ -249,7 +273,33 @@
       "typeVersion": 1.2,
       "position": [
         -128,
-        264
+        320
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "dxqXtI0CyciQr0PG",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "8025114939",
+        "text": "={{ '지원 명령:\\n/context - 현재 Paper Ops context 확인\\n/status - Daily Ops 상태 확인\\n/eod_dryrun - EOD dry-run 결과 확인\\n/help - 지원 명령 보기' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "9574f8de-47b1-42c4-bf72-7fc276f2d5e5",
+      "name": "Send help",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -128,
+        200
       ],
       "credentials": {
         "telegramApi": {
@@ -290,6 +340,13 @@
         [
           {
             "node": "Read eod_dryrun_latest.txt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send help",
             "type": "main",
             "index": 0
           }
