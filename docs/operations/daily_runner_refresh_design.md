@@ -253,61 +253,121 @@ Operational guardrails:
 | 7. trade_date cannot be resolved | Resolved latest complete DB date. | Empty/unset. | `FAIL` | Provide explicit trade date or add/repair market calendar support. |
 | 8. account_id absent or context corrupted | Not resolved. | Not resolved. | `FAIL` | Recreate context with `context --account-id --data-date --trade-date` or pass account explicitly to future `daily_refresh`. |
 
-## Proposed daily_refresh Contract
+## Implemented daily_refresh Contract
 
-Future command:
+Command:
 
 ```cmd
 python scripts\n8n_paper_ops_runner.py daily_refresh
 ```
 
-The command is not implemented in this stage.
+The command is implemented in `scripts/n8n_paper_ops_runner.py`. It is a local Windows runner command only. n8n and Telegram still do not execute Python directly in this stage.
 
-Proposed sequence:
+Inputs:
+
+| Input | Purpose |
+| --- | --- |
+| `--account-id` | Optional explicit account id. Highest priority. |
+| existing `context.json` | Used only to resolve `account_id` when `--account-id` is omitted. |
+| `--db-path` | Optional market DB override. Defaults to `core.paths.market_db_path()`. |
+| `--as-of-date` | Optional date for stale checks. Defaults to local today. |
+| `--stale-threshold-days` | Optional stale threshold. Default is `3`. |
+| `--workspace` | Optional output workspace override. |
+| `--timeout-seconds` | Timeout passed to status and EOD dry-run subprocesses. |
+
+Implemented sequence:
 
 ```text
 1. Resolve account_id.
-2. Resolve data_date / trade_date with read-only market DB checks.
+2. Resolve data_date / trade_date with resolve_daily_refresh_dates().
 3. Update context.json and context_latest.txt.
 4. Run status refresh.
 5. Run eod_dryrun refresh.
 6. Write daily_refresh_latest.txt and daily_refresh_latest.json.
 ```
 
-Proposed new output files:
+Date resolution failure short-circuits the command:
+
+```text
+resolve_dates FAIL
+-> do not write context.json/context_latest.txt
+-> do not write status_latest.txt/json
+-> do not write eod_dryrun_latest.txt/raw.txt
+-> write daily_refresh_latest.txt/json only
+-> exit code 1
+```
+
+Stage failure policy:
+
+| Stage | Failure behavior |
+| --- | --- |
+| `resolve_dates` | Stop immediately. Do not update context/status/eod files. |
+| `context` | Stop. Do not run status or EOD dry-run. |
+| `status` | Stop. Do not run EOD dry-run. |
+| `eod_dryrun` | Write daily refresh summary with final `runner_result=FAIL`. |
+
+The status-failure policy intentionally skips EOD dry-run because a failed status refresh means the operator state and execution candidate context may be inconsistent.
+
+Output files:
 
 ```text
 D:\n8n\workspace\stock_screener_ops\daily_refresh_latest.txt
 D:\n8n\workspace\stock_screener_ops\daily_refresh_latest.json
 ```
 
-Proposed `daily_refresh_latest.txt`:
+`daily_refresh_latest.txt`:
 
 ```text
 Daily Runner Refresh
 runner_result: PASS/WARNING/FAIL
 generated_at: ...
+stage: ...                    # only when a stage failed
 account_id: ...
 data_date: ...
 trade_date: ...
 source_data_max_date: ...
-source_data_ready_date: ...
 stale: true/false
 stale_days: ...
+context_result: PASS/FAIL/-
 status_result: PASS/FAIL
 eod_dryrun_result: PASS/FAIL
 recommended_operator_action: ...
 ```
 
-Proposed exit code:
+`daily_refresh_latest.json` includes the date resolution payload and stage results:
+
+```json
+{
+  "runner_result": "PASS",
+  "account_id": "paper_orch_smoke_202606",
+  "data_date": "2026-06-12",
+  "trade_date": "2026-06-15",
+  "source_data_max_date": "2026-06-12",
+  "date_resolution": {
+    "runner_result": "PASS",
+    "reason": "latest complete market data date found in DB"
+  },
+  "stages": {
+    "resolve_dates": {"result": "PASS"},
+    "context": {"result": "PASS", "exit_code": 0},
+    "status": {"result": "PASS", "exit_code": 0},
+    "eod_dryrun": {"result": "PASS", "exit_code": 0}
+  },
+  "recommended_operator_action": "NONE"
+}
+```
+
+Exit code:
 
 | Condition | Exit code |
 | --- | --- |
 | All stages PASS | `0` |
-| Refresh completed with WARNING but files are usable | `0` initially, with `runner_result: WARNING`; consider `1` only if Task Scheduler needs warning-as-failure semantics. |
+| Date resolution WARNING and all downstream stages PASS | `0`, with `runner_result: WARNING`. |
 | Date resolution fails, context cannot be loaded/written, or required stage fails | `1` |
 
 The command must preserve existing `context`, `status`, and `eod_dryrun` behavior.
+
+n8n `/refresh_status`, Windows wrapper, and Task Scheduler integration are still not implemented in this stage.
 
 ## Implemented Tests
 
@@ -325,21 +385,24 @@ Covered cases:
 | Old complete `data_date` | `WARNING`, `stale=true`. |
 | Missing `account_id` | `FAIL`. |
 | Helper side effects | no `context.json`, `context_latest.txt`, `status_latest.txt`, or `eod_dryrun_latest.txt` files are written. |
+| `daily_refresh` PASS | context, status, EOD dry-run, and daily refresh files are written. |
+| `daily_refresh` date FAIL | only `daily_refresh_latest.txt/json` are written; existing latest files are not overwritten. |
+| `daily_refresh` WARNING | downstream stages run; final result remains `WARNING` when stages pass. |
+| `daily_refresh` status failure | EOD dry-run is skipped; final result is `FAIL`. |
+| `daily_refresh` EOD dry-run failure | final result is `FAIL`. |
 
 ## Next Implementation Step
 
-Step 6-2B should implement `daily_refresh` orchestration on top of `resolve_daily_refresh_dates()`:
+Step 6-3 should add a Windows Task Scheduler wrapper script that calls:
 
-1. Resolve account/date.
-2. If resolution is `FAIL`, write `daily_refresh_latest.txt/json` only and stop.
-3. If resolution is `PASS` or accepted `WARNING`, write context.
-4. Run existing `status` and `eod_dryrun` handlers.
-5. Write `daily_refresh_latest.txt/json`.
-6. Keep existing individual commands unchanged.
+```cmd
+python scripts\n8n_paper_ops_runner.py daily_refresh
+```
+
+The wrapper should preserve the current read-only runner contract, capture logs, and return a non-zero exit code when `daily_refresh` fails.
 
 ## Out of Scope For This Stage
 
-- Implementing `daily_refresh`
 - Adding Windows `.bat` or PowerShell wrappers
 - Registering Task Scheduler
 - Changing n8n workflow or adding `/refresh_status`

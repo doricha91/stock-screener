@@ -10,6 +10,20 @@ from pathlib import Path
 from scripts import n8n_paper_ops_runner as runner
 
 
+def test_runner_script_can_be_invoked_directly() -> None:
+    completed = subprocess.run(
+        [sys.executable, "scripts\\n8n_paper_ops_runner.py", "--help"],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+    )
+
+    assert completed.returncode == 0
+    assert "daily_refresh" in completed.stdout
+
+
 def _write_context(workspace: Path) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "context.json").write_text(
@@ -357,3 +371,259 @@ def test_resolve_daily_refresh_dates_does_not_write_runner_files(tmp_path: Path)
     assert not (tmp_path / "context_latest.txt").exists()
     assert not (tmp_path / "status_latest.txt").exists()
     assert not (tmp_path / "eod_dryrun_latest.txt").exists()
+
+
+def _fake_status_stdout() -> str:
+    return json.dumps(
+        {
+            "overall_status": "PASS",
+            "workflow_status": "FINAL_STATUS",
+            "operator_summary": {
+                "current_step": "FINAL_STATUS",
+                "current_step_status": "DONE",
+                "recommended_operator_action": "NONE",
+                "risk_level": "SAFE",
+                "requires_manual_approval": False,
+                "terminal": True,
+                "next_command": None,
+                "warnings": [],
+                "blockers": [],
+            },
+        }
+    )
+
+
+def _fake_eod_stdout(append_execution_log: str = "false") -> str:
+    return "\n".join(
+        [
+            "EOD roll-forward intent:",
+            "  eod_mode: accounting_close",
+            "  execution_candidate_count: 0",
+            "  execution_log_rows_for_date: 0",
+            "  ready_preview_count: 0",
+            "  no_action_day: true",
+            f"  would_append_execution_log: {append_execution_log}",
+            "  would_write_current_state: true",
+            "  would_write_account_snapshot: true",
+            "  would_write_position_snapshot: true",
+            "  source_snapshot_date: 2026-06-12",
+            "  target_snapshot_date: 2026-06-15",
+        ]
+    )
+
+
+def test_daily_refresh_pass_writes_all_latest_files(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "market.db"
+    workspace = tmp_path / "workspace"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-12"],
+        spy_dates=["2026-06-12"],
+        indicator_dates=["2026-06-12"],
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if "scripts\\paper_daily_ops.py" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=_fake_status_stdout(), stderr="")
+        if "scripts\\paper.py" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=_fake_eod_stdout(), stderr="")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "daily_refresh",
+            "--workspace",
+            str(workspace),
+            "--account-id",
+            "paper_ops",
+            "--db-path",
+            str(db_path),
+            "--as-of-date",
+            "2026-06-13",
+        ]
+    )
+
+    assert exit_code == 0
+    assert [call[1] for call in calls] == ["scripts\\paper_daily_ops.py", "scripts\\paper.py"]
+    assert json.loads((workspace / "context.json").read_text(encoding="utf-8")) == {
+        "account_id": "paper_ops",
+        "data_date": "2026-06-12",
+        "trade_date": "2026-06-15",
+    }
+    payload = json.loads((workspace / "daily_refresh_latest.json").read_text(encoding="utf-8"))
+    assert payload["runner_result"] == "PASS"
+    assert payload["stages"]["resolve_dates"]["result"] == "PASS"
+    assert payload["stages"]["context"]["result"] == "PASS"
+    assert payload["stages"]["status"]["result"] == "PASS"
+    assert payload["stages"]["eod_dryrun"]["result"] == "PASS"
+    text = (workspace / "daily_refresh_latest.txt").read_text(encoding="utf-8")
+    assert "Daily Runner Refresh" in text
+    assert "runner_result: PASS" in text
+    assert "context_result: PASS" in text
+    assert (workspace / "status_latest.txt").exists()
+    assert (workspace / "eod_dryrun_latest.txt").exists()
+
+
+def test_daily_refresh_date_resolution_fail_does_not_overwrite_existing_latest_files(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name in ["context_latest.txt", "status_latest.txt", "eod_dryrun_latest.txt"]:
+        (workspace / name).write_text(f"old {name}", encoding="utf-8")
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("downstream command must not run")
+
+    monkeypatch.setattr(runner.subprocess, "run", fail_run)
+
+    exit_code = runner.main(
+        [
+            "daily_refresh",
+            "--workspace",
+            str(workspace),
+            "--account-id",
+            "paper_ops",
+            "--db-path",
+            str(tmp_path / "missing.db"),
+            "--as-of-date",
+            "2026-06-13",
+        ]
+    )
+
+    assert exit_code == 1
+    for name in ["context_latest.txt", "status_latest.txt", "eod_dryrun_latest.txt"]:
+        assert (workspace / name).read_text(encoding="utf-8") == f"old {name}"
+    payload = json.loads((workspace / "daily_refresh_latest.json").read_text(encoding="utf-8"))
+    assert payload["runner_result"] == "FAIL"
+    assert payload["failed_stage"] == "resolve_dates"
+    assert payload["stages"]["resolve_dates"]["result"] == "FAIL"
+
+
+def test_daily_refresh_warning_runs_subcommands_and_preserves_warning(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "market.db"
+    workspace = tmp_path / "workspace"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-16"],
+        spy_dates=["2026-06-16"],
+        indicator_dates=["2026-06-15"],
+    )
+
+    def fake_run(argv, **kwargs):
+        if "scripts\\paper_daily_ops.py" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=_fake_status_stdout(), stderr="")
+        if "scripts\\paper.py" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=_fake_eod_stdout(), stderr="")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "daily_refresh",
+            "--workspace",
+            str(workspace),
+            "--account-id",
+            "paper_ops",
+            "--db-path",
+            str(db_path),
+            "--as-of-date",
+            "2026-06-16",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads((workspace / "daily_refresh_latest.json").read_text(encoding="utf-8"))
+    assert payload["runner_result"] == "WARNING"
+    assert payload["data_date"] == "2026-06-15"
+    assert payload["stages"]["eod_dryrun"]["result"] == "PASS"
+    assert "not aligned" in payload["date_reason"]
+
+
+def test_daily_refresh_status_failure_skips_eod_dryrun(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "market.db"
+    workspace = tmp_path / "workspace"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-12"],
+        spy_dates=["2026-06-12"],
+        indicator_dates=["2026-06-12"],
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if "scripts\\paper_daily_ops.py" in argv:
+            return subprocess.CompletedProcess(argv, 1, stdout=_fake_status_stdout(), stderr="status failed")
+        if "scripts\\paper.py" in argv:
+            raise AssertionError("eod_dryrun must not run after status failure")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "daily_refresh",
+            "--workspace",
+            str(workspace),
+            "--account-id",
+            "paper_ops",
+            "--db-path",
+            str(db_path),
+            "--as-of-date",
+            "2026-06-13",
+        ]
+    )
+
+    assert exit_code == 1
+    assert [call[1] for call in calls] == ["scripts\\paper_daily_ops.py"]
+    payload = json.loads((workspace / "daily_refresh_latest.json").read_text(encoding="utf-8"))
+    assert payload["runner_result"] == "FAIL"
+    assert payload["failed_stage"] == "status"
+    assert payload["stages"]["status"]["result"] == "FAIL"
+    assert "eod_dryrun" not in payload["stages"]
+
+
+def test_daily_refresh_eod_failure_marks_final_fail(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "market.db"
+    workspace = tmp_path / "workspace"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-12"],
+        spy_dates=["2026-06-12"],
+        indicator_dates=["2026-06-12"],
+    )
+
+    def fake_run(argv, **kwargs):
+        if "scripts\\paper_daily_ops.py" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=_fake_status_stdout(), stderr="")
+        if "scripts\\paper.py" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=_fake_eod_stdout(append_execution_log="true"), stderr="")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    exit_code = runner.main(
+        [
+            "daily_refresh",
+            "--workspace",
+            str(workspace),
+            "--account-id",
+            "paper_ops",
+            "--db-path",
+            str(db_path),
+            "--as-of-date",
+            "2026-06-13",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads((workspace / "daily_refresh_latest.json").read_text(encoding="utf-8"))
+    assert payload["runner_result"] == "FAIL"
+    assert payload["failed_stage"] == "eod_dryrun"
+    assert payload["stages"]["context"]["result"] == "PASS"
+    assert payload["stages"]["status"]["result"] == "PASS"
+    assert payload["stages"]["eod_dryrun"]["result"] == "FAIL"

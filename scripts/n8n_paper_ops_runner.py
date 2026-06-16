@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.paths import market_db_path  # noqa: E402
+
 DEFAULT_WORKSPACE = Path(r"D:\n8n\workspace\stock_screener_ops")
-ALLOWED_COMMAND_KEYS = {"status", "eod_dryrun", "context"}
+ALLOWED_COMMAND_KEYS = {"status", "eod_dryrun", "context", "daily_refresh"}
 EOD_REQUIRED_PASS_FIELDS = {
     "eod_mode": "accounting_close",
     "would_append_execution_log": "false",
@@ -270,6 +277,17 @@ def _write_context(workspace: Path, args: argparse.Namespace) -> OpsContext:
     return context
 
 
+def _context_text(context: OpsContext, workspace: Path) -> str:
+    return (
+        "Paper Ops Context\n"
+        "runner_result: PASS\n"
+        f"account_id: {context.account_id}\n"
+        f"data_date: {context.data_date}\n"
+        f"trade_date: {context.trade_date}\n"
+        f"context_path: {_context_path(workspace)}\n"
+    )
+
+
 def _run_python(argv: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, *argv],
@@ -400,18 +418,69 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _stage_result(result: str, exit_code: int | None = None, error: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"result": result}
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+    if error:
+        payload["error"] = error
+    return payload
+
+
+def _capture_handler(handler, args: argparse.Namespace) -> int:
+    with contextlib.redirect_stdout(io.StringIO()):
+        return int(handler(args))
+
+
+def _resolution_to_dict(resolution: DailyRefreshDateResolution) -> dict[str, Any]:
+    return asdict(resolution)
+
+
+def _daily_refresh_text(payload: dict[str, Any]) -> str:
+    lines = [
+        "Daily Runner Refresh",
+        f"runner_result: {payload.get('runner_result') or '-'}",
+        f"generated_at: {payload.get('generated_at') or '-'}",
+    ]
+    failed_stage = payload.get("failed_stage")
+    if failed_stage:
+        lines.append(f"stage: {failed_stage}")
+    lines.extend(
+        [
+            f"account_id: {payload.get('account_id') or '-'}",
+            f"data_date: {payload.get('data_date') or '-'}",
+            f"trade_date: {payload.get('trade_date') or '-'}",
+            f"source_data_max_date: {payload.get('source_data_max_date') or '-'}",
+            f"date_policy: {payload.get('date_policy') or '-'}",
+            f"date_reason: {payload.get('date_reason') or '-'}",
+            f"stale: {str(bool(payload.get('stale'))).lower()}",
+            f"stale_days: {payload.get('stale_days') if payload.get('stale_days') is not None else '-'}",
+            f"context_result: {payload.get('stages', {}).get('context', {}).get('result') or '-'}",
+            f"status_result: {payload.get('stages', {}).get('status', {}).get('result') or '-'}",
+            f"eod_dryrun_result: {payload.get('stages', {}).get('eod_dryrun', {}).get('result') or '-'}",
+            f"recommended_operator_action: {payload.get('recommended_operator_action') or '-'}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _write_daily_refresh_outputs(workspace: Path, payload: dict[str, Any]) -> None:
+    _write_json(workspace / "daily_refresh_latest.json", payload)
+    _write_text(workspace / "daily_refresh_latest.txt", _daily_refresh_text(payload))
+
+
+def _load_account_id_for_refresh(workspace: Path, explicit_account_id: str | None) -> str:
+    if explicit_account_id and str(explicit_account_id).strip():
+        return str(explicit_account_id).strip()
+    context = _load_context(workspace)
+    return context.account_id
+
+
 def handle_context(args: argparse.Namespace) -> int:
     workspace = _workspace(args)
     try:
         context = _write_context(workspace, args)
-        text = (
-            "Paper Ops Context\n"
-            "runner_result: PASS\n"
-            f"account_id: {context.account_id}\n"
-            f"data_date: {context.data_date}\n"
-            f"trade_date: {context.trade_date}\n"
-            f"context_path: {_context_path(workspace)}\n"
-        )
+        text = _context_text(context, workspace)
         _write_text(workspace / "context_latest.txt", text)
         print(text, end="")
         return 0
@@ -499,14 +568,134 @@ def handle_eod_dryrun(args: argparse.Namespace) -> int:
         return 1
 
 
+def handle_daily_refresh(args: argparse.Namespace) -> int:
+    workspace = _workspace(args)
+    generated_at = datetime.now().isoformat(timespec="seconds")
+    stages: dict[str, dict[str, Any]] = {}
+
+    try:
+        account_id = _load_account_id_for_refresh(workspace, args.account_id)
+    except Exception as exc:
+        account_id = str(args.account_id or "").strip()
+        resolution = _fail_date_resolution(
+            account_id,
+            str(exc),
+            "Provide --account-id or create a valid context.json before running daily_refresh",
+        )
+    else:
+        resolution = resolve_daily_refresh_dates(
+            account_id=account_id,
+            db_path=Path(args.db_path) if args.db_path else Path(market_db_path()),
+            as_of_date=args.as_of_date,
+            stale_threshold_days=args.stale_threshold_days,
+        )
+
+    stages["resolve_dates"] = _stage_result(resolution.runner_result)
+    if resolution.runner_result == "FAIL":
+        payload = {
+            "runner_result": "FAIL",
+            "generated_at": generated_at,
+            "failed_stage": "resolve_dates",
+            "account_id": resolution.account_id or account_id or None,
+            "data_date": resolution.data_date,
+            "trade_date": resolution.trade_date,
+            "source_data_max_date": resolution.source_data_max_date,
+            "date_policy": resolution.date_policy,
+            "date_reason": resolution.reason,
+            "stale": resolution.stale,
+            "stale_days": resolution.stale_days,
+            "date_resolution": _resolution_to_dict(resolution),
+            "stages": stages,
+            "recommended_operator_action": resolution.recommended_operator_action,
+        }
+        _write_daily_refresh_outputs(workspace, payload)
+        print(_daily_refresh_text(payload), end="")
+        return 1
+
+    context_args = argparse.Namespace(
+        workspace=str(workspace),
+        timeout_seconds=args.timeout_seconds,
+        account_id=resolution.account_id,
+        data_date=resolution.data_date,
+        trade_date=resolution.trade_date,
+    )
+    context_exit = _capture_handler(handle_context, context_args)
+    stages["context"] = _stage_result("PASS" if context_exit == 0 else "FAIL", context_exit)
+    if context_exit != 0:
+        payload = _daily_refresh_payload(generated_at, resolution, stages, "context")
+        _write_daily_refresh_outputs(workspace, payload)
+        print(_daily_refresh_text(payload), end="")
+        return 1
+
+    stage_args = argparse.Namespace(workspace=str(workspace), timeout_seconds=args.timeout_seconds)
+    status_exit = _capture_handler(handle_status, stage_args)
+    stages["status"] = _stage_result("PASS" if status_exit == 0 else "FAIL", status_exit)
+    if status_exit != 0:
+        payload = _daily_refresh_payload(generated_at, resolution, stages, "status")
+        _write_daily_refresh_outputs(workspace, payload)
+        print(_daily_refresh_text(payload), end="")
+        return 1
+
+    eod_exit = _capture_handler(handle_eod_dryrun, stage_args)
+    stages["eod_dryrun"] = _stage_result("PASS" if eod_exit == 0 else "FAIL", eod_exit)
+    failed_stage = "eod_dryrun" if eod_exit != 0 else None
+    payload = _daily_refresh_payload(generated_at, resolution, stages, failed_stage)
+    _write_daily_refresh_outputs(workspace, payload)
+    print(_daily_refresh_text(payload), end="")
+    return 1 if eod_exit != 0 else 0
+
+
+def _daily_refresh_payload(
+    generated_at: str,
+    resolution: DailyRefreshDateResolution,
+    stages: dict[str, dict[str, Any]],
+    failed_stage: str | None,
+) -> dict[str, Any]:
+    if failed_stage:
+        runner_result = "FAIL"
+        action = f"Fix {failed_stage} failure before relying on daily refresh output"
+    else:
+        runner_result = "WARNING" if resolution.runner_result == "WARNING" else "PASS"
+        action = resolution.recommended_operator_action if runner_result == "WARNING" else "NONE"
+    payload: dict[str, Any] = {
+        "runner_result": runner_result,
+        "generated_at": generated_at,
+        "account_id": resolution.account_id,
+        "data_date": resolution.data_date,
+        "trade_date": resolution.trade_date,
+        "source_data_max_date": resolution.source_data_max_date,
+        "daily_price_max_date": resolution.daily_price_max_date,
+        "market_index_max_date": resolution.market_index_max_date,
+        "daily_indicators_max_date": resolution.daily_indicators_max_date,
+        "date_policy": resolution.date_policy,
+        "date_reason": resolution.reason,
+        "stale": resolution.stale,
+        "stale_days": resolution.stale_days,
+        "date_resolution": _resolution_to_dict(resolution),
+        "stages": stages,
+        "recommended_operator_action": action,
+    }
+    if failed_stage:
+        payload["failed_stage"] = failed_stage
+    return payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="File-based n8n/Telegram runner for safe paper ops commands.")
     parser.add_argument("command_key", choices=sorted(ALLOWED_COMMAND_KEYS))
     parser.add_argument("--workspace", help=f"Output workspace. Defaults to {DEFAULT_WORKSPACE}")
     parser.add_argument("--timeout-seconds", type=int, default=120)
-    parser.add_argument("--account-id", help="Context account_id. Only used by command_key=context.")
+    parser.add_argument("--account-id", help="Context account_id. Used by command_key=context and daily_refresh.")
     parser.add_argument("--data-date", help="Context data_date. Only used by command_key=context.")
     parser.add_argument("--trade-date", help="Context trade_date. Only used by command_key=context.")
+    parser.add_argument("--db-path", help="Market data DB path. Only used by command_key=daily_refresh.")
+    parser.add_argument("--as-of-date", help="As-of date for stale checks. Only used by command_key=daily_refresh.")
+    parser.add_argument(
+        "--stale-threshold-days",
+        type=int,
+        default=3,
+        help="Calendar-day stale threshold. Only used by command_key=daily_refresh.",
+    )
     return parser
 
 
@@ -517,6 +706,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "context": handle_context,
         "status": handle_status,
         "eod_dryrun": handle_eod_dryrun,
+        "daily_refresh": handle_daily_refresh,
     }
     return handlers[args.command_key](args)
 
