@@ -141,6 +141,51 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.message.chat.id }}",
+              "rightValue": 8025114939,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "ignoreCase": false
+        }
+      },
+      "id": "4ce8a9e0-a413-4ca8-84e7-a6564fe6da16",
+      "name": "Check allowed chat",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -520,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f2a14418-0d64-45f8-9958-d12fb1e02639",
+      "name": "Ignore unauthorized chat",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -280,
+        200
+      ]
+    },
+    {
+      "parameters": {
         "command": "cat /workspace/stock_screener_ops/context_latest.txt"
       },
       "id": "fe95ba53-0a42-4a7b-9273-b462a6237f04",
@@ -314,7 +359,25 @@
       "main": [
         [
           {
+            "node": "Check allowed chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check allowed chat": {
+      "main": [
+        [
+          {
             "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore unauthorized chat",
             "type": "main",
             "index": 0
           }

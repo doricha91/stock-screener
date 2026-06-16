@@ -200,6 +200,15 @@ Inbound smoke test:
 
 `/help`와 unsupported fallback 응답은 underscore가 포함된 `/eod_dryrun`을 안전하게 보내기 위해 `parse_mode=HTML`을 명시하되, 본문은 HTML 태그나 특수문자 없이 plain text 형태로 유지한다. 지원하지 않는 명령을 shell command로 변환하거나 runner를 실행하지 않는다.
 
+Inbound read MVP closeout:
+
+- Telegram inbound workflow는 read-only 조회만 허용한다.
+- Telegram 입력값을 shell command로 실행하지 않는다.
+- 허용된 `chat_id`만 Switch로 진입한다.
+- unauthorized `chat_id`는 `Ignore unauthorized chat`에서 응답 없이 종료한다.
+- write/sync/commit/approval 명령은 inbound read MVP 범위 밖이다.
+- 실제 Telegram smoke에서 `/context`, `/status`, `/eod_dryrun`, `/help`, `/hello` 응답 성공을 확인했다.
+
 ## 1. Quick Start
 
 매일 먼저 운영 변수 3개를 정한다.
