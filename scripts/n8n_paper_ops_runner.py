@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -28,11 +29,197 @@ class OpsContext:
     trade_date: str
 
 
+@dataclass(frozen=True)
+class DailyRefreshDateResolution:
+    account_id: str
+    data_date: str | None
+    trade_date: str | None
+    source_data_max_date: str | None
+    daily_price_max_date: str | None
+    market_index_max_date: str | None
+    daily_indicators_max_date: str | None
+    runner_result: str
+    stale: bool
+    stale_days: int | None
+    date_policy: str
+    reason: str
+    recommended_operator_action: str
+
+
 def _normalize_date(value: str, field_name: str) -> str:
     clean = str(value or "").strip().replace("-", "")
     if len(clean) != 8 or not clean.isdigit():
         raise ValueError(f"{field_name} must be YYYY-MM-DD or YYYYMMDD: {value}")
     return datetime.strptime(clean, "%Y%m%d").strftime("%Y-%m-%d")
+
+
+def _normalize_as_of_date(value: date | datetime | str | None) -> date:
+    if value is None:
+        return date.today()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return datetime.strptime(_normalize_date(str(value), "as_of_date"), "%Y-%m-%d").date()
+
+
+def _fail_date_resolution(account_id: str, reason: str, action: str) -> DailyRefreshDateResolution:
+    return DailyRefreshDateResolution(
+        account_id=account_id,
+        data_date=None,
+        trade_date=None,
+        source_data_max_date=None,
+        daily_price_max_date=None,
+        market_index_max_date=None,
+        daily_indicators_max_date=None,
+        runner_result="FAIL",
+        stale=False,
+        stale_days=None,
+        date_policy="latest_complete_market_data_to_next_weekday",
+        reason=reason,
+        recommended_operator_action=action,
+    )
+
+
+def _sqlite_readonly_uri(db_path: Path) -> str:
+    return f"file:{db_path.resolve().as_posix()}?mode=ro"
+
+
+def _sqlite_table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+        return False
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _query_max_date(conn: sqlite3.Connection, table: str, column: str = "date", where: str = "", params: tuple[Any, ...] = ()) -> str | None:
+    query = f"SELECT MAX({column}) FROM {table}"
+    if where:
+        query += f" WHERE {where}"
+    value = conn.execute(query, params).fetchone()[0]
+    return _normalize_date(str(value), f"{table}.{column}") if value else None
+
+
+def _next_weekday_after(value: str) -> str:
+    cursor = datetime.strptime(value, "%Y-%m-%d").date() + timedelta(days=1)
+    while cursor.weekday() >= 5:
+        cursor += timedelta(days=1)
+    return cursor.strftime("%Y-%m-%d")
+
+
+def resolve_daily_refresh_dates(
+    *,
+    account_id: str | None,
+    db_path: str | Path,
+    as_of_date: date | datetime | str | None = None,
+    stale_threshold_days: int = 3,
+    market_index_symbol: str = "SPY",
+) -> DailyRefreshDateResolution:
+    """Resolve read-only daily refresh dates from market DB freshness."""
+    clean_account_id = str(account_id or "").strip()
+    if not clean_account_id:
+        return _fail_date_resolution(
+            "",
+            "account_id is required",
+            "Provide account_id before running daily refresh date resolution",
+        )
+
+    try:
+        resolved_as_of = _normalize_as_of_date(as_of_date)
+    except Exception as exc:
+        return _fail_date_resolution(clean_account_id, str(exc), "Provide as_of_date as YYYY-MM-DD or YYYYMMDD")
+
+    db_file = Path(db_path)
+    if not db_file.exists():
+        return _fail_date_resolution(
+            clean_account_id,
+            f"market DB not found: {db_file}",
+            "Refresh or restore market DB before running daily refresh",
+        )
+
+    required_columns = [
+        ("daily_price", "date"),
+        ("market_index", "date"),
+        ("market_index", "symbol"),
+        ("daily_indicators", "date"),
+    ]
+
+    try:
+        with sqlite3.connect(_sqlite_readonly_uri(db_file), uri=True) as conn:
+            for table, column in required_columns:
+                if not _sqlite_table_has_column(conn, table, column):
+                    return _fail_date_resolution(
+                        clean_account_id,
+                        f"required table/column missing: {table}.{column}",
+                        "Initialize or repair market DB schema before running daily refresh",
+                    )
+
+            daily_price_max = _query_max_date(conn, "daily_price")
+            market_index_max = _query_max_date(
+                conn,
+                "market_index",
+                where="symbol = ?",
+                params=(market_index_symbol,),
+            )
+            daily_indicators_max = _query_max_date(conn, "daily_indicators")
+    except Exception as exc:
+        return _fail_date_resolution(
+            clean_account_id,
+            f"failed to read market DB: {exc}",
+            "Inspect market DB accessibility and schema",
+        )
+
+    if not daily_price_max:
+        return _fail_date_resolution(clean_account_id, "daily_price has no date rows", "Refresh daily_price data")
+    if not market_index_max:
+        return _fail_date_resolution(
+            clean_account_id,
+            f"market_index has no date rows for {market_index_symbol}",
+            "Refresh market_index data for SPY before running daily refresh",
+        )
+    if not daily_indicators_max:
+        return _fail_date_resolution(
+            clean_account_id,
+            "daily_indicators has no date rows",
+            "Refresh daily_indicators before running daily refresh",
+        )
+
+    source_data_max = min(daily_price_max, market_index_max, daily_indicators_max)
+    data_dt = datetime.strptime(source_data_max, "%Y-%m-%d").date()
+    stale_days = max(0, (resolved_as_of - data_dt).days)
+    stale = stale_days > stale_threshold_days
+    trade_date = _next_weekday_after(source_data_max)
+
+    warnings: list[str] = []
+    if len({daily_price_max, market_index_max, daily_indicators_max}) > 1:
+        warnings.append("required market data sources are not aligned; using conservative min(max_date)")
+    if stale:
+        warnings.append(f"complete data_date is stale by {stale_days} calendar days")
+    if data_dt.weekday() >= 5:
+        warnings.append("complete data_date falls on a weekend; verify DB date quality")
+
+    runner_result = "WARNING" if warnings else "PASS"
+    reason = "; ".join(warnings) if warnings else "latest complete market data date found in DB"
+    action = (
+        "Verify market data freshness and trade_date manually before enabling daily_refresh automation"
+        if warnings
+        else "none"
+    )
+
+    return DailyRefreshDateResolution(
+        account_id=clean_account_id,
+        data_date=source_data_max,
+        trade_date=trade_date,
+        source_data_max_date=source_data_max,
+        daily_price_max_date=daily_price_max,
+        market_index_max_date=market_index_max,
+        daily_indicators_max_date=daily_indicators_max,
+        runner_result=runner_result,
+        stale=stale,
+        stale_days=stale_days,
+        date_policy="latest_complete_market_data_to_next_weekday",
+        reason=reason,
+        recommended_operator_action=action,
+    )
 
 
 def _workspace(args: argparse.Namespace) -> Path:

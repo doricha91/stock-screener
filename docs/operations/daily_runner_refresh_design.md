@@ -125,25 +125,53 @@ would_write_position_snapshot=true
 | `eod_dryrun_latest.raw.txt` | `eod_dryrun` | Not sent directly; raw diagnostic output. | `/workspace/stock_screener_ops/eod_dryrun_latest.raw.txt` |
 | `context.json` | `context` today; future `daily_refresh` | Read by `status` and `eod_dryrun`. | `/workspace/stock_screener_ops/context.json` |
 
-## Date Resolution Policy Draft
+## Date Resolution Helper Contract
 
-Future helper candidate:
+Implemented helper:
 
 ```text
 resolve_daily_refresh_dates()
 ```
 
-Proposed inputs:
+Location:
+
+```text
+scripts/n8n_paper_ops_runner.py
+```
+
+The helper is intentionally not exposed as a CLI command in this stage. It is read-only and does not write `context.json`, `*_latest.txt/json`, or any DB rows.
+
+Inputs:
 
 | Input | Purpose |
 | --- | --- |
-| `account_id` | Optional explicit account. If absent, load from existing `context.json`. If neither exists, fail. |
-| `workspace` | Location of `context.json` and output files. |
-| `now` | Optional injectable timestamp for tests. |
-| `market_db_path` | Defaults to `core.paths.market_db_path()`. |
-| `stale_max_calendar_days` | Policy threshold for stale market data warning/failure. |
+| `account_id` | Required explicit account id for this stage. Empty value returns a FAIL resolution. |
+| `db_path` | SQLite market DB path. Opened read-only with SQLite URI `mode=ro`. |
+| `as_of_date` | Optional injectable date/datetime/string for tests and scheduled runs. Defaults to local `date.today()`. |
+| `stale_threshold_days` | Calendar-day threshold for stale market data warning. Default is `3`. |
+| `market_index_symbol` | Required market index symbol. Default is `SPY`. |
 
-Proposed output:
+Return dataclass:
+
+```python
+@dataclass(frozen=True)
+class DailyRefreshDateResolution:
+    account_id: str
+    data_date: str | None
+    trade_date: str | None
+    source_data_max_date: str | None
+    daily_price_max_date: str | None
+    market_index_max_date: str | None
+    daily_indicators_max_date: str | None
+    runner_result: str
+    stale: bool
+    stale_days: int | None
+    date_policy: str
+    reason: str
+    recommended_operator_action: str
+```
+
+Example output:
 
 ```json
 {
@@ -151,17 +179,19 @@ Proposed output:
   "data_date": "2026-06-12",
   "trade_date": "2026-06-15",
   "source_data_max_date": "2026-06-12",
-  "source_data_ready_date": "2026-06-12",
+  "daily_price_max_date": "2026-06-12",
+  "market_index_max_date": "2026-06-12",
+  "daily_indicators_max_date": "2026-06-12",
   "stale": false,
-  "stale_days": 0,
-  "date_policy": "latest_complete_market_data_to_next_trade_date",
+  "stale_days": 1,
+  "date_policy": "latest_complete_market_data_to_next_weekday",
   "runner_result": "PASS",
   "reason": "latest complete market data date found in DB",
   "recommended_operator_action": "none"
 }
 ```
 
-Policy:
+Implemented data_date policy:
 
 1. Do not derive `data_date` from the wall-clock date alone.
 2. Read market DB freshness in read-only mode.
@@ -169,21 +199,46 @@ Policy:
    - `daily_price`: `SELECT MAX(date) FROM daily_price`
    - `market_index` for `SPY`: `SELECT MAX(date) FROM market_index WHERE symbol = 'SPY'`
    - `daily_indicators`: `SELECT MAX(date) FROM daily_indicators`
-4. Resolve `source_data_ready_date` as the latest date for which required price, SPY index, and indicators are all available. A conservative first implementation may use the minimum of the required latest dates, then run the existing strict paper data freshness check against that date.
-5. Set `data_date = source_data_ready_date`.
-6. Set `trade_date` to the next operating trade date after `data_date`.
-7. `trade_date` must be strictly after `data_date` and must not be a weekend. Existing explicit date validators in `scripts.paper` and `scripts.run_paper_daily_plan` already enforce this shape.
-8. If a holiday-aware market calendar is not available in the first implementation, do not silently guess through holidays. Either use an existing project calendar helper if one is added, or return `WARNING`/`FAIL` with an operator action when the next trade date cannot be confidently resolved.
-9. Run or mirror `core.paper_data_freshness.run_paper_data_freshness_check(..., strict=True)` for the resolved `data_date` before writing the new context.
-10. If freshness is stale, missing, inconsistent, or the account context is invalid, write a `daily_refresh_latest.txt/json` failure or warning artifact rather than silently reusing old dates.
+4. Resolve `source_data_max_date` as `min(daily_price_max_date, market_index_max_date, daily_indicators_max_date)`.
+5. Set `data_date = source_data_max_date`.
+
+Implemented trade_date policy:
+
+1. Set `trade_date` to the next weekday after `data_date`.
+2. Friday `data_date` resolves to the following Monday.
+3. Saturday/Sunday `data_date` resolves to the following Monday but returns `WARNING`, because market data dated on a weekend is unusual and should be verified.
+
+Current limitations:
+
+1. US market holiday handling is not implemented yet.
+2. The helper uses a weekend-only next trade date policy.
+3. The helper does not call Notion, `paper.py`, `paper_daily_ops.py`, or `core.paper_data_freshness.run_paper_data_freshness_check`.
+4. A later `daily_refresh` implementation may add a market-calendar helper or reuse a project-level trading calendar once available.
+
+Operational guardrails:
+
+1. `trade_date` must be strictly after `data_date` and must not be a weekend. Existing explicit date validators in `scripts.paper` and `scripts.run_paper_daily_plan` enforce the same shape for downstream plan commands.
+2. If required tables or columns are missing, the helper returns `FAIL` instead of raising an uncaught exception.
+3. If required data is empty, the helper returns `FAIL`.
+4. If SPY market index rows are absent, the helper returns `FAIL`.
+5. If required source max dates are not aligned, the helper returns `WARNING` and uses the conservative complete date.
+6. If `data_date` is older than `stale_threshold_days` relative to `as_of_date`, the helper returns `WARNING`.
 
 `runner_result` meaning for date resolution:
 
 | Result | Meaning |
 | --- | --- |
 | `PASS` | `account_id`, `data_date`, and `trade_date` are resolved with complete required market data and no stale warning. |
-| `WARNING` | Dates are usable for read-only refresh, but market data age, holiday ambiguity, or partial freshness deserves operator review. |
+| `WARNING` | Dates are usable for read-only refresh, but source-date lag, stale data, weekend data date, or holiday-calendar limitations deserve operator review. |
 | `FAIL` | Cannot safely resolve account/date context; `daily_refresh` must not refresh context/status/eod files as if current. |
+
+## DB Tables And Columns
+
+| Table | Columns used | Required |
+| --- | --- | --- |
+| `daily_price` | `date` | Yes |
+| `market_index` | `date`, `symbol` | Yes, with `symbol='SPY'` |
+| `daily_indicators` | `date` | Yes |
 
 ## Date Resolution Edge Cases
 
@@ -253,6 +308,34 @@ Proposed exit code:
 | Date resolution fails, context cannot be loaded/written, or required stage fails | `1` |
 
 The command must preserve existing `context`, `status`, and `eod_dryrun` behavior.
+
+## Implemented Tests
+
+Date resolution tests use temporary SQLite DB files and do not touch the operating market DB.
+
+Covered cases:
+
+| Case | Expected result |
+| --- | --- |
+| Required source max dates are all equal | `PASS`, `data_date` is that date, Friday resolves to Monday. |
+| `daily_indicators` lags by one day | `WARNING`, `data_date` is the lagging complete date. |
+| Required source data is empty | `FAIL`. |
+| SPY `market_index` rows are missing | `FAIL`. |
+| Friday `data_date` | next Monday `trade_date`. |
+| Old complete `data_date` | `WARNING`, `stale=true`. |
+| Missing `account_id` | `FAIL`. |
+| Helper side effects | no `context.json`, `context_latest.txt`, `status_latest.txt`, or `eod_dryrun_latest.txt` files are written. |
+
+## Next Implementation Step
+
+Step 6-2B should implement `daily_refresh` orchestration on top of `resolve_daily_refresh_dates()`:
+
+1. Resolve account/date.
+2. If resolution is `FAIL`, write `daily_refresh_latest.txt/json` only and stop.
+3. If resolution is `PASS` or accepted `WARNING`, write context.
+4. Run existing `status` and `eod_dryrun` handlers.
+5. Write `daily_refresh_latest.txt/json`.
+6. Keep existing individual commands unchanged.
 
 ## Out of Scope For This Stage
 

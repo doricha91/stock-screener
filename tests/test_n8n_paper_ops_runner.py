@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 from scripts import n8n_paper_ops_runner as runner
@@ -173,3 +175,185 @@ def test_missing_context_writes_status_error_text(tmp_path: Path) -> None:
     assert "Paper Ops Runner Error" in text
     assert "command_key: status" in text
     assert "context file not found" in text
+
+
+def _create_market_db(
+    path: Path,
+    *,
+    daily_price_dates: list[str] | None = None,
+    spy_dates: list[str] | None = None,
+    indicator_dates: list[str] | None = None,
+) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE daily_price (symbol TEXT, date TEXT)")
+        conn.execute("CREATE TABLE market_index (symbol TEXT, date TEXT)")
+        conn.execute("CREATE TABLE daily_indicators (symbol TEXT, date TEXT)")
+        for item_date in daily_price_dates or []:
+            conn.execute("INSERT INTO daily_price (symbol, date) VALUES (?, ?)", ("AAPL", item_date))
+        for item_date in spy_dates or []:
+            conn.execute("INSERT INTO market_index (symbol, date) VALUES (?, ?)", ("SPY", item_date))
+        for item_date in indicator_dates or []:
+            conn.execute("INSERT INTO daily_indicators (symbol, date) VALUES (?, ?)", ("AAPL", item_date))
+
+
+def test_resolve_daily_refresh_dates_pass_when_sources_aligned(tmp_path: Path) -> None:
+    db_path = tmp_path / "market.db"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-12"],
+        spy_dates=["2026-06-12"],
+        indicator_dates=["2026-06-12"],
+    )
+
+    result = runner.resolve_daily_refresh_dates(
+        account_id="paper_ops",
+        db_path=db_path,
+        as_of_date=date(2026, 6, 13),
+    )
+
+    assert result.runner_result == "PASS"
+    assert result.data_date == "2026-06-12"
+    assert result.source_data_max_date == "2026-06-12"
+    assert result.trade_date == "2026-06-15"
+    assert result.stale is False
+
+
+def test_resolve_daily_refresh_dates_uses_lagging_complete_date(tmp_path: Path) -> None:
+    db_path = tmp_path / "market.db"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-16"],
+        spy_dates=["2026-06-16"],
+        indicator_dates=["2026-06-15"],
+    )
+
+    result = runner.resolve_daily_refresh_dates(
+        account_id="paper_ops",
+        db_path=db_path,
+        as_of_date="2026-06-16",
+    )
+
+    assert result.runner_result == "WARNING"
+    assert result.data_date == "2026-06-15"
+    assert result.trade_date == "2026-06-16"
+    assert result.daily_price_max_date == "2026-06-16"
+    assert result.daily_indicators_max_date == "2026-06-15"
+    assert "not aligned" in result.reason
+
+
+def test_resolve_daily_refresh_dates_fails_when_required_data_empty(tmp_path: Path) -> None:
+    db_path = tmp_path / "market.db"
+    _create_market_db(db_path, daily_price_dates=[], spy_dates=["2026-06-12"], indicator_dates=["2026-06-12"])
+
+    result = runner.resolve_daily_refresh_dates(
+        account_id="paper_ops",
+        db_path=db_path,
+        as_of_date="2026-06-13",
+    )
+
+    assert result.runner_result == "FAIL"
+    assert result.data_date is None
+    assert "daily_price has no date rows" in result.reason
+
+
+def test_resolve_daily_refresh_dates_fails_without_spy_market_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "market.db"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-12"],
+        spy_dates=[],
+        indicator_dates=["2026-06-12"],
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO market_index (symbol, date) VALUES (?, ?)", ("QQQ", "2026-06-12"))
+
+    result = runner.resolve_daily_refresh_dates(
+        account_id="paper_ops",
+        db_path=db_path,
+        as_of_date="2026-06-13",
+    )
+
+    assert result.runner_result == "FAIL"
+    assert "market_index has no date rows for SPY" in result.reason
+
+
+def test_resolve_daily_refresh_dates_friday_trade_date_is_next_monday(tmp_path: Path) -> None:
+    db_path = tmp_path / "market.db"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-12"],
+        spy_dates=["2026-06-12"],
+        indicator_dates=["2026-06-12"],
+    )
+
+    result = runner.resolve_daily_refresh_dates(
+        account_id="paper_ops",
+        db_path=db_path,
+        as_of_date="2026-06-12",
+    )
+
+    assert result.data_date == "2026-06-12"
+    assert result.trade_date == "2026-06-15"
+
+
+def test_resolve_daily_refresh_dates_marks_stale_as_warning(tmp_path: Path) -> None:
+    db_path = tmp_path / "market.db"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-01"],
+        spy_dates=["2026-06-01"],
+        indicator_dates=["2026-06-01"],
+    )
+
+    result = runner.resolve_daily_refresh_dates(
+        account_id="paper_ops",
+        db_path=db_path,
+        as_of_date="2026-06-10",
+        stale_threshold_days=3,
+    )
+
+    assert result.runner_result == "WARNING"
+    assert result.stale is True
+    assert result.stale_days == 9
+    assert "stale" in result.reason
+
+
+def test_resolve_daily_refresh_dates_fails_without_account_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "market.db"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-12"],
+        spy_dates=["2026-06-12"],
+        indicator_dates=["2026-06-12"],
+    )
+
+    result = runner.resolve_daily_refresh_dates(
+        account_id="",
+        db_path=db_path,
+        as_of_date="2026-06-13",
+    )
+
+    assert result.runner_result == "FAIL"
+    assert result.reason == "account_id is required"
+
+
+def test_resolve_daily_refresh_dates_does_not_write_runner_files(tmp_path: Path) -> None:
+    db_path = tmp_path / "market.db"
+    _create_market_db(
+        db_path,
+        daily_price_dates=["2026-06-12"],
+        spy_dates=["2026-06-12"],
+        indicator_dates=["2026-06-12"],
+    )
+
+    result = runner.resolve_daily_refresh_dates(
+        account_id="paper_ops",
+        db_path=db_path,
+        as_of_date="2026-06-13",
+    )
+
+    assert result.runner_result == "PASS"
+    assert not (tmp_path / "context.json").exists()
+    assert not (tmp_path / "context_latest.txt").exists()
+    assert not (tmp_path / "status_latest.txt").exists()
+    assert not (tmp_path / "eod_dryrun_latest.txt").exists()
