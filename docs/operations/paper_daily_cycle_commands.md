@@ -154,6 +154,40 @@ Telegram Send Message:
 
 이 smoke workflow는 active 운영 workflow가 아니며, n8n UI 또는 CLI에서 수동 실행해 Telegram outbound만 검증한다.
 
+### 0.6 Telegram inbound webhook activation
+
+Telegram inbound 운영 workflow는 ngrok 같은 public HTTPS endpoint를 `WEBHOOK_URL`로 설정한 뒤 publish해야 production webhook이 등록된다. 실제 URL은 실행 환경별로 달라지므로 문서나 workflow export에는 커밋하지 않고, 운영 환경에서는 placeholder 기준으로 설정한다.
+
+```yaml
+WEBHOOK_URL: <NGROK_HTTPS_URL>/
+N8N_PROXY_HOPS: 1
+```
+
+등록 상태 진단:
+
+```cmd
+cd /d D:\n8n
+docker compose config | findstr /i "WEBHOOK_URL N8N_PROXY_HOPS"
+docker exec n8n sh -lc "printenv | grep -E 'WEBHOOK_URL|N8N_PROXY_HOPS'"
+docker logs n8n --tail 100
+```
+
+`Paper Ops Telegram Read MVP`의 Telegram Trigger node name은 `TelegramTrigger`처럼 공백 없는 이름을 사용한다. n8n 2.25.x에서 공백이 포함된 trigger node name은 production webhook path가 URL-encoded form으로 저장될 수 있고, 실제 inbound request path와 정확히 매칭되지 않아 다음 404가 발생할 수 있다.
+
+```text
+The requested webhook "POST <workflow-id>/telegram trigger/webhook" is not registered.
+```
+
+이 경우 workflow export의 trigger node name과 connection key를 공백 없는 이름으로 맞춘 뒤 import/publish/restart 순서로 다시 등록한다.
+
+```cmd
+docker exec n8n n8n import:workflow --input=/workspace/paper_ops_telegram_read_mvp.workflow.json
+docker exec n8n n8n publish:workflow --id=q7KpPaperOpsTgMvp
+docker restart n8n
+```
+
+정상 등록 후 n8n 로그에는 active workflow activation이 기록되고, webhook 404 대신 workflow execution 또는 trigger credential 검증 단계까지 도달해야 한다.
+
 ## 1. Quick Start
 
 매일 먼저 운영 변수 3개를 정한다.
