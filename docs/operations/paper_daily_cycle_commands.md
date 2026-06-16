@@ -209,6 +209,12 @@ Inbound read MVP closeout:
 - write/sync/commit/approval 명령은 inbound read MVP 범위 밖이다.
 - 실제 Telegram smoke에서 `/context`, `/status`, `/eod_dryrun`, `/help`, `/hello` 응답 성공을 확인했다.
 
+### 0.7 Daily runner refresh design
+
+Daily Runner Refresh 자동화의 현재 runner 계약, 날짜 자동 결정 정책 초안, 향후 `daily_refresh` 명령 계약은 별도 설계 문서에서 관리한다.
+
+- [Daily Runner Refresh Design](daily_runner_refresh_design.md)
+
 ## 1. Quick Start
 
 매일 먼저 운영 변수 3개를 정한다.
