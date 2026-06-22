@@ -1,12 +1,44 @@
 # Runbook Command Controller Design
 
-This document designs a safe controller for running selected Paper Daily Cycle runbook commands from n8n/Telegram. It is a design document only. It does not implement Python controller code, n8n workflow changes, Telegram commands, Windows wrappers, Task Scheduler, Notion writes, or broker/order execution.
+This document designs a safe controller for running selected Paper Daily Cycle runbook commands. The revised near-term target is an ngrok-free scheduled push model, with interactive Telegram control deferred to a later phase. It is a design document only. It does not implement Python controller code, n8n workflow changes, Telegram commands, Windows wrappers, Task Scheduler, Notion writes, or broker/order execution.
 
 ## Purpose
 
-The current n8n/Telegram MVP can read latest status files. The next automation layer should let the operator choose, run, inspect, and approve runbook commands without ever executing arbitrary Telegram text.
+The current n8n/Telegram MVP can read latest status files when inbound webhook routing is available. For the next 3-6 month forward test, the safer first automation layer is local scheduled refresh plus outbound Telegram push. Interactive command execution and approval from Telegram should remain a later phase.
 
-Target shape:
+Phase 1 target shape:
+
+```text
+Windows Task Scheduler = scheduled trigger
+Windows runner wrapper = local execution entrypoint
+daily_refresh = safe status/preview refresh
+Runbook Command Controller = optional local CLI for read-only/preview command execution
+Telegram sendMessage = scheduled result push channel
+Operator = manual Notion import/sync/commit/write approval executor
+```
+
+The controller is not a trading bot. It is a guarded operator tool for the documented Paper Daily Cycle. It must preserve the project rule that local files, CSV/JSON/Markdown artifacts, SQLite DBs, and existing scripts remain the source of truth.
+
+## Deployment Phases
+
+### Phase 1: Local Scheduled Push
+
+- ngrok is not required.
+- Windows Task Scheduler runs `daily_refresh` and, later, local controller read/preview commands.
+- Telegram is a `sendMessage` push destination.
+- No inbound Telegram commands are received.
+- Notion import/sync/commit/write approval stays manual.
+
+Phase 1 is the default target for the 3-6 month forward test because it has no public inbound endpoint requirement and keeps write-risk operations under direct operator control.
+
+### Phase 2: Interactive Local Control
+
+- Telegram commands can run controller actions.
+- Webhook-based Telegram Trigger requires ngrok, Cloudflare Tunnel, VPS, or another public HTTPS endpoint when n8n runs on the local PC.
+- Polling-based Telegram bot control can avoid ngrok, but it requires a separate local polling loop and operational supervision.
+- Approval Controller connection begins in or after this phase.
+
+Phase 2 target shape:
 
 ```text
 Telegram = mobile control panel
@@ -16,7 +48,27 @@ Runbook Command Controller = allowlisted command_key executor
 stock-screener scripts = actual paper ops commands
 ```
 
-The controller is not a trading bot. It is a guarded operator tool for the documented Paper Daily Cycle. It must preserve the project rule that local files, CSV/JSON/Markdown artifacts, SQLite DBs, and existing scripts remain the source of truth.
+### Phase 3: Server/VPS Operation
+
+- n8n/controller runs on a server or VPS.
+- ngrok is not required.
+- A public HTTPS domain, reverse proxy, and correct `WEBHOOK_URL` are required for webhook mode.
+- Server security, backup, monitoring, and maintenance become part of the operating model.
+
+## Ngrok Requirement Matrix
+
+| Use case | Needs ngrok? | Reason |
+| --- | --- | --- |
+| `daily_refresh` local CLI | No | Local execution. |
+| Windows Task Scheduler | No | No external inbound request. |
+| Telegram `sendMessage` push | No | Outbound HTTPS request from local PC. |
+| Task Scheduler -> localhost n8n webhook | No | Localhost call only. |
+| Telegram Trigger receiving `/status` | Yes, if local webhook | Telegram must reach local n8n over public HTTPS. |
+| Telegram `/run`, `/approve` real-time handling | Yes, if webhook-based | Public HTTPS endpoint is required. |
+| Telegram polling bot | No | Local process calls `getUpdates` outbound. |
+| VPS/cloud n8n | No ngrok | Server provides public HTTPS directly. |
+
+ngrok is not required for Phase 1. ngrok or an equivalent public HTTPS tunnel is required only when local n8n must receive Telegram webhook events.
 
 ## Role Separation
 
@@ -36,6 +88,18 @@ resolve dates
 
 It should remain safe for scheduled refresh. It does not run plan generation, Notion export/import, commit, sync, approval, or live broker activity.
 
+`daily_refresh` remains the safest scheduled automation boundary. It may be run once per operating day after expected market data availability. Its output is suitable for Telegram push. It must not execute Notion write, ledger commit, state commit, sync, or broker/order actions.
+
+Phase 1 push outputs:
+
+```text
+context_latest.txt
+status_latest.txt
+eod_dryrun_latest.txt
+daily_refresh_latest.txt
+daily_refresh_latest.json
+```
+
 ### Runbook Command Controller
 
 The controller is the future executor for `paper_daily_cycle_commands.md` steps. It maps an explicit `command_key` to a predefined argv template and executes it with `shell=False`.
@@ -51,6 +115,23 @@ It is responsible for:
 
 It must not execute `operator_summary.next_command` as a raw string. The orchestrator can suggest the next step, but the controller must translate that suggestion to a known `command_key` before execution.
 
+Phase 1 controller scope is intentionally narrow:
+
+- registry list/get
+- `command_key` classification
+- next candidate display
+- last/latest result lookup
+- optional local CLI execution for `READ_ONLY` and `READ_ONLY_PREVIEW` only
+
+Phase 1 does not include:
+
+- Telegram `/run` connection
+- Telegram `/request` connection
+- Telegram `/approve` connection
+- Notion write execution
+- ledger commit execution
+- `eod_commit` execution
+
 ### Approval Controller
 
 The approval controller manages write-risk commands. It creates approval files with frozen argv/context, records approval decisions, expires stale requests, and only executes approved frozen argv.
@@ -63,17 +144,30 @@ It is responsible for:
 - approval status/history files
 - expiration checks
 
+Approval Controller is designed now but not activated in Phase 1. In Phase 1, write-risk commands remain manual operator actions. Approval files are required only when Phase 2 interactive control begins.
+
+Phase 1 manual-only items:
+
+- Notion import
+- Notion sync
+- execution commit
+- review append
+- eod commit
+- git commit / push
+- any write approval
+- any broker/API/order action
+
 ### n8n/Telegram
 
-n8n and Telegram are UI/transport only.
+n8n and Telegram are UI/transport only. In Phase 1, Telegram is a scheduled push destination, not an inbound command source.
 
 They are responsible for:
 
-- chat allowlist
-- command text/button routing
+- chat allowlist when inbound control exists
+- command text/button routing in Phase 2
 - showing latest output files
-- collecting approval decisions
-- invoking the Windows runner wrapper with allowlisted runner commands
+- collecting approval decisions in Phase 2
+- invoking the Windows runner wrapper with allowlisted runner commands in Phase 2
 
 They must not:
 
@@ -91,6 +185,33 @@ They must not:
 - Approval freezes `account_id`, `data_date`, `trade_date`, `command_key`, `argv`, and relevant preview/report paths.
 - `approve` executes only stored approval argv, not a newly assembled command.
 - No broker/API/order placement is in scope.
+
+## Phase 1 Scheduled Telegram Push
+
+Phase 1 should use scheduled outbound push, not Telegram Trigger inbound commands.
+
+Flow:
+
+```text
+Windows Task Scheduler
+-> run_daily_refresh wrapper
+-> python scripts\n8n_paper_ops_runner.py daily_refresh
+-> daily_refresh_latest.txt/json
+-> Telegram sendMessage
+```
+
+Push implementation options:
+
+| Option | Shape | Advantages | Tradeoffs |
+| --- | --- | --- | --- |
+| A | Python wrapper calls Telegram `sendMessage` directly. | No n8n required, no ngrok required, simplest moving parts. | Telegram formatting/token handling moves into Python-side configuration. |
+| B | Task Scheduler calls a localhost n8n webhook after refresh. | Can reuse existing n8n Telegram credential/workflow style. | n8n must be running; still no Telegram Trigger inbound command path. |
+
+Initial recommendation:
+
+- Use Option A for the minimum Phase 1 setup.
+- Use Option B only if reusing existing n8n Telegram credential management is more important than minimizing components.
+- Do not use Telegram Trigger/webhook in Phase 1.
 
 ## Command Registry Schema
 
@@ -195,7 +316,15 @@ Additional controller keys:
 | `next` | Show recommended next registry command. | `READ_ONLY` | Derived from status + registry mapping. |
 | `last` | Show last command run summary. | `READ_ONLY` | Reads `command_runs/latest.txt`. |
 
-## n8n/Telegram Command Design
+## Phase 2 n8n/Telegram Command Design
+
+Phase 1:
+
+- No inbound Telegram commands.
+- Scheduled push only.
+- Optional local CLI only.
+
+The following commands are retained as a Phase 2 interactive control design. They are not part of the Phase 1 scheduled push scope.
 
 Initial read commands:
 
@@ -233,6 +362,8 @@ Telegram /run execution_preview
 ## Approval File Design
 
 Approval requests freeze the command at request time. The approve step must not rebuild argv from current context.
+
+This design is reserved for Phase 2 or later. Approval Controller is not active in Phase 1. During Phase 1, write-risk commands stay manual operator actions and no approval file is required for scheduled push.
 
 Workspace layout:
 
@@ -347,9 +478,9 @@ The controller should retain raw stdout/stderr in `.log` and include only the co
 
 ## Full Development Sequence
 
-### 6-3A. Runbook Command Controller design
+### 6-3A-R1. Revise controller design for ngrok-free scheduled push
 
-Goal: write this design.
+Goal: revise this design so Phase 1 does not require ngrok and prioritizes scheduled Telegram push.
 Out of scope: implementation, n8n changes, Telegram changes.
 
 ### 6-3B. command registry read-only implementation
@@ -357,14 +488,14 @@ Out of scope: implementation, n8n changes, Telegram changes.
 Goal: implement registry definitions, schema validation, and list/get operations.
 Out of scope: executing commands.
 
-### 6-3C. `/next` candidate generation
+### 6-3C. controller local CLI list/get/next/last
 
-Goal: map `paper_daily_ops.py status` and `operator_summary.next_command` to a registry `command_key`.
+Goal: expose local CLI commands for registry list/get, next candidate, and latest result lookup.
 Out of scope: executing write commands.
 
-### 6-3D. READ_ONLY / PREVIEW command execution
+### 6-3D. READ_ONLY / READ_ONLY_PREVIEW local CLI execution
 
-Goal: implement `/run <command_key>` equivalent for `READ_ONLY` and `READ_ONLY_PREVIEW`.
+Goal: execute allowlisted read-only and preview commands from local CLI with `shell=False`.
 Out of scope: approval/write execution.
 
 ### 6-3E. command run result file structure
@@ -372,40 +503,77 @@ Out of scope: approval/write execution.
 Goal: persist `command_runs/latest.*`, timestamped json/txt/log, and Telegram-safe summaries.
 Out of scope: approval controller.
 
-### 6-3F. approval request / approve / reject file structure
+### 6-4A. Windows daily_refresh wrapper
 
-Goal: implement approval JSON lifecycle, freeze argv, expiration, and audit history.
-Out of scope: connecting high-risk write commands before previews are validated.
+Goal: provide a stable wrapper that runs `daily_refresh`, writes logs, and returns a clear exit status.
+Out of scope: Task Scheduler registration and Telegram push.
 
-### 6-3G. approval-required write command connection
+### 6-4B. scheduled Telegram push implementation
 
-Goal: connect `LOCAL_ARTIFACT_WRITE`, `NOTION_WRITE`, `LEDGER_WRITE`, and `STATE_SNAPSHOT_WRITE` through request/approve.
+Goal: send `daily_refresh_latest.txt` or a compact summary to Telegram via outbound `sendMessage`.
+Out of scope: inbound Telegram commands.
+
+### 6-4C. Task Scheduler documentation
+
+Goal: document scheduling time, working directory, environment variables, logs, and failure handling.
+Out of scope: registering the task automatically.
+
+### 6-5. 3-6 month forward-test operating procedure
+
+Goal: define daily operating routine, manual review/write steps, metrics, and weekly review cadence.
+Out of scope: interactive Telegram control.
+
+### 6-6. warning/error scheduled alert
+
+Goal: push alerts for stale data, failed refresh, failed command runs, and missed operating days.
+Out of scope: auto-remediation.
+
+### 6-7. optional approval file lifecycle implementation
+
+Goal: implement approval request/reject/expire storage without connecting write command execution.
+Out of scope: Telegram approval UI and write command execution.
+
+### 6-8. optional interactive Telegram control decision
+
+Goal: choose whether interactive control should use webhook or polling after Phase 1 proves useful.
+Out of scope: implementing both paths at once.
+
+### 6-8A. webhook path: ngrok/Cloudflare Tunnel/VPS
+
+Goal: implement interactive n8n/Telegram routing with a public HTTPS endpoint.
+Out of scope: polling loop implementation.
+
+### 6-8B. polling path: Telegram getUpdates
+
+Goal: implement a local outbound polling loop that avoids public inbound webhook requirements.
+Out of scope: public webhook setup.
+
+### 6-9. approval-required write command connection
+
+Goal: connect `LOCAL_ARTIFACT_WRITE`, `NOTION_WRITE`, `LEDGER_WRITE`, and `STATE_SNAPSHOT_WRITE` through request/approve after previews are reliable.
 Out of scope: broker/API/live order execution.
 
-### 6-4A. Windows runner wrapper cleanup
+## Forward Test Boundary
 
-Goal: provide a stable local wrapper for controller commands and log paths.
-Out of scope: Task Scheduler registration.
+During the 3-6 month forward test:
 
-### 6-4B. n8n Telegram `/next`, `/run` connection
+- `daily_refresh` runs automatically once per operating day.
+- Telegram push reports `PASS`/`WARNING`/`FAIL`, `data_date`, `trade_date`, stale flag, and `recommended_operator_action`.
+- The operator manually reviews outputs.
+- The operator manually performs Notion imports, syncs, commits, and any write approvals.
+- No automatic write command is executed from Telegram.
+- No live order or broker action is allowed.
 
-Goal: add n8n routes for safe read/preview execution and latest result reads.
-Out of scope: approval buttons for write commands.
+Tracking metrics:
 
-### 6-4C. n8n Telegram `/request`, `/approve` connection
-
-Goal: add approval request and decision UX around stored approval files.
-Out of scope: expanding command types beyond the runbook registry.
-
-### 6-5. daily_refresh scheduled push
-
-Goal: schedule/push daily refresh status after market data is expected to be ready.
-Out of scope: full runbook execution scheduling.
-
-### 6-6. warning/error alert
-
-Goal: alert on stale data, failed refresh, failed command runs, expired approvals, and unresolved blockers.
-Out of scope: auto-remediation.
+- `daily_refresh` success rate
+- stale data frequency
+- failed run frequency
+- manual intervention count
+- Notion sync/commit error count
+- missed operating days
+- time spent per daily cycle
+- whether push-only was sufficient
 
 ## Open Questions And Risks
 
@@ -415,3 +583,5 @@ Out of scope: auto-remediation.
 - Approval expiration duration should be chosen conservatively.
 - `operator_summary.next_command` parsing must be treated as advisory only.
 - Any future command that is not clearly classified must default to `UNKNOWN` or `BLOCKED`.
+- Phase 1 Telegram token handling must avoid committing tokens and should use environment variables or private local configuration.
+- Option B for Phase 1 depends on local n8n availability even though it does not require ngrok.
