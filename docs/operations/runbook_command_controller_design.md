@@ -656,10 +656,27 @@ Out of scope: implementation, n8n changes, Telegram changes.
 Goal: implement registry definitions, schema validation, list/get operations, command typing, and Stage A/B/C eligibility for every runbook step.
 Out of scope: executing commands.
 
-### 6-3C. stage model and runbook_state design
+### 6-3C-1. frozen runbook context and runbook_state schema
 
-Goal: implement stage state, idempotency keys, frozen context, latest stage result paths, and duplicate-run prevention.
+Goal: define the runbook day context and state schema before any stage execution.
 Out of scope: executing stages.
+
+Notes:
+
+- Freeze `account_id`, `data_date`, and `trade_date` per runbook day.
+- Context must not change inside the same `runbook_state` even if the wall-clock date changes during polling.
+- `runbook_state.json` must include `stage`, `last_completed_step`, `current_status`, and `frozen_context`.
+
+### 6-3C-2. idempotency key and duplicate-run prevention
+
+Goal: define idempotency keys, strict duplicate-run blocks, and recovery boundaries.
+Out of scope: executing duplicate-sensitive commands.
+
+Notes:
+
+- Step 8, Step 14, and Step 17 duplicate prevention is the highest priority.
+- If sleep, reboot, retry, or repeated polling tries to re-run the same idempotency key, return `BLOCKED`.
+- Do not automatically use replacement, force, or allow-warnings flags before a manual recovery path is designed.
 
 ### 6-3D. Stage A Step 0-5 execution
 
@@ -671,20 +688,57 @@ Out of scope: Gate 1 polling and Stage B.
 Goal: poll Notion execution input readiness for Actual Price, `Status=READY`, Account ID, and Execution Date.
 Out of scope: Stage B execution.
 
-### 6-3F. Stage B Step 7-11 execution
+### 6-3F-1. Stage B execution preview and artifact pinning
 
-Goal: execute Step 7-11 after Gate 1 readiness, pin preview/commit artifacts, sync Notion status, and export review template.
+Goal: run Step 7 and freeze the execution preview artifact before any commit.
+Out of scope: Step 8 commit and later Stage B steps.
+
+Notes:
+
+- Pin the `preview_json` path from Step 7 `execution_preview`.
+- Do not advance to Step 8 when preview `fail_count` is not 0.
+- Distinguish Notion rows that are not ready from hard failures; they may require `WAIT` or `BLOCKED` rather than `FAILED`.
+
+### 6-3F-2. Stage B commit / sync / review template execution
+
+Goal: run Step 8-11 using pinned artifacts and fail-stop behavior.
 Out of scope: Gate 2 polling and Stage C.
+
+Notes:
+
+- Step 8 must use only the `preview_json` pinned by Step 7.
+- Step 9 must use only the `commit_report` produced by Step 8.
+- If Step 8 succeeds and Step 9 fails, do not attempt automatic local source-of-truth rollback.
+- Telegram summary must say whether retry should use the same `commit_report`.
 
 ### 6-3G. Gate 2 readiness check
 
 Goal: poll Notion review input readiness for Manual Answer, Review Status, Import Status, Account ID, and Review Date.
 Out of scope: Stage C execution.
 
-### 6-3H. Stage C Step 13-18 execution
+### 6-3H-1. Stage C review preview and artifact pinning
 
-Goal: execute Step 13-18 after Gate 2 readiness, require EOD dry-run PASS before EOD commit, and finish with final status.
+Goal: run Step 13 and freeze the review preview artifact before append.
+Out of scope: Step 14 append and later Stage C steps.
+
+Notes:
+
+- Pin the `review_preview_json` path from Step 13 `review_preview`.
+- Do not advance to Step 14 when `fail_count` is not 0.
+- Manual Answer, Review Status, and Import Status mismatch should be treated as Gate 2 readiness problems.
+
+### 6-3H-2. Stage C append / sync / eod dry-run / eod commit / final status
+
+Goal: run Step 14-18 using pinned artifacts, EOD dry-run gating, and fail-stop behavior.
 Out of scope: inbound Telegram control.
+
+Notes:
+
+- Step 14 must use only the `review_preview_json` pinned by Step 13.
+- Step 15 must use only the `review_commit_report` produced by Step 14.
+- Step 17 `eod_commit` must not run without Step 16 `eod_dryrun` PASS.
+- Step 17 same-date commit re-execution must return `BLOCKED`.
+- If Step 18 `final_status` returns `WARNING`, the operator action must be explicit.
 
 ### 6-4A. Windows wrapper for runbook controller
 
