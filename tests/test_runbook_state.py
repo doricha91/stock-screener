@@ -99,7 +99,7 @@ def test_save_state_then_load_state_round_trips(tmp_path: Path) -> None:
 
 def test_save_load_preserves_idempotency_records(tmp_path: Path) -> None:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
-    state = runbook_state.record_idempotency_key(
+    state, _ = runbook_state.reserve_idempotency(
         state,
         "execution_commit",
         8,
@@ -187,6 +187,43 @@ def test_build_idempotency_key_includes_sorted_artifact_refs() -> None:
     )
 
 
+def test_artifact_ref_canonicalization(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    absolute_inside = workspace / "outputs" / "preview.json"
+    absolute_outside = tmp_path / "other" / "preview.json"
+
+    assert runbook_state.canonicalize_artifact_ref(r"outputs\preview.json") == "outputs/preview.json"
+    assert runbook_state.canonicalize_artifact_ref(r".\outputs\preview.json") == "outputs/preview.json"
+    assert runbook_state.canonicalize_artifact_ref(str(absolute_inside), workspace) == "outputs/preview.json"
+    try:
+        runbook_state.canonicalize_artifact_ref(str(absolute_outside), workspace)
+    except ValueError as exc:
+        assert str(exc) == "artifact_ref_outside_workspace"
+    else:
+        raise AssertionError("expected outside workspace artifact to raise")
+
+
+def test_idempotency_key_uses_canonical_artifact_refs(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    relative = runbook_state.build_idempotency_key(
+        state,
+        "execution_commit",
+        {"execution_preview_json": r".\outputs\preview.json"},
+        workspace,
+    )
+    absolute = runbook_state.build_idempotency_key(
+        state,
+        "execution_commit",
+        {"execution_preview_json": str(workspace / "outputs" / "preview.json")},
+        workspace,
+    )
+
+    assert relative == absolute
+    assert relative.endswith("execution_preview_json=outputs_preview.json")
+
+
 def test_record_idempotency_key_adds_record_without_mutating_original_state() -> None:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
 
@@ -237,21 +274,27 @@ def test_duplicate_idempotency_key_is_detected() -> None:
 def test_idempotency_lifecycle_updates_existing_record() -> None:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     refs = {"execution_preview_json": "outputs/preview.json"}
-    state = runbook_state.record_idempotency_key(state, "execution_commit", 8, "B", refs)
+    state, key = runbook_state.reserve_idempotency(state, "execution_commit", 8, "B", refs)
     key = runbook_state.build_idempotency_key(state, "execution_commit", refs)
 
-    consumed = runbook_state.consume_idempotency_record(state, key)
-    passed = runbook_state.complete_idempotency_record(consumed, key, result_ref="outputs/commit_report.json")
-    failed = runbook_state.fail_idempotency_record(consumed, key, result_ref="outputs/failed_report.json", notes="failed")
-    blocked = runbook_state.block_idempotency_record(state, key, notes="duplicate")
+    running = runbook_state.mark_idempotency_running(state, key)
+    passed = runbook_state.mark_idempotency_pass(running, key, result_ref="outputs/commit_report.json")
+    failed = runbook_state.mark_idempotency_failed(running, key, reason="process_failed", result_ref="outputs/failed_report.json")
+    blocked = runbook_state.mark_idempotency_blocked(state, key, reason="duplicate")
 
-    assert consumed.idempotency_records[key]["status"] == "CONSUMED"
+    assert state.idempotency_records[key]["status"] == "RESERVED"
+    assert state.history[-1]["event_type"] == "idempotency_reserved"
+    assert running.idempotency_records[key]["status"] == "RUNNING"
+    assert running.history[-1]["event_type"] == "idempotency_running"
     assert passed.idempotency_records[key]["status"] == "PASS"
     assert passed.idempotency_records[key]["result_ref"] == "outputs/commit_report.json"
+    assert passed.history[-1]["event_type"] == "idempotency_pass"
     assert failed.idempotency_records[key]["status"] == "FAILED"
-    assert failed.idempotency_records[key]["notes"] == "failed"
+    assert failed.idempotency_records[key]["notes"] == "process_failed"
+    assert failed.history[-1]["event_type"] == "idempotency_failed"
     assert blocked.idempotency_records[key]["status"] == "BLOCKED"
     assert blocked.idempotency_records[key]["notes"] == "duplicate"
+    assert blocked.history[-1]["event_type"] == "idempotency_blocked"
 
 
 def test_idempotency_lifecycle_requires_existing_record() -> None:
@@ -263,6 +306,35 @@ def test_idempotency_lifecycle_requires_existing_record() -> None:
         assert str(exc) == "missing_idempotency_key"
     else:
         raise AssertionError("expected missing idempotency record to raise")
+
+
+def test_reserve_idempotency_blocks_existing_lifecycle_statuses() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    refs = {"execution_preview_json": "outputs/preview.json"}
+    reserved, key = runbook_state.reserve_idempotency(state, "execution_commit", 8, "B", refs)
+
+    try:
+        runbook_state.reserve_idempotency(reserved, "execution_commit", 8, "B", refs)
+    except ValueError as exc:
+        assert str(exc) == "idempotency_key_needs_recovery"
+    else:
+        raise AssertionError("expected RESERVED duplicate to require recovery")
+
+    passed = runbook_state.mark_idempotency_pass(reserved, key)
+    try:
+        runbook_state.reserve_idempotency(passed, "execution_commit", 8, "B", refs)
+    except ValueError as exc:
+        assert str(exc) == "duplicate_idempotency_key"
+    else:
+        raise AssertionError("expected PASS duplicate to block")
+
+    failed = runbook_state.mark_idempotency_failed(reserved, key, "process_failed")
+    try:
+        runbook_state.reserve_idempotency(failed, "execution_commit", 8, "B", refs)
+    except ValueError as exc:
+        assert str(exc) == "idempotency_key_failed_requires_manual_recovery"
+    else:
+        raise AssertionError("expected FAILED duplicate to require manual recovery")
 
 
 def test_validate_state_checks_idempotency_record_shape() -> None:
@@ -299,11 +371,15 @@ def test_start_and_complete_stage_transitions() -> None:
     assert running.current_stage == "A"
     assert running.current_status == "RUNNING"
     assert running.stage_status["A"] == "RUNNING"
-    assert running.history[-1]["event"] == "start_stage"
+    assert running.updated_at != state.updated_at
+    assert running.history[-1]["event_type"] == "stage_started"
+    assert running.history[-1]["status"] == "RUNNING"
     assert completed.current_status == "PASS"
     assert completed.stage_status["A"] == "PASS"
     assert completed.last_completed_stage == "A"
-    assert completed.history[-1]["event"] == "complete_stage"
+    assert completed.updated_at != running.updated_at
+    assert completed.history[-1]["event_type"] == "stage_completed"
+    assert completed.history[-1]["status"] == "PASS"
     assert runbook_state.validate_state(completed) == []
 
 
@@ -323,6 +399,9 @@ def test_fail_block_and_wait_transitions() -> None:
     assert waiting.current_status == "WAIT"
     assert waiting.stage_status["GATE1"] == "WAIT"
     assert waiting.last_error["next_poll_time"] == "2026-06-29T22:00:00+09:00"
+    assert failed.history[-1]["event_type"] == "stage_failed"
+    assert blocked.history[-1]["event_type"] == "stage_blocked"
+    assert waiting.history[-1]["event_type"] == "gate_wait"
 
 
 def test_complete_step_and_record_artifact_merge_artifacts() -> None:
@@ -342,7 +421,8 @@ def test_complete_step_and_record_artifact_merge_artifacts() -> None:
         "daily_plan_json": "outputs/plan.json",
         "execution_preview_json": "outputs/preview.json",
     }
-    assert completed.history[-1]["event"] == "complete_step"
+    assert with_artifact.history[-1]["event_type"] == "artifact_recorded"
+    assert completed.history[-1]["event_type"] == "step_completed"
 
 
 def test_transition_helpers_validate_stage_and_step() -> None:

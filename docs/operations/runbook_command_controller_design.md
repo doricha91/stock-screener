@@ -703,13 +703,18 @@ Notes:
 - `get_state_path(workspace)` remains a legacy/default single-state path and must not be removed.
 - Stage transition helpers should be the only way future stage runners set `RUNNING`, `WAIT`, `PASS`, `BLOCKED`, or `FAILED`.
 - Step completion should update `last_completed_step` and merge artifact updates without changing frozen context.
-- Duplicate-sensitive commands should reserve an idempotency record before execution, transition through lifecycle status, and block repeated keys.
+- Artifact refs must be normalized before they become idempotency key material: workspace-relative when possible, `/` separators, no leading `./`, and workspace-outside absolute paths rejected.
+- Duplicate-sensitive commands should reserve an idempotency record before execution, transition through `RESERVED -> RUNNING -> PASS/FAILED`, and block repeated keys.
+- `RESERVED`, `RUNNING`, `PASS`, `FAILED`, and `UNKNOWN_AFTER_CRASH` duplicate keys must not auto-run again.
+- Recovery/reset is a later design step.
 - This step still does not execute Step 8, Step 14, Step 17, or any other command.
 
 ### 6-3D. Stage A Step 0-5 execution
 
 Goal: execute Step 0-5 with fail-stop behavior, stage result files, and Telegram-ready summaries.
 Out of scope: Gate 1 polling and Stage B.
+
+6-3D must use the transition helpers and per-`runbook_day_id` state path introduced in 6-3C-3.
 
 ### 6-3E. Gate 1 readiness check
 

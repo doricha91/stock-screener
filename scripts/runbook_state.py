@@ -5,7 +5,7 @@ import json
 import re
 import sys
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,7 +21,17 @@ STATE_DIRNAME = "runbook_states"
 SCHEMA_VERSION = "runbook_state.v1"
 STAGE_IDS = ("A", "GATE1", "B", "GATE2", "C")
 ALLOWED_STATUSES = {"READY", "PENDING", "RUNNING", "WAIT", "PASS", "BLOCKED", "FAILED", "DONE"}
-ALLOWED_IDEMPOTENCY_STATUSES = {"RECORDED", "BLOCKED", "CONSUMED", "PASS", "FAILED"}
+ALLOWED_IDEMPOTENCY_STATUSES = {
+    "RESERVED",
+    "RUNNING",
+    "PASS",
+    "FAILED",
+    "BLOCKED",
+    "UNKNOWN_AFTER_CRASH",
+    "RECORDED",
+    "CONSUMED",
+}
+BLOCKING_IDEMPOTENCY_STATUSES = {"RESERVED", "RUNNING", "PASS", "FAILED", "BLOCKED", "UNKNOWN_AFTER_CRASH"}
 
 
 @dataclass(frozen=True)
@@ -76,7 +86,18 @@ def _now_iso(timezone: str) -> str:
         tz = ZoneInfo(timezone)
     except ZoneInfoNotFoundError as exc:
         raise ValueError(f"unknown timezone: {timezone}") from exc
-    return datetime.now(tz).isoformat(timespec="seconds")
+    return datetime.now(tz).isoformat(timespec="microseconds")
+
+
+def _next_updated_at(state: RunbookState) -> str:
+    now = datetime.fromisoformat(_now_iso(state.timezone))
+    try:
+        previous = datetime.fromisoformat(state.updated_at)
+    except ValueError:
+        return now.isoformat(timespec="microseconds")
+    if now <= previous:
+        now = previous + timedelta(microseconds=1)
+    return now.isoformat(timespec="microseconds")
 
 
 def create_initial_state(
@@ -250,13 +271,46 @@ def validate_state(state: RunbookState) -> list[str]:
     return errors
 
 
+def canonicalize_artifact_ref(artifact_ref: str, workspace: Path | None = None) -> str:
+    cleaned = str(artifact_ref or "").strip()
+    if not cleaned:
+        raise ValueError("artifact_ref is required")
+    path = Path(cleaned)
+    if workspace is not None and path.is_absolute():
+        workspace_path = workspace.resolve(strict=False)
+        artifact_path = path.resolve(strict=False)
+        try:
+            cleaned = str(artifact_path.relative_to(workspace_path))
+        except ValueError as exc:
+            raise ValueError("artifact_ref_outside_workspace") from exc
+    elif path.is_absolute():
+        cleaned = str(path)
+    else:
+        cleaned = cleaned.replace("\\", "/")
+        while cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+    return cleaned.replace("\\", "/").strip("/")
+
+
+def canonicalize_artifact_refs(
+    artifact_refs: dict[str, str] | None,
+    workspace: Path | None = None,
+) -> dict[str, str]:
+    return {
+        artifact_name: canonicalize_artifact_ref(artifact_ref, workspace)
+        for artifact_name, artifact_ref in (artifact_refs or {}).items()
+    }
+
+
 def build_idempotency_key(
     state: RunbookState,
     command_key: str,
     artifact_refs: dict[str, str] | None = None,
+    workspace: Path | None = None,
 ) -> str:
+    canonical_refs = canonicalize_artifact_refs(artifact_refs, workspace)
     parts = [state.runbook_day_id, str(command_key)]
-    for artifact_name, artifact_ref in sorted((artifact_refs or {}).items()):
+    for artifact_name, artifact_ref in sorted(canonical_refs.items()):
         parts.append(f"{_safe_id_part(artifact_name)}={_safe_id_part(artifact_ref)}")
     return ":".join(parts)
 
@@ -265,9 +319,18 @@ def has_idempotency_record(state: RunbookState, idempotency_key: str) -> bool:
     return idempotency_key in state.idempotency_records
 
 
+def _duplicate_reason_for_status(status: str) -> str:
+    if status in {"RESERVED", "RUNNING", "UNKNOWN_AFTER_CRASH", "BLOCKED"}:
+        return "idempotency_key_needs_recovery"
+    if status == "FAILED":
+        return "idempotency_key_failed_requires_manual_recovery"
+    return "duplicate_idempotency_key"
+
+
 def assert_not_duplicate(state: RunbookState, idempotency_key: str) -> None:
     if has_idempotency_record(state, idempotency_key):
-        raise ValueError("duplicate_idempotency_key")
+        status = str(state.idempotency_records[idempotency_key].get("status", ""))
+        raise ValueError(_duplicate_reason_for_status(status))
 
 
 def record_idempotency_key(
@@ -279,27 +342,65 @@ def record_idempotency_key(
     status: str = "RECORDED",
     result_ref: str | None = None,
     notes: str = "Reserved/recorded before duplicate-sensitive command execution.",
+    workspace: Path | None = None,
 ) -> RunbookState:
     if stage_id not in STAGE_IDS:
         raise ValueError(f"invalid stage_id: {stage_id}")
     if status not in ALLOWED_IDEMPOTENCY_STATUSES:
         raise ValueError(f"invalid idempotency status: {status}")
-    idempotency_key = build_idempotency_key(state, command_key, artifact_refs)
+    canonical_refs = canonicalize_artifact_refs(artifact_refs, workspace)
+    idempotency_key = build_idempotency_key(state, command_key, canonical_refs)
     assert_not_duplicate(state, idempotency_key)
+    timestamp = _next_updated_at(state)
     record = {
         "idempotency_key": idempotency_key,
         "command_key": command_key,
         "step_id": step_id,
         "stage_id": stage_id,
         "status": status,
-        "created_at": _now_iso(state.timezone),
-        "artifact_refs": dict(artifact_refs or {}),
+        "created_at": timestamp,
+        "artifact_refs": canonical_refs,
         "result_ref": result_ref,
         "notes": notes,
     }
     next_records = dict(state.idempotency_records)
     next_records[idempotency_key] = record
-    return replace(state, updated_at=record["created_at"], idempotency_records=next_records)
+    event = {
+        "event_type": "idempotency_reserved" if status in {"RESERVED", "RECORDED"} else "idempotency_recorded",
+        "stage_id": stage_id,
+        "step_id": step_id,
+        "status": status,
+        "reason": None,
+        "created_at": timestamp,
+        "idempotency_key": idempotency_key,
+    }
+    return replace(
+        state,
+        updated_at=timestamp,
+        idempotency_records=next_records,
+        history=_append_history(state, event),
+    )
+
+
+def reserve_idempotency(
+    state: RunbookState,
+    command_key: str,
+    step_id: int,
+    stage_id: str,
+    artifact_refs: dict[str, str] | None = None,
+    workspace: Path | None = None,
+) -> tuple[RunbookState, str]:
+    next_state = record_idempotency_key(
+        state,
+        command_key,
+        step_id,
+        stage_id,
+        artifact_refs,
+        status="RESERVED",
+        workspace=workspace,
+    )
+    idempotency_key = build_idempotency_key(state, command_key, artifact_refs, workspace)
+    return next_state, idempotency_key
 
 
 def update_idempotency_record(
@@ -313,7 +414,7 @@ def update_idempotency_record(
         raise ValueError(f"invalid idempotency status: {status}")
     if idempotency_key not in state.idempotency_records:
         raise ValueError("missing_idempotency_key")
-    timestamp = _now_iso(state.timezone)
+    timestamp = _next_updated_at(state)
     record = dict(state.idempotency_records[idempotency_key])
     record["status"] = status
     record["updated_at"] = timestamp
@@ -323,7 +424,57 @@ def update_idempotency_record(
         record["notes"] = notes
     next_records = dict(state.idempotency_records)
     next_records[idempotency_key] = record
-    return replace(state, updated_at=timestamp, idempotency_records=next_records)
+    event_type_by_status = {
+        "RUNNING": "idempotency_running",
+        "PASS": "idempotency_pass",
+        "FAILED": "idempotency_failed",
+        "BLOCKED": "idempotency_blocked",
+    }
+    event = {
+        "event_type": event_type_by_status.get(status, "idempotency_updated"),
+        "stage_id": record.get("stage_id"),
+        "step_id": record.get("step_id"),
+        "status": status,
+        "reason": notes,
+        "created_at": timestamp,
+        "idempotency_key": idempotency_key,
+        "result_ref": result_ref,
+    }
+    return replace(
+        state,
+        updated_at=timestamp,
+        idempotency_records=next_records,
+        history=_append_history(state, event),
+    )
+
+
+def mark_idempotency_running(state: RunbookState, idempotency_key: str) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "RUNNING")
+
+
+def mark_idempotency_pass(
+    state: RunbookState,
+    idempotency_key: str,
+    result_ref: str | None = None,
+) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "PASS", result_ref=result_ref)
+
+
+def mark_idempotency_failed(
+    state: RunbookState,
+    idempotency_key: str,
+    reason: str,
+    result_ref: str | None = None,
+) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "FAILED", result_ref=result_ref, notes=reason)
+
+
+def mark_idempotency_blocked(
+    state: RunbookState,
+    idempotency_key: str,
+    reason: str,
+) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "BLOCKED", notes=reason)
 
 
 def consume_idempotency_record(state: RunbookState, idempotency_key: str) -> RunbookState:
@@ -335,7 +486,7 @@ def complete_idempotency_record(
     idempotency_key: str,
     result_ref: str | None = None,
 ) -> RunbookState:
-    return update_idempotency_record(state, idempotency_key, "PASS", result_ref=result_ref)
+    return mark_idempotency_pass(state, idempotency_key, result_ref=result_ref)
 
 
 def fail_idempotency_record(
@@ -371,10 +522,17 @@ def _ensure_step_id(step_id: int) -> None:
 
 def start_stage(state: RunbookState, stage_id: str) -> RunbookState:
     _ensure_stage_id(stage_id)
-    timestamp = _now_iso(state.timezone)
+    timestamp = _next_updated_at(state)
     stage_status = dict(state.stage_status)
     stage_status[stage_id] = "RUNNING"
-    event = {"event": "start_stage", "created_at": timestamp, "stage_id": stage_id}
+    event = {
+        "event_type": "stage_started",
+        "stage_id": stage_id,
+        "step_id": None,
+        "status": "RUNNING",
+        "reason": None,
+        "created_at": timestamp,
+    }
     return replace(
         state,
         updated_at=timestamp,
@@ -387,10 +545,17 @@ def start_stage(state: RunbookState, stage_id: str) -> RunbookState:
 
 def complete_stage(state: RunbookState, stage_id: str) -> RunbookState:
     _ensure_stage_id(stage_id)
-    timestamp = _now_iso(state.timezone)
+    timestamp = _next_updated_at(state)
     stage_status = dict(state.stage_status)
     stage_status[stage_id] = "PASS"
-    event = {"event": "complete_stage", "created_at": timestamp, "stage_id": stage_id}
+    event = {
+        "event_type": "stage_completed",
+        "stage_id": stage_id,
+        "step_id": None,
+        "status": "PASS",
+        "reason": None,
+        "created_at": timestamp,
+    }
     return replace(
         state,
         updated_at=timestamp,
@@ -409,11 +574,19 @@ def fail_stage(
     error: dict[str, Any] | None = None,
 ) -> RunbookState:
     _ensure_stage_id(stage_id)
-    timestamp = _now_iso(state.timezone)
+    timestamp = _next_updated_at(state)
     stage_status = dict(state.stage_status)
     stage_status[stage_id] = "FAILED"
     last_error = {"stage_id": stage_id, "reason": reason, "error": error or {}}
-    event = {"event": "fail_stage", "created_at": timestamp, **last_error}
+    event = {
+        "event_type": "stage_failed",
+        "stage_id": stage_id,
+        "step_id": None,
+        "status": "FAILED",
+        "reason": reason,
+        "created_at": timestamp,
+        "error": error or {},
+    }
     return replace(
         state,
         updated_at=timestamp,
@@ -432,11 +605,19 @@ def block_stage(
     error: dict[str, Any] | None = None,
 ) -> RunbookState:
     _ensure_stage_id(stage_id)
-    timestamp = _now_iso(state.timezone)
+    timestamp = _next_updated_at(state)
     stage_status = dict(state.stage_status)
     stage_status[stage_id] = "BLOCKED"
     last_error = {"stage_id": stage_id, "reason": reason, "error": error or {}}
-    event = {"event": "block_stage", "created_at": timestamp, **last_error}
+    event = {
+        "event_type": "stage_blocked",
+        "stage_id": stage_id,
+        "step_id": None,
+        "status": "BLOCKED",
+        "reason": reason,
+        "created_at": timestamp,
+        "error": error or {},
+    }
     return replace(
         state,
         updated_at=timestamp,
@@ -456,11 +637,19 @@ def wait_gate(
 ) -> RunbookState:
     if gate_id not in {"GATE1", "GATE2"}:
         raise ValueError(f"invalid gate_id: {gate_id}")
-    timestamp = _now_iso(state.timezone)
+    timestamp = _next_updated_at(state)
     stage_status = dict(state.stage_status)
     stage_status[gate_id] = "WAIT"
     last_error = {"stage_id": gate_id, "reason": reason, "next_poll_time": next_poll_time}
-    event = {"event": "wait_gate", "created_at": timestamp, **last_error}
+    event = {
+        "event_type": "gate_wait",
+        "stage_id": gate_id,
+        "step_id": None,
+        "status": "WAIT",
+        "reason": reason,
+        "created_at": timestamp,
+        "next_poll_time": next_poll_time,
+    }
     return replace(
         state,
         updated_at=timestamp,
@@ -472,19 +661,29 @@ def wait_gate(
     )
 
 
-def record_artifact(state: RunbookState, artifact_name: str, artifact_ref: str) -> RunbookState:
+def record_artifact(
+    state: RunbookState,
+    artifact_name: str,
+    artifact_ref: str,
+    workspace: Path | None = None,
+) -> RunbookState:
     if not artifact_name:
         raise ValueError("artifact_name is required")
     if not artifact_ref:
         raise ValueError("artifact_ref is required")
-    timestamp = _now_iso(state.timezone)
+    timestamp = _next_updated_at(state)
     artifacts = dict(state.artifacts)
-    artifacts[artifact_name] = artifact_ref
+    canonical_ref = canonicalize_artifact_ref(artifact_ref, workspace)
+    artifacts[artifact_name] = canonical_ref
     event = {
-        "event": "record_artifact",
+        "event_type": "artifact_recorded",
+        "stage_id": state.current_stage,
+        "step_id": None,
+        "status": state.current_status,
+        "reason": None,
         "created_at": timestamp,
         "artifact_name": artifact_name,
-        "artifact_ref": artifact_ref,
+        "artifact_ref": canonical_ref,
     }
     return replace(state, updated_at=timestamp, artifacts=artifacts, history=_append_history(state, event))
 
@@ -494,19 +693,22 @@ def complete_step(
     step_id: int,
     stage_id: str,
     artifact_updates: dict[str, str] | None = None,
+    workspace: Path | None = None,
 ) -> RunbookState:
     _ensure_step_id(step_id)
     _ensure_stage_id(stage_id)
-    timestamp = _now_iso(state.timezone)
+    timestamp = _next_updated_at(state)
     artifacts = dict(state.artifacts)
     if artifact_updates:
-        artifacts.update(artifact_updates)
+        artifacts.update(canonicalize_artifact_refs(artifact_updates, workspace))
     event = {
-        "event": "complete_step",
+        "event_type": "step_completed",
         "created_at": timestamp,
         "step_id": step_id,
         "stage_id": stage_id,
-        "artifact_updates": dict(artifact_updates or {}),
+        "status": "PASS",
+        "reason": None,
+        "artifact_updates": canonicalize_artifact_refs(artifact_updates, workspace),
     }
     return replace(
         state,
@@ -677,7 +879,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             _print_json({"runner_result": "FAIL", "reason": str(exc)})
             return 1
-        key = build_idempotency_key(state, args.command_key, artifact_refs)
+        key = build_idempotency_key(state, args.command_key, artifact_refs, args.workspace)
         _print_json({"runner_result": "PASS", "idempotency_key": key})
         return 0
     if args.command == "check-idempotency":
@@ -687,7 +889,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             _print_json({"runner_result": "FAIL", "reason": str(exc)})
             return 1
-        key = build_idempotency_key(state, args.command_key, artifact_refs)
+        key = build_idempotency_key(state, args.command_key, artifact_refs, args.workspace)
         exists = has_idempotency_record(state, key)
         _print_json(
             {
@@ -705,7 +907,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             _print_json({"runner_result": "FAIL", "reason": str(exc)})
             return 1
-        key = build_idempotency_key(state, args.command_key, artifact_refs)
+        key = build_idempotency_key(state, args.command_key, artifact_refs, args.workspace)
         try:
             next_state = record_idempotency_key(
                 state,
@@ -713,6 +915,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.step_id,
                 args.stage_id,
                 artifact_refs,
+                workspace=args.workspace,
             )
         except ValueError as exc:
             _print_json({"runner_result": "BLOCKED", "reason": str(exc), "idempotency_key": key})
