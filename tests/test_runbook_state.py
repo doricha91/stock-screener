@@ -39,6 +39,7 @@ def test_initial_state_defaults() -> None:
     assert state.last_completed_stage is None
     assert set(state.stage_status) == {"A", "GATE1", "B", "GATE2", "C"}
     assert all(status == "PENDING" for status in state.stage_status.values())
+    assert state.idempotency_records == {}
 
 
 def test_validate_initial_state_returns_no_errors() -> None:
@@ -55,6 +56,23 @@ def test_save_state_then_load_state_round_trips(tmp_path: Path) -> None:
     loaded = runbook_state.load_state(path)
 
     assert loaded == state
+
+
+def test_save_load_preserves_idempotency_records(tmp_path: Path) -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.record_idempotency_key(
+        state,
+        "execution_commit",
+        8,
+        "B",
+        {"execution_preview_json": "outputs/preview.json"},
+    )
+    path = tmp_path / "runbook_state.json"
+
+    runbook_state.save_state(state, path)
+    loaded = runbook_state.load_state(path)
+
+    assert loaded.idempotency_records == state.idempotency_records
 
 
 def test_same_context_init_keeps_existing_state(tmp_path: Path) -> None:
@@ -100,6 +118,138 @@ def test_validate_state_reports_schema_errors() -> None:
     assert "schema_version must be runbook_state.v1" in errors
     assert "current_stage must be one of A/GATE1/B/GATE2/C" in errors
     assert "last_completed_step must be null or 0..18" in errors
+
+
+def test_build_idempotency_key_includes_runbook_day_and_command_key() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    key = runbook_state.build_idempotency_key(state, "status")
+
+    assert key == "paper_pilot_202606_2026-06-12_2026-06-15:status"
+
+
+def test_build_idempotency_key_includes_sorted_artifact_refs() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    key = runbook_state.build_idempotency_key(
+        state,
+        "execution_commit",
+        {
+            "z_artifact": "outputs/z.json",
+            "execution_preview_json": "outputs/preview.json",
+        },
+    )
+
+    assert key == (
+        "paper_pilot_202606_2026-06-12_2026-06-15:"
+        "execution_commit:"
+        "execution_preview_json=outputs_preview.json:"
+        "z_artifact=outputs_z.json"
+    )
+
+
+def test_record_idempotency_key_adds_record_without_mutating_original_state() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    next_state = runbook_state.record_idempotency_key(
+        state,
+        "execution_commit",
+        8,
+        "B",
+        {"execution_preview_json": "outputs/preview.json"},
+    )
+    key = runbook_state.build_idempotency_key(
+        state,
+        "execution_commit",
+        {"execution_preview_json": "outputs/preview.json"},
+    )
+
+    assert state.idempotency_records == {}
+    assert key in next_state.idempotency_records
+    record = next_state.idempotency_records[key]
+    assert record["command_key"] == "execution_commit"
+    assert record["step_id"] == 8
+    assert record["stage_id"] == "B"
+    assert record["status"] == "RECORDED"
+
+
+def test_duplicate_idempotency_key_is_detected() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    artifact_refs = {"execution_preview_json": "outputs/preview.json"}
+    state = runbook_state.record_idempotency_key(state, "execution_commit", 8, "B", artifact_refs)
+    key = runbook_state.build_idempotency_key(state, "execution_commit", artifact_refs)
+
+    assert runbook_state.has_idempotency_record(state, key) is True
+    try:
+        runbook_state.assert_not_duplicate(state, key)
+    except ValueError as exc:
+        assert str(exc) == "duplicate_idempotency_key"
+    else:
+        raise AssertionError("expected duplicate idempotency key to raise")
+
+    try:
+        runbook_state.record_idempotency_key(state, "execution_commit", 8, "B", artifact_refs)
+    except ValueError as exc:
+        assert str(exc) == "duplicate_idempotency_key"
+    else:
+        raise AssertionError("expected duplicate record to raise")
+
+
+def test_validate_state_checks_idempotency_record_shape() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    malformed = replace(
+        state,
+        idempotency_records={
+            "bad-key": {
+                "idempotency_key": "other-key",
+                "command_key": "execution_commit",
+                "step_id": 99,
+                "stage_id": "BAD",
+                "status": "BAD",
+                "artifact_refs": "not-a-dict",
+            }
+        },
+    )
+
+    errors = runbook_state.validate_state(malformed)
+
+    assert "idempotency_records.bad-key.idempotency_key must match record key" in errors
+    assert "idempotency_records.bad-key.step_id must be 0..18" in errors
+    assert "idempotency_records.bad-key.stage_id is invalid" in errors
+    assert "idempotency_records.bad-key.status is invalid" in errors
+    assert "idempotency_records.bad-key.artifact_refs must be an object" in errors
+
+
+def test_strict_once_command_idempotency_key_examples() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    assert runbook_state.build_idempotency_key(
+        state,
+        "execution_commit",
+        {"execution_preview_json": "outputs/execution_preview.json"},
+    ) == (
+        "paper_pilot_202606_2026-06-12_2026-06-15:"
+        "execution_commit:"
+        "execution_preview_json=outputs_execution_preview.json"
+    )
+    assert runbook_state.build_idempotency_key(
+        state,
+        "review_append",
+        {"review_preview_json": "outputs/review_preview.json"},
+    ) == (
+        "paper_pilot_202606_2026-06-12_2026-06-15:"
+        "review_append:"
+        "review_preview_json=outputs_review_preview.json"
+    )
+    assert runbook_state.build_idempotency_key(
+        state,
+        "eod_commit",
+        {"eod_dryrun_result": "outputs/eod_dryrun.json"},
+    ) == (
+        "paper_pilot_202606_2026-06-12_2026-06-15:"
+        "eod_commit:"
+        "eod_dryrun_result=outputs_eod_dryrun.json"
+    )
 
 
 def test_init_cli_creates_state_file(tmp_path: Path) -> None:
@@ -187,3 +337,67 @@ def test_context_mismatch_init_cli_returns_nonzero_and_does_not_overwrite(tmp_pa
     }
     loaded = runbook_state.load_state(tmp_path / "runbook_state.json")
     assert loaded.frozen_context.data_date == DATA_DATE
+
+
+def test_idempotency_cli_records_and_blocks_duplicate(tmp_path: Path) -> None:
+    runbook_state.init_state_file(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    root = Path(__file__).resolve().parents[1]
+    command = [
+        sys.executable,
+        "scripts\\runbook_state.py",
+        "record-idempotency",
+        "--workspace",
+        str(tmp_path),
+        "--command-key",
+        "execution_commit",
+        "--step-id",
+        "8",
+        "--stage-id",
+        "B",
+        "--artifact",
+        "execution_preview_json=outputs\\preview.json",
+    ]
+
+    first = subprocess.run(command, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+    second = subprocess.run(command, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+
+    assert first.returncode == 0
+    assert json.loads(first.stdout)["runner_result"] == "PASS"
+    assert second.returncode == 1
+    assert json.loads(second.stdout)["runner_result"] == "BLOCKED"
+    assert json.loads(second.stdout)["reason"] == "duplicate_idempotency_key"
+
+
+def test_idempotency_cli_check_reports_duplicate(tmp_path: Path) -> None:
+    runbook_state.init_state_file(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.load_state(tmp_path / "runbook_state.json")
+    state = runbook_state.record_idempotency_key(
+        state,
+        "eod_commit",
+        17,
+        "C",
+        {"eod_dryrun_result": "outputs/eod_dryrun.json"},
+    )
+    runbook_state.save_state(state, tmp_path / "runbook_state.json")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts\\runbook_state.py",
+            "check-idempotency",
+            "--workspace",
+            str(tmp_path),
+            "--command-key",
+            "eod_commit",
+            "--artifact",
+            "eod_dryrun_result=outputs\\eod_dryrun.json",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+    )
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["runner_result"] == "BLOCKED"

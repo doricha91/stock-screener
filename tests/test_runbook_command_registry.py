@@ -102,6 +102,24 @@ def test_artifact_dependency_metadata_for_commit_steps() -> None:
     assert eod_commit.duplicate_run_policy == registry.STRICT_ONCE_PER_ACCOUNT_TRADE_DATE
 
 
+def test_strict_once_commands_are_only_duplicate_sensitive_commit_steps() -> None:
+    strict_once = {
+        command.step_id: command.command_key
+        for command in registry.list_commands()
+        if command.duplicate_run_policy == registry.STRICT_ONCE_PER_ACCOUNT_TRADE_DATE
+    }
+
+    assert strict_once == {
+        8: "execution_commit",
+        14: "review_append",
+        17: "eod_commit",
+    }
+    for command_key in strict_once.values():
+        command = registry.get_command(command_key)
+        assert command.idempotency_key_fields
+        assert command.required_prior_artifacts
+
+
 def test_commit_report_dependency_metadata_for_sync_steps() -> None:
     sync_execution = registry.get_command("sync_execution_status")
     sync_review = registry.get_command("sync_review_status")

@@ -169,6 +169,8 @@ D:\n8n\workspace\stock_screener_ops\stage_runs\YYYYMMDD_HHMMSS_<stage>.json
 D:\n8n\workspace\stock_screener_ops\stage_runs\YYYYMMDD_HHMMSS_<stage>.log
 ```
 
+`runbook_state.json` is a new controller-owned state contract introduced for Phase 1 scheduled runbook automation. It is not an existing schema used by earlier runner scripts. It must coexist with the existing n8n runner context files and must not replace them. It shares the `account_id`, `data_date`, and `trade_date` concepts, but controller state, stage status, artifacts, and duplicate-run records are owned by `runbook_state.json`.
+
 ## Role Separation
 
 ### daily_refresh
@@ -677,8 +679,11 @@ Out of scope: executing duplicate-sensitive commands.
 Notes:
 
 - Step 8, Step 14, and Step 17 duplicate prevention is the highest priority.
+- `runbook_state.json` is a new controller-owned state contract, not an existing runner schema.
+- `idempotency_records` are stored in `runbook_state.json`.
 - If sleep, reboot, retry, or repeated polling tries to re-run the same idempotency key, return `BLOCKED`.
 - Do not automatically use replacement, force, or allow-warnings flags before a manual recovery path is designed.
+- Reset/recovery is a later design step.
 
 ### 6-3D. Stage A Step 0-5 execution
 
