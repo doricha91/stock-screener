@@ -666,6 +666,8 @@ Notes:
 - Freeze `account_id`, `data_date`, and `trade_date` per runbook day.
 - Context must not change inside the same `runbook_state` even if the wall-clock date changes during polling.
 - `runbook_state.json` must include `stage`, `last_completed_step`, `current_status`, and `frozen_context`.
+- If an existing state has a different requested context, return `BLOCKED` and do not overwrite it automatically.
+- Reset/recovery for a different context is a separate follow-up design step.
 
 ### 6-3C-2. idempotency key and duplicate-run prevention
 
