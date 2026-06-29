@@ -1,35 +1,40 @@
 # Runbook Command Controller Design
 
-This document designs a safe controller for running selected Paper Daily Cycle runbook commands. The revised near-term target is an ngrok-free scheduled push model, with interactive Telegram control deferred to a later phase. It is a design document only. It does not implement Python controller code, n8n workflow changes, Telegram commands, Windows wrappers, Task Scheduler, Notion writes, or broker/order execution.
+This document designs a safe controller for running Paper Daily Cycle runbook commands. The revised Phase 1 target is ngrok-free scheduled runbook automation: local Windows scheduling executes guarded runbook stages and pushes stage results to Telegram with outbound `sendMessage`. Interactive Telegram control remains a later phase. This is a design document only. It does not implement Python controller code, n8n workflow changes, Telegram commands, Windows wrappers, Task Scheduler registration, Notion writes, or broker/order execution.
 
 ## Purpose
 
-The current n8n/Telegram MVP can read latest status files when inbound webhook routing is available. For the next 3-6 month forward test, the safer first automation layer is local scheduled refresh plus outbound Telegram push. Interactive command execution and approval from Telegram should remain a later phase.
+The current n8n/Telegram MVP can read latest status files when inbound webhook routing is available. For the next 3-6 month forward test, the intended first automation layer is local scheduled runbook execution plus outbound Telegram push. Telegram inbound commands are not required because the local Windows host initiates every scheduled run.
 
 Phase 1 target shape:
 
 ```text
 Windows Task Scheduler = scheduled trigger
-Windows runner wrapper = local execution entrypoint
-daily_refresh = safe status/preview refresh
-Runbook Command Controller = optional local CLI for read-only/preview command execution
-Telegram sendMessage = scheduled result push channel
-Operator = manual Notion import/sync/commit/write approval executor
+Windows runner wrapper = local controller entrypoint
+Runbook Command Controller = guarded Stage A/B/C executor for Step 0-18
+daily_refresh = status/eod_dryrun freshness helper, not the stage executor
+Notion = manual input surface for Step 6 and Step 12 gates
+Telegram sendMessage = scheduled stage result push channel
+Operator = manual input provider and exception resolver
 ```
 
 The controller is not a trading bot. It is a guarded operator tool for the documented Paper Daily Cycle. It must preserve the project rule that local files, CSV/JSON/Markdown artifacts, SQLite DBs, and existing scripts remain the source of truth.
 
 ## Deployment Phases
 
-### Phase 1: Local Scheduled Push
+### Phase 1: Ngrok-free Scheduled Runbook Automation
 
 - ngrok is not required.
-- Windows Task Scheduler runs `daily_refresh` and, later, local controller read/preview commands.
-- Telegram is a `sendMessage` push destination.
-- No inbound Telegram commands are received.
-- Notion import/sync/commit/write approval stays manual.
+- Telegram inbound commands are not used.
+- The controller runs on local Windows without ngrok, Cloudflare Tunnel, or VPS.
+- Stage A starts at a user-configured scheduled time.
+- Step 6 and Step 12 are the only manual input gates.
+- Step 0-5, Step 7-11, and Step 13-18 run automatically when their guard conditions are satisfied.
+- Each step and stage writes txt/json/log results.
+- Telegram receives stage result, wait, blocked, and failure messages through outbound `sendMessage`.
+- Broker/API/live order execution is out of scope.
 
-Phase 1 is the default target for the 3-6 month forward test because it has no public inbound endpoint requirement and keeps write-risk operations under direct operator control.
+Phase 1 is the default target for the 3-6 month forward test because it has no public inbound endpoint requirement while still automating the documented runbook around explicit manual Notion gates.
 
 ### Phase 2: Interactive Local Control
 
@@ -70,11 +75,105 @@ stock-screener scripts = actual paper ops commands
 
 ngrok is not required for Phase 1. ngrok or an equivalent public HTTPS tunnel is required only when local n8n must receive Telegram webhook events.
 
+## Phase 1 Stage Model
+
+Stage A starts at a user-configured scheduled time. Example: 21:00 KST is only an example, not a hardcoded policy.
+
+Configuration candidates:
+
+```text
+RUNBOOK_STAGE_A_TIME_LOCAL=HH:MM
+RUNBOOK_POLL_INTERVAL_MINUTES=60
+RUNBOOK_TIMEZONE=Asia/Seoul
+```
+
+### Stage A: Pre-market / Daily Plan Stage
+
+Trigger: user-configured scheduled time.
+
+Steps:
+
+- Step 0 Orchestrator status
+- Step 1 Data prepare
+- Step 2 Data freshness
+- Step 3 Daily Plan
+- Step 4 Daily Plan Notion export
+- Step 5 Manual Execution template export
+
+### Manual Gate 1: Step 6 Notion Execution Input
+
+The controller polls for readiness. It must not run Stage B until every readiness condition is met.
+
+Readiness conditions:
+
+- Actual Price is filled.
+- `Status=READY`.
+- Account ID matches the frozen runbook context.
+- Execution Date matches `trade_date`.
+
+### Stage B: Execution Import / Review Template Stage
+
+Trigger: Gate 1 readiness is met, either during a scheduled check or periodic polling.
+
+Steps:
+
+- Step 7 Execution preview
+- Step 8 Execution commit
+- Step 9 Execution status sync
+- Step 10 Daily Review
+- Step 11 Manual Review template export
+
+### Manual Gate 2: Step 12 Notion Review Input
+
+The controller polls for readiness. It must not run Stage C until every readiness condition is met.
+
+Readiness conditions:
+
+- Manual Answer is filled.
+- Review Status is `reviewed` or `REVIEWED`.
+- Import Status is `READY`.
+- Account ID matches the frozen runbook context.
+- Review Date matches `trade_date`.
+
+### Stage C: Review Import / EOD Close Stage
+
+Trigger: Gate 2 readiness is met, either during a scheduled check or periodic polling.
+
+Steps:
+
+- Step 13 Review preview
+- Step 14 Review append
+- Step 15 Review status sync
+- Step 16 EOD dry-run
+- Step 17 EOD commit
+- Step 18 Final status
+
+### Gate Polling And State
+
+Gate polling:
+
+- Default example: once per hour.
+- The actual value must be configurable.
+- If gate conditions are not met, the controller must not execute the next stage and should push `WAIT` to Telegram.
+- If gate conditions are met, the controller should run the next stage once.
+- Stage state must prevent duplicate execution after sleep, reboot, retry, or repeated polling.
+
+State files:
+
+```text
+D:\n8n\workspace\stock_screener_ops\runbook_state.json
+D:\n8n\workspace\stock_screener_ops\stage_runs\latest.txt
+D:\n8n\workspace\stock_screener_ops\stage_runs\latest.json
+D:\n8n\workspace\stock_screener_ops\stage_runs\YYYYMMDD_HHMMSS_<stage>.txt
+D:\n8n\workspace\stock_screener_ops\stage_runs\YYYYMMDD_HHMMSS_<stage>.json
+D:\n8n\workspace\stock_screener_ops\stage_runs\YYYYMMDD_HHMMSS_<stage>.log
+```
+
 ## Role Separation
 
 ### daily_refresh
 
-`daily_refresh` is a status/preview freshness command, not the full daily ops executor.
+`daily_refresh` is a status/eod_dryrun freshness helper, not the Phase 1 runbook stage executor.
 
 Implemented role:
 
@@ -86,11 +185,11 @@ resolve dates
 -> latest status files
 ```
 
-It should remain safe for scheduled refresh. It does not run plan generation, Notion export/import, commit, sync, approval, or live broker activity.
+It should remain safe for status freshness checks. It does not run plan generation, Notion export/import, commit, sync, approval, or live broker activity.
 
-`daily_refresh` remains the safest scheduled automation boundary. It may be run once per operating day after expected market data availability. Its output is suitable for Telegram push. It must not execute Notion write, ledger commit, state commit, sync, or broker/order actions.
+`daily_refresh` can still be used by the controller as a freshness helper or fallback diagnostic. It is not the center of Phase 1. The center of Phase 1 is the Runbook Command Controller, which controls Stage A/B/C execution and gate polling.
 
-Phase 1 push outputs:
+`daily_refresh` helper outputs:
 
 ```text
 context_latest.txt
@@ -102,35 +201,42 @@ daily_refresh_latest.json
 
 ### Runbook Command Controller
 
-The controller is the future executor for `paper_daily_cycle_commands.md` steps. It maps an explicit `command_key` to a predefined argv template and executes it with `shell=False`.
+The controller is the Phase 1 executor for `paper_daily_cycle_commands.md` steps. It maps an explicit `command_key` to a predefined argv template and executes it with `shell=False`.
 
 It is responsible for:
 
 - command registry lookup
 - context substitution
-- approval gate enforcement
+- stage guard enforcement and Phase 2 approval gate enforcement
 - preview/commit dependency checks
 - command run result files
 - post-run refresh policy
+- Stage A/B/C state transitions
+- Gate 1/2 polling and readiness checks
+- duplicate-run prevention
 
 It must not execute `operator_summary.next_command` as a raw string. The orchestrator can suggest the next step, but the controller must translate that suggestion to a known `command_key` before execution.
 
-Phase 1 controller scope is intentionally narrow:
+Phase 1 controller scope:
 
 - registry list/get
 - `command_key` classification
-- next candidate display
+- next candidate display for operator visibility
 - last/latest result lookup
-- optional local CLI execution for `READ_ONLY` and `READ_ONLY_PREVIEW` only
+- Stage A Step 0-5 execution
+- Gate 1 readiness polling
+- Stage B Step 7-11 execution
+- Gate 2 readiness polling
+- Stage C Step 13-18 execution
+- Telegram scheduled push summaries
 
 Phase 1 does not include:
 
 - Telegram `/run` connection
 - Telegram `/request` connection
 - Telegram `/approve` connection
-- Notion write execution
-- ledger commit execution
-- `eod_commit` execution
+- inbound Telegram control
+- broker/API/live order execution
 
 ### Approval Controller
 
@@ -144,17 +250,15 @@ It is responsible for:
 - approval status/history files
 - expiration checks
 
-Approval Controller is designed now but not activated in Phase 1. In Phase 1, write-risk commands remain manual operator actions. Approval files are required only when Phase 2 interactive control begins.
+Approval Controller is designed now but not activated in Phase 1. In Phase 1, controller-owned stage execution uses fixed stage policy, frozen context, idempotency keys, preview artifacts, commit reports, and fail-stop guards instead of interactive approval files. Approval files are required only when Phase 2 interactive control begins.
 
 Phase 1 manual-only items:
 
-- Notion import
-- Notion sync
-- execution commit
-- review append
-- eod commit
+- Step 6 Notion Execution input
+- Step 12 Notion Review input
+- exception resolution after `FAILED` or `BLOCKED`
 - git commit / push
-- any write approval
+- any interactive Telegram approval
 - any broker/API/order action
 
 ### n8n/Telegram
@@ -181,22 +285,50 @@ They must not:
 - `operator_summary.next_command` is never executed directly.
 - Every executable action is `command_key -> registry -> argv_template -> subprocess(..., shell=False)`.
 - Unknown commands are `BLOCKED`.
-- Write commands require a request/approve flow.
+- Interactive write commands require a request/approve flow in Phase 2.
 - Approval freezes `account_id`, `data_date`, `trade_date`, `command_key`, `argv`, and relevant preview/report paths.
 - `approve` executes only stored approval argv, not a newly assembled command.
 - No broker/API/order placement is in scope.
 
+## Major Risks And Required Guards
+
+Major risks:
+
+- Duplicate execution creates duplicate Notion rows.
+- Re-running commit commands duplicates local ledger/state effects.
+- Context/date changes between preview and commit.
+- Stage B or C runs before Step 6 or Step 12 input is ready.
+- Steps continue after an earlier step failed.
+- Stale data is used to create a plan.
+- Notion sync failure leaves local source-of-truth and Notion status inconsistent.
+- EOD commit is re-run or same-date replacement occurs unexpectedly.
+- PC sleep, reboot, or update causes a scheduled run to be missed.
+
+Required guards:
+
+- Execute only allowlisted `command_key` values.
+- Use `shell=False` execution only.
+- Use stage-level idempotency keys.
+- Freeze `account_id`, `data_date`, and `trade_date` for the runbook day.
+- Freeze preview artifact paths for commit steps.
+- Freeze commit report paths for sync steps.
+- Stop the current stage immediately when a step fails.
+- Keep Stage B/C `BLOCKED` until Gate 1/2 readiness is proven.
+- Require EOD dry-run `PASS` before EOD commit.
+- Prevent same-date commit re-execution unless an explicit manual recovery path is designed later.
+- Do not automatically use replacement, force, or allow-warnings flags.
+
 ## Phase 1 Scheduled Telegram Push
 
-Phase 1 should use scheduled outbound push, not Telegram Trigger inbound commands.
+Phase 1 should use scheduled outbound push, not Telegram Trigger inbound commands. Push messages report stage progress and required manual action; they do not accept commands.
 
 Flow:
 
 ```text
 Windows Task Scheduler
--> run_daily_refresh wrapper
--> python scripts\n8n_paper_ops_runner.py daily_refresh
--> daily_refresh_latest.txt/json
+-> runbook controller wrapper
+-> controller starts Stage A or polls Gate 1/2 based on runbook_state.json
+-> stage_runs/latest.txt/json
 -> Telegram sendMessage
 ```
 
@@ -212,6 +344,27 @@ Initial recommendation:
 - Use Option A for the minimum Phase 1 setup.
 - Use Option B only if reusing existing n8n Telegram credential management is more important than minimizing components.
 - Do not use Telegram Trigger/webhook in Phase 1.
+
+Telegram Phase 1 role:
+
+- scheduled run result push
+- `WAIT` / `BLOCKED` / `FAILED` / `PASS` alerts
+- next required manual action guidance
+
+Telegram summary fields:
+
+```text
+stage
+runner_result
+account_id
+data_date
+trade_date
+current_step
+last_completed_step
+blocked_reason
+next_required_manual_action
+next_poll_time
+```
 
 ## Command Registry Schema
 
@@ -263,7 +416,7 @@ Context substitution must validate every placeholder. Missing context fields sho
 
 ## Command Types And Approval Gate
 
-| command_type | Meaning | Auto run | Approval |
+| command_type | Meaning | Interactive run | Interactive approval |
 | --- | --- | --- | --- |
 | `READ_ONLY` | Inspects local or remote read-only state. | Yes | No |
 | `READ_ONLY_PREVIEW` | Reads input and writes preview artifacts only. | Yes | No |
@@ -282,11 +435,25 @@ Gate rules:
 - `UNKNOWN` and `BLOCKED` cannot be run or requested.
 - If `recommended_operator_action=RESOLVE_CONFLICT`, all write requests are blocked until status is clean.
 
+These gate rules apply to Phase 2 interactive Telegram control and ad hoc local command execution. Phase 1 scheduled runbook automation uses stage policy instead: the controller may execute eligible write-risk steps automatically only inside Stage A/B/C, with frozen context, idempotency keys, fixed artifact paths, and fail-stop guards.
+
+## Phase 1 Step Automation Policy
+
+| Step | Phase 1 policy |
+| --- | --- |
+| 0-5 | Run automatically in Stage A when schedule and guard conditions are satisfied. |
+| 6 | Manual Gate 1; never auto-execute. |
+| 7-11 | Run automatically after Gate 1 readiness is confirmed. |
+| 12 | Manual Gate 2; never auto-execute. |
+| 13-18 | Run automatically after Gate 2 readiness is confirmed. |
+
+Each stage must stop immediately on failure and push `FAILED` or `BLOCKED` to Telegram. A waiting gate should push `WAIT`, not run the next stage.
+
 ## Runbook Step To command_key Mapping
 
 This table maps Paper Daily Cycle steps 0-18 to controller command keys. It is an initial registry design, not an implementation.
 
-| Step | command_key | argv template | Type | Auto run | Approval | Success criteria | Failure policy |
+| Step | command_key | argv template | Type | Interactive run | Interactive approval | Success criteria | Failure policy |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | `status` | `scripts\\paper_daily_ops.py status --account-id {account_id} --data-date {data_date} --trade-date {trade_date} --json --include-notion-read` | `READ_ONLY` | Yes | No | `operator_summary` exists, blockers reviewed | Stop on blockers/conflicts |
 | 1 | `data_prepare` | `scripts\\paper.py prepare-data --date {data_date} --universe` | `LOCAL_ARTIFACT_WRITE` | No | Yes | prepare errors absent | Fix market data/network/DB |
@@ -321,8 +488,9 @@ Additional controller keys:
 Phase 1:
 
 - No inbound Telegram commands.
-- Scheduled push only.
-- Optional local CLI only.
+- Scheduled Stage A/B/C runbook automation.
+- Scheduled push for stage results, waits, blocks, and failures.
+- Optional local CLI inspection for registry/state/latest results.
 
 The following commands are retained as a Phase 2 interactive control design. They are not part of the Phase 1 scheduled push scope.
 
@@ -363,7 +531,7 @@ Telegram /run execution_preview
 
 Approval requests freeze the command at request time. The approve step must not rebuild argv from current context.
 
-This design is reserved for Phase 2 or later. Approval Controller is not active in Phase 1. During Phase 1, write-risk commands stay manual operator actions and no approval file is required for scheduled push.
+This design is reserved for Phase 2 or later. Approval Controller is not active in Phase 1. During Phase 1, stage-owned write-risk commands are controlled by stage policy, frozen context, idempotency, artifact pinning, and fail-stop behavior; interactive approval files are not required.
 
 Workspace layout:
 
@@ -478,102 +646,108 @@ The controller should retain raw stdout/stderr in `.log` and include only the co
 
 ## Full Development Sequence
 
-### 6-3A-R1. Revise controller design for ngrok-free scheduled push
+### 6-3A-R2. Revise design for scheduled runbook automation
 
-Goal: revise this design so Phase 1 does not require ngrok and prioritizes scheduled Telegram push.
+Goal: revise this design so Phase 1 is ngrok-free scheduled runbook automation with Step 6 and Step 12 as manual gates.
 Out of scope: implementation, n8n changes, Telegram changes.
 
-### 6-3B. command registry read-only implementation
+### 6-3B. command registry implementation for all Step 0-18 command_keys
 
-Goal: implement registry definitions, schema validation, and list/get operations.
+Goal: implement registry definitions, schema validation, list/get operations, command typing, and Stage A/B/C eligibility for every runbook step.
 Out of scope: executing commands.
 
-### 6-3C. controller local CLI list/get/next/last
+### 6-3C. stage model and runbook_state design
 
-Goal: expose local CLI commands for registry list/get, next candidate, and latest result lookup.
-Out of scope: executing write commands.
+Goal: implement stage state, idempotency keys, frozen context, latest stage result paths, and duplicate-run prevention.
+Out of scope: executing stages.
 
-### 6-3D. READ_ONLY / READ_ONLY_PREVIEW local CLI execution
+### 6-3D. Stage A Step 0-5 execution
 
-Goal: execute allowlisted read-only and preview commands from local CLI with `shell=False`.
-Out of scope: approval/write execution.
+Goal: execute Step 0-5 with fail-stop behavior, stage result files, and Telegram-ready summaries.
+Out of scope: Gate 1 polling and Stage B.
 
-### 6-3E. command run result file structure
+### 6-3E. Gate 1 readiness check
 
-Goal: persist `command_runs/latest.*`, timestamped json/txt/log, and Telegram-safe summaries.
-Out of scope: approval controller.
+Goal: poll Notion execution input readiness for Actual Price, `Status=READY`, Account ID, and Execution Date.
+Out of scope: Stage B execution.
 
-### 6-4A. Windows daily_refresh wrapper
+### 6-3F. Stage B Step 7-11 execution
 
-Goal: provide a stable wrapper that runs `daily_refresh`, writes logs, and returns a clear exit status.
-Out of scope: Task Scheduler registration and Telegram push.
+Goal: execute Step 7-11 after Gate 1 readiness, pin preview/commit artifacts, sync Notion status, and export review template.
+Out of scope: Gate 2 polling and Stage C.
 
-### 6-4B. scheduled Telegram push implementation
+### 6-3G. Gate 2 readiness check
 
-Goal: send `daily_refresh_latest.txt` or a compact summary to Telegram via outbound `sendMessage`.
-Out of scope: inbound Telegram commands.
+Goal: poll Notion review input readiness for Manual Answer, Review Status, Import Status, Account ID, and Review Date.
+Out of scope: Stage C execution.
 
-### 6-4C. Task Scheduler documentation
+### 6-3H. Stage C Step 13-18 execution
 
-Goal: document scheduling time, working directory, environment variables, logs, and failure handling.
+Goal: execute Step 13-18 after Gate 2 readiness, require EOD dry-run PASS before EOD commit, and finish with final status.
+Out of scope: inbound Telegram control.
+
+### 6-4A. Windows wrapper for runbook controller
+
+Goal: provide a stable wrapper for stage start, polling, logs, environment variables, and exit codes.
 Out of scope: registering the task automatically.
 
-### 6-5. 3-6 month forward-test operating procedure
+### 6-4B. configurable schedule and polling documentation
 
-Goal: define daily operating routine, manual review/write steps, metrics, and weekly review cadence.
-Out of scope: interactive Telegram control.
+Goal: document `RUNBOOK_STAGE_A_TIME_LOCAL`, `RUNBOOK_POLL_INTERVAL_MINUTES`, timezone, missed-run behavior, and recovery checks.
+Out of scope: implementing Task Scheduler registration.
 
-### 6-6. warning/error scheduled alert
+### 6-4C. Telegram scheduled push
 
-Goal: push alerts for stale data, failed refresh, failed command runs, and missed operating days.
+Goal: push stage `PASS`, `WAIT`, `BLOCKED`, and `FAILED` summaries using outbound `sendMessage`.
+Out of scope: inbound Telegram commands.
+
+### 6-5. failure/block/wait alert handling
+
+Goal: standardize alert text, retry recommendations, blocked reasons, next manual action, and next poll time.
 Out of scope: auto-remediation.
 
-### 6-7. optional approval file lifecycle implementation
+### 6-6. forward-test operating procedure
 
-Goal: implement approval request/reject/expire storage without connecting write command execution.
-Out of scope: Telegram approval UI and write command execution.
+Goal: define 3-6 month operating cadence, monitoring metrics, manual exception handling, and review checkpoints.
+Out of scope: interactive Telegram control.
 
-### 6-8. optional interactive Telegram control decision
+### 6-7. optional inbound Telegram control decision
 
-Goal: choose whether interactive control should use webhook or polling after Phase 1 proves useful.
-Out of scope: implementing both paths at once.
+Goal: decide whether Phase 2 should use webhook or polling after scheduled automation is proven.
+Out of scope: implementing inbound control.
 
-### 6-8A. webhook path: ngrok/Cloudflare Tunnel/VPS
+Phase 2 options:
 
-Goal: implement interactive n8n/Telegram routing with a public HTTPS endpoint.
-Out of scope: polling loop implementation.
-
-### 6-8B. polling path: Telegram getUpdates
-
-Goal: implement a local outbound polling loop that avoids public inbound webhook requirements.
-Out of scope: public webhook setup.
-
-### 6-9. approval-required write command connection
-
-Goal: connect `LOCAL_ARTIFACT_WRITE`, `NOTION_WRITE`, `LEDGER_WRITE`, and `STATE_SNAPSHOT_WRITE` through request/approve after previews are reliable.
-Out of scope: broker/API/live order execution.
+- Webhook path: ngrok, Cloudflare Tunnel, or VPS.
+- Polling path: Telegram `getUpdates`.
+- Interactive commands: `/status`, `/run`, `/request`, `/approve`, `/reject`.
 
 ## Forward Test Boundary
 
 During the 3-6 month forward test:
 
-- `daily_refresh` runs automatically once per operating day.
-- Telegram push reports `PASS`/`WARNING`/`FAIL`, `data_date`, `trade_date`, stale flag, and `recommended_operator_action`.
-- The operator manually reviews outputs.
-- The operator manually performs Notion imports, syncs, commits, and any write approvals.
-- No automatic write command is executed from Telegram.
+- Stage A starts automatically once per operating day at the user-configured scheduled time.
+- Gate 1 and Gate 2 polling runs at the configured interval.
+- Stage B runs once after Step 6 Notion execution input is ready.
+- Stage C runs once after Step 12 Notion review input is ready.
+- Telegram push reports `PASS` / `WARNING` / `WAIT` / `BLOCKED` / `FAILED`, `stage`, `account_id`, `data_date`, `trade_date`, `current_step`, `last_completed_step`, `blocked_reason`, `next_required_manual_action`, and `next_poll_time`.
+- The operator manually provides Step 6 and Step 12 Notion inputs.
+- The operator manually resolves blocked or failed states.
+- No automatic write command is executed from Telegram inbound commands.
 - No live order or broker action is allowed.
 
 Tracking metrics:
 
-- `daily_refresh` success rate
+- Stage A/B/C success rate
 - stale data frequency
-- failed run frequency
+- failed step frequency
+- blocked/wait frequency
 - manual intervention count
 - Notion sync/commit error count
+- duplicate-prevention block count
 - missed operating days
 - time spent per daily cycle
-- whether push-only was sufficient
+- whether scheduled automation without inbound Telegram control was sufficient
 
 ## Open Questions And Risks
 
