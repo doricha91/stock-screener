@@ -30,6 +30,45 @@ def test_runbook_day_id_uses_account_data_date_and_trade_date() -> None:
     )
 
 
+def test_legacy_and_multi_account_state_paths(tmp_path: Path) -> None:
+    runbook_day_id = runbook_state.get_runbook_day_id(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    assert runbook_state.get_state_path(tmp_path) == tmp_path / "runbook_state.json"
+    assert runbook_state.get_state_dir(tmp_path) == tmp_path / "runbook_states"
+    assert (
+        runbook_state.get_state_path_for_runbook_day_id(tmp_path, runbook_day_id)
+        == tmp_path / "runbook_states" / f"{runbook_day_id}.json"
+    )
+    assert (
+        runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+        == tmp_path / "runbook_states" / f"{runbook_day_id}.json"
+    )
+
+
+def test_context_state_files_are_separate_per_account(tmp_path: Path) -> None:
+    result_a, path_a, state_a = runbook_state.init_state_file_for_context(
+        tmp_path,
+        "paper_A",
+        DATA_DATE,
+        TRADE_DATE,
+    )
+    result_b, path_b, state_b = runbook_state.init_state_file_for_context(
+        tmp_path,
+        "paper_B",
+        DATA_DATE,
+        TRADE_DATE,
+    )
+
+    assert result_a == "CREATED"
+    assert result_b == "CREATED"
+    assert path_a == tmp_path / "runbook_states" / "paper_A_2026-06-12_2026-06-15.json"
+    assert path_b == tmp_path / "runbook_states" / "paper_B_2026-06-12_2026-06-15.json"
+    assert state_a.frozen_context.account_id == "paper_A"
+    assert state_b.frozen_context.account_id == "paper_B"
+    assert runbook_state.load_state_for_context(tmp_path, "paper_A", DATA_DATE, TRADE_DATE) == state_a
+    assert runbook_state.load_state_for_context(tmp_path, "paper_B", DATA_DATE, TRADE_DATE) == state_b
+
+
 def test_initial_state_defaults() -> None:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
 
@@ -195,6 +234,37 @@ def test_duplicate_idempotency_key_is_detected() -> None:
         raise AssertionError("expected duplicate record to raise")
 
 
+def test_idempotency_lifecycle_updates_existing_record() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    refs = {"execution_preview_json": "outputs/preview.json"}
+    state = runbook_state.record_idempotency_key(state, "execution_commit", 8, "B", refs)
+    key = runbook_state.build_idempotency_key(state, "execution_commit", refs)
+
+    consumed = runbook_state.consume_idempotency_record(state, key)
+    passed = runbook_state.complete_idempotency_record(consumed, key, result_ref="outputs/commit_report.json")
+    failed = runbook_state.fail_idempotency_record(consumed, key, result_ref="outputs/failed_report.json", notes="failed")
+    blocked = runbook_state.block_idempotency_record(state, key, notes="duplicate")
+
+    assert consumed.idempotency_records[key]["status"] == "CONSUMED"
+    assert passed.idempotency_records[key]["status"] == "PASS"
+    assert passed.idempotency_records[key]["result_ref"] == "outputs/commit_report.json"
+    assert failed.idempotency_records[key]["status"] == "FAILED"
+    assert failed.idempotency_records[key]["notes"] == "failed"
+    assert blocked.idempotency_records[key]["status"] == "BLOCKED"
+    assert blocked.idempotency_records[key]["notes"] == "duplicate"
+
+
+def test_idempotency_lifecycle_requires_existing_record() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    try:
+        runbook_state.update_idempotency_record(state, "missing", "PASS")
+    except ValueError as exc:
+        assert str(exc) == "missing_idempotency_key"
+    else:
+        raise AssertionError("expected missing idempotency record to raise")
+
+
 def test_validate_state_checks_idempotency_record_shape() -> None:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     malformed = replace(
@@ -218,6 +288,77 @@ def test_validate_state_checks_idempotency_record_shape() -> None:
     assert "idempotency_records.bad-key.stage_id is invalid" in errors
     assert "idempotency_records.bad-key.status is invalid" in errors
     assert "idempotency_records.bad-key.artifact_refs must be an object" in errors
+
+
+def test_start_and_complete_stage_transitions() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    running = runbook_state.start_stage(state, "A")
+    completed = runbook_state.complete_stage(running, "A")
+
+    assert running.current_stage == "A"
+    assert running.current_status == "RUNNING"
+    assert running.stage_status["A"] == "RUNNING"
+    assert running.history[-1]["event"] == "start_stage"
+    assert completed.current_status == "PASS"
+    assert completed.stage_status["A"] == "PASS"
+    assert completed.last_completed_stage == "A"
+    assert completed.history[-1]["event"] == "complete_stage"
+    assert runbook_state.validate_state(completed) == []
+
+
+def test_fail_block_and_wait_transitions() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    failed = runbook_state.fail_stage(state, "A", "stage_failed", {"detail": "boom"})
+    blocked = runbook_state.block_stage(state, "B", "blocked_reason")
+    waiting = runbook_state.wait_gate(state, "GATE1", "not_ready", "2026-06-29T22:00:00+09:00")
+
+    assert failed.current_status == "FAILED"
+    assert failed.stage_status["A"] == "FAILED"
+    assert failed.last_error == {"stage_id": "A", "reason": "stage_failed", "error": {"detail": "boom"}}
+    assert blocked.current_status == "BLOCKED"
+    assert blocked.stage_status["B"] == "BLOCKED"
+    assert blocked.last_error["reason"] == "blocked_reason"
+    assert waiting.current_status == "WAIT"
+    assert waiting.stage_status["GATE1"] == "WAIT"
+    assert waiting.last_error["next_poll_time"] == "2026-06-29T22:00:00+09:00"
+
+
+def test_complete_step_and_record_artifact_merge_artifacts() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    with_artifact = runbook_state.record_artifact(state, "daily_plan_json", "outputs/plan.json")
+    completed = runbook_state.complete_step(
+        with_artifact,
+        7,
+        "B",
+        {"execution_preview_json": "outputs/preview.json"},
+    )
+
+    assert completed.last_completed_step == 7
+    assert completed.current_stage == "B"
+    assert completed.artifacts == {
+        "daily_plan_json": "outputs/plan.json",
+        "execution_preview_json": "outputs/preview.json",
+    }
+    assert completed.history[-1]["event"] == "complete_step"
+
+
+def test_transition_helpers_validate_stage_and_step() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    for call in (
+        lambda: runbook_state.start_stage(state, "BAD"),
+        lambda: runbook_state.wait_gate(state, "A", "not_gate"),
+        lambda: runbook_state.complete_step(state, 99, "A"),
+    ):
+        try:
+            call()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected invalid transition input to raise")
 
 
 def test_strict_once_command_idempotency_key_examples() -> None:

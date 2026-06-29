@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_WORKSPACE = Path(r"D:\n8n\workspace\stock_screener_ops")
 STATE_FILENAME = "runbook_state.json"
+STATE_DIRNAME = "runbook_states"
 # runbook_state.json is a new controller-owned state contract for
 # Phase 1 scheduled runbook automation.
 # It does not replace the existing n8n runner context.json contract.
@@ -301,8 +302,244 @@ def record_idempotency_key(
     return replace(state, updated_at=record["created_at"], idempotency_records=next_records)
 
 
+def update_idempotency_record(
+    state: RunbookState,
+    idempotency_key: str,
+    status: str,
+    result_ref: str | None = None,
+    notes: str | None = None,
+) -> RunbookState:
+    if status not in ALLOWED_IDEMPOTENCY_STATUSES:
+        raise ValueError(f"invalid idempotency status: {status}")
+    if idempotency_key not in state.idempotency_records:
+        raise ValueError("missing_idempotency_key")
+    timestamp = _now_iso(state.timezone)
+    record = dict(state.idempotency_records[idempotency_key])
+    record["status"] = status
+    record["updated_at"] = timestamp
+    if result_ref is not None:
+        record["result_ref"] = result_ref
+    if notes is not None:
+        record["notes"] = notes
+    next_records = dict(state.idempotency_records)
+    next_records[idempotency_key] = record
+    return replace(state, updated_at=timestamp, idempotency_records=next_records)
+
+
+def consume_idempotency_record(state: RunbookState, idempotency_key: str) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "CONSUMED")
+
+
+def complete_idempotency_record(
+    state: RunbookState,
+    idempotency_key: str,
+    result_ref: str | None = None,
+) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "PASS", result_ref=result_ref)
+
+
+def fail_idempotency_record(
+    state: RunbookState,
+    idempotency_key: str,
+    result_ref: str | None = None,
+    notes: str | None = None,
+) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "FAILED", result_ref=result_ref, notes=notes)
+
+
+def block_idempotency_record(
+    state: RunbookState,
+    idempotency_key: str,
+    notes: str | None = None,
+) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "BLOCKED", notes=notes)
+
+
+def _append_history(state: RunbookState, event: dict[str, Any]) -> list[dict[str, Any]]:
+    return [*state.history, event]
+
+
+def _ensure_stage_id(stage_id: str) -> None:
+    if stage_id not in STAGE_IDS:
+        raise ValueError(f"invalid stage_id: {stage_id}")
+
+
+def _ensure_step_id(step_id: int) -> None:
+    if not isinstance(step_id, int) or not 0 <= step_id <= 18:
+        raise ValueError("step_id must be 0..18")
+
+
+def start_stage(state: RunbookState, stage_id: str) -> RunbookState:
+    _ensure_stage_id(stage_id)
+    timestamp = _now_iso(state.timezone)
+    stage_status = dict(state.stage_status)
+    stage_status[stage_id] = "RUNNING"
+    event = {"event": "start_stage", "created_at": timestamp, "stage_id": stage_id}
+    return replace(
+        state,
+        updated_at=timestamp,
+        current_stage=stage_id,
+        current_status="RUNNING",
+        stage_status=stage_status,
+        history=_append_history(state, event),
+    )
+
+
+def complete_stage(state: RunbookState, stage_id: str) -> RunbookState:
+    _ensure_stage_id(stage_id)
+    timestamp = _now_iso(state.timezone)
+    stage_status = dict(state.stage_status)
+    stage_status[stage_id] = "PASS"
+    event = {"event": "complete_stage", "created_at": timestamp, "stage_id": stage_id}
+    return replace(
+        state,
+        updated_at=timestamp,
+        current_stage=stage_id,
+        current_status="PASS",
+        last_completed_stage=stage_id,
+        stage_status=stage_status,
+        history=_append_history(state, event),
+    )
+
+
+def fail_stage(
+    state: RunbookState,
+    stage_id: str,
+    reason: str,
+    error: dict[str, Any] | None = None,
+) -> RunbookState:
+    _ensure_stage_id(stage_id)
+    timestamp = _now_iso(state.timezone)
+    stage_status = dict(state.stage_status)
+    stage_status[stage_id] = "FAILED"
+    last_error = {"stage_id": stage_id, "reason": reason, "error": error or {}}
+    event = {"event": "fail_stage", "created_at": timestamp, **last_error}
+    return replace(
+        state,
+        updated_at=timestamp,
+        current_stage=stage_id,
+        current_status="FAILED",
+        stage_status=stage_status,
+        last_error=last_error,
+        history=_append_history(state, event),
+    )
+
+
+def block_stage(
+    state: RunbookState,
+    stage_id: str,
+    reason: str,
+    error: dict[str, Any] | None = None,
+) -> RunbookState:
+    _ensure_stage_id(stage_id)
+    timestamp = _now_iso(state.timezone)
+    stage_status = dict(state.stage_status)
+    stage_status[stage_id] = "BLOCKED"
+    last_error = {"stage_id": stage_id, "reason": reason, "error": error or {}}
+    event = {"event": "block_stage", "created_at": timestamp, **last_error}
+    return replace(
+        state,
+        updated_at=timestamp,
+        current_stage=stage_id,
+        current_status="BLOCKED",
+        stage_status=stage_status,
+        last_error=last_error,
+        history=_append_history(state, event),
+    )
+
+
+def wait_gate(
+    state: RunbookState,
+    gate_id: str,
+    reason: str,
+    next_poll_time: str | None = None,
+) -> RunbookState:
+    if gate_id not in {"GATE1", "GATE2"}:
+        raise ValueError(f"invalid gate_id: {gate_id}")
+    timestamp = _now_iso(state.timezone)
+    stage_status = dict(state.stage_status)
+    stage_status[gate_id] = "WAIT"
+    last_error = {"stage_id": gate_id, "reason": reason, "next_poll_time": next_poll_time}
+    event = {"event": "wait_gate", "created_at": timestamp, **last_error}
+    return replace(
+        state,
+        updated_at=timestamp,
+        current_stage=gate_id,
+        current_status="WAIT",
+        stage_status=stage_status,
+        last_error=last_error,
+        history=_append_history(state, event),
+    )
+
+
+def record_artifact(state: RunbookState, artifact_name: str, artifact_ref: str) -> RunbookState:
+    if not artifact_name:
+        raise ValueError("artifact_name is required")
+    if not artifact_ref:
+        raise ValueError("artifact_ref is required")
+    timestamp = _now_iso(state.timezone)
+    artifacts = dict(state.artifacts)
+    artifacts[artifact_name] = artifact_ref
+    event = {
+        "event": "record_artifact",
+        "created_at": timestamp,
+        "artifact_name": artifact_name,
+        "artifact_ref": artifact_ref,
+    }
+    return replace(state, updated_at=timestamp, artifacts=artifacts, history=_append_history(state, event))
+
+
+def complete_step(
+    state: RunbookState,
+    step_id: int,
+    stage_id: str,
+    artifact_updates: dict[str, str] | None = None,
+) -> RunbookState:
+    _ensure_step_id(step_id)
+    _ensure_stage_id(stage_id)
+    timestamp = _now_iso(state.timezone)
+    artifacts = dict(state.artifacts)
+    if artifact_updates:
+        artifacts.update(artifact_updates)
+    event = {
+        "event": "complete_step",
+        "created_at": timestamp,
+        "step_id": step_id,
+        "stage_id": stage_id,
+        "artifact_updates": dict(artifact_updates or {}),
+    }
+    return replace(
+        state,
+        updated_at=timestamp,
+        current_stage=stage_id,
+        last_completed_step=step_id,
+        artifacts=artifacts,
+        history=_append_history(state, event),
+    )
+
+
 def get_state_path(workspace: Path) -> Path:
     return workspace / STATE_FILENAME
+
+
+def get_state_dir(workspace: Path) -> Path:
+    return workspace / STATE_DIRNAME
+
+
+def get_state_path_for_runbook_day_id(workspace: Path, runbook_day_id: str) -> Path:
+    return get_state_dir(workspace) / f"{_safe_id_part(runbook_day_id)}.json"
+
+
+def get_state_path_for_context(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+) -> Path:
+    return get_state_path_for_runbook_day_id(
+        workspace,
+        get_runbook_day_id(account_id, data_date, trade_date),
+    )
 
 
 def init_state_file(
@@ -322,6 +559,34 @@ def init_state_file(
     if context_matches_state(existing_state, account_id, data_date, trade_date):
         return "EXISTING", existing_state
     raise ValueError("context_mismatch_existing_runbook_state")
+
+
+def init_state_file_for_context(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    timezone: str = "Asia/Seoul",
+) -> tuple[str, Path, RunbookState]:
+    path = get_state_path_for_context(workspace, account_id, data_date, trade_date)
+    requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
+    if not path.exists():
+        save_state(requested_state, path)
+        return "CREATED", path, requested_state
+
+    existing_state = load_state(path)
+    if context_matches_state(existing_state, account_id, data_date, trade_date):
+        return "EXISTING", path, existing_state
+    raise ValueError("context_mismatch_existing_runbook_state")
+
+
+def load_state_for_context(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+) -> RunbookState:
+    return load_state(get_state_path_for_context(workspace, account_id, data_date, trade_date))
 
 
 def _print_json(data: Any) -> None:

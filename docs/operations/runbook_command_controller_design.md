@@ -161,6 +161,7 @@ Gate polling:
 State files:
 
 ```text
+D:\n8n\workspace\stock_screener_ops\runbook_states\{runbook_day_id}.json
 D:\n8n\workspace\stock_screener_ops\runbook_state.json
 D:\n8n\workspace\stock_screener_ops\stage_runs\latest.txt
 D:\n8n\workspace\stock_screener_ops\stage_runs\latest.json
@@ -170,6 +171,12 @@ D:\n8n\workspace\stock_screener_ops\stage_runs\YYYYMMDD_HHMMSS_<stage>.log
 ```
 
 `runbook_state.json` is a new controller-owned state contract introduced for Phase 1 scheduled runbook automation. It is not an existing schema used by earlier runner scripts. It must coexist with the existing n8n runner context files and must not replace them. It shares the `account_id`, `data_date`, and `trade_date` concepts, but controller state, stage status, artifacts, and duplicate-run records are owned by `runbook_state.json`.
+
+Multi-account state layout:
+
+- New stage runner code must use `runbook_states\{runbook_day_id}.json`, derived from `account_id`, `data_date`, and `trade_date`.
+- The legacy/default `runbook_state.json` single-state path remains for compatibility and local schema utilities.
+- Stage runner implementation must not rely on the legacy single-state path when `account_id`, `data_date`, and `trade_date` are known.
 
 ## Role Separation
 
@@ -684,6 +691,20 @@ Notes:
 - If sleep, reboot, retry, or repeated polling tries to re-run the same idempotency key, return `BLOCKED`.
 - Do not automatically use replacement, force, or allow-warnings flags before a manual recovery path is designed.
 - Reset/recovery is a later design step.
+
+### 6-3C-3. multi-account layout, transitions, and idempotency lifecycle
+
+Goal: connect controller-owned state to future stage execution without executing any runbook commands.
+Out of scope: Stage A/B/C execution, gate polling, subprocess execution, Notion read/write, and Telegram push.
+
+Notes:
+
+- State path helpers must support `runbook_states\{runbook_day_id}.json` for multi-account operation.
+- `get_state_path(workspace)` remains a legacy/default single-state path and must not be removed.
+- Stage transition helpers should be the only way future stage runners set `RUNNING`, `WAIT`, `PASS`, `BLOCKED`, or `FAILED`.
+- Step completion should update `last_completed_step` and merge artifact updates without changing frozen context.
+- Duplicate-sensitive commands should reserve an idempotency record before execution, transition through lifecycle status, and block repeated keys.
+- This step still does not execute Step 8, Step 14, Step 17, or any other command.
 
 ### 6-3D. Stage A Step 0-5 execution
 
