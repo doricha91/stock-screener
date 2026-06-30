@@ -27,6 +27,8 @@ def test_dry_run_stage_a_creates_step_0_to_5_command_results(tmp_path: Path) -> 
     )
 
     assert result["runner_result"] == "PASS"
+    assert result["dry_run"] is True
+    assert result["paper_test_confirmed"] is False
     command_dir = tmp_path / "command_runs" / result["runbook_day_id"]
     command_jsons = sorted(command_dir.glob("*.json"))
     assert len(command_jsons) == 6
@@ -53,6 +55,8 @@ def test_dry_run_stage_a_creates_stage_summary_and_latest(tmp_path: Path) -> Non
     stage_dir = tmp_path / "stage_runs" / result["runbook_day_id"]
     assert Path(result["stage_summary_json"]).exists()
     assert Path(result["stage_summary_txt"]).exists()
+    assert Path(result["latest_stage_summary_json"]).exists()
+    assert Path(result["latest_stage_summary_txt"]).exists()
     assert (stage_dir / "latest_A.json").exists()
     assert (stage_dir / "latest_A.txt").exists()
     latest = json.loads((stage_dir / "latest_A.json").read_text(encoding="utf-8"))
@@ -127,9 +131,17 @@ def test_fake_subprocess_success_marks_results_pass(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
 
     assert result["runner_result"] == "PASS"
+    assert result["dry_run"] is False
+    assert result["paper_test_confirmed"] is True
     assert len(calls) == 6
     assert all(isinstance(call, list) for call in calls)
     assert all(call[0] == sys.executable for call in calls)
@@ -157,7 +169,13 @@ def test_fake_subprocess_failure_is_fail_stop(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
 
     assert result["runner_result"] == "FAILED"
     assert len(calls) == 3
@@ -182,13 +200,21 @@ def test_command_result_log_is_written(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
     command_json = next((tmp_path / "command_runs" / result["runbook_day_id"]).glob("*_000_status.json"))
     payload = json.loads(command_json.read_text(encoding="utf-8"))
     log_path = tmp_path / payload["outputs"]["log_ref"]
 
     assert log_path.exists()
     log_text = log_path.read_text(encoding="utf-8")
+    assert "rendered_argv:" in log_text
+    assert "normalized_argv:" in log_text
     assert "argv:" in log_text
     assert "exit_code: 0" in log_text
     assert "plain stdout" in log_text
@@ -233,6 +259,9 @@ def test_cli_stage_a_dry_run_outputs_json(tmp_path: Path) -> None:
     payload = json.loads(completed.stdout)
     assert payload["runner_result"] == "PASS"
     assert payload["stage_id"] == "A"
+    assert payload["dry_run"] is True
+    assert payload["paper_test_confirmed"] is False
+    assert Path(payload["latest_stage_summary_json"]).exists()
     assert Path(payload["stage_summary_json"]).exists()
 
 
@@ -243,3 +272,115 @@ def test_stage_a_summary_uses_result_helper_contract(tmp_path: Path) -> None:
     assert runbook_result.validate_stage_summary(summary) == []
     assert summary["schema_version"] == "runbook_stage_summary.v1"
     assert summary["summary"]["next_stage"] == "GATE1"
+
+
+def test_real_stage_a_without_confirm_is_blocked(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        return {
+            "executed": True,
+            "exit_code": 0,
+            "duration_ms": 1,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+
+    result = runbook_stage_runner.run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "paper_test_confirmation_required"
+    assert result["dry_run"] is False
+    assert result["paper_test_confirmed"] is False
+    assert calls == []
+
+
+def test_real_stage_a_with_confirm_and_paper_account_is_allowed(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        return {
+            "executed": True,
+            "exit_code": 0,
+            "duration_ms": 1,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path,
+        "paper_smoke",
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["paper_test_confirmed"] is True
+    assert result["dry_run"] is False
+    assert len(calls) == 6
+
+
+def test_real_stage_a_with_confirm_and_non_paper_account_is_blocked(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        return {
+            "executed": True,
+            "exit_code": 0,
+            "duration_ms": 1,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path,
+        "live_account",
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "paper_account_required"
+    assert result["paper_test_confirmed"] is True
+    assert calls == []
+
+
+def test_cli_real_stage_a_without_confirm_returns_blocked_json(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts\\runbook_stage_runner.py",
+            "stage-a",
+            "--workspace",
+            str(tmp_path),
+            "--account-id",
+            "paper_cli",
+            "--data-date",
+            DATA_DATE,
+            "--trade-date",
+            TRADE_DATE,
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+    )
+
+    assert completed.returncode == 1
+    payload = json.loads(completed.stdout)
+    assert payload["runner_result"] == "BLOCKED"
+    assert payload["reason"] == "paper_test_confirmation_required"
+    assert payload["dry_run"] is False
+    assert payload["paper_test_confirmed"] is False

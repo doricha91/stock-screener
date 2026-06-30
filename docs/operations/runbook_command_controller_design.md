@@ -746,7 +746,37 @@ Implementation notes:
 - Dry-run mode is allowed for smoke tests; it writes normal result files but does not execute subprocesses.
 - Gate 1 polling, Stage B/C execution, Telegram push, Windows scheduling, and n8n changes remain out of scope.
 
+### 6-3D-1. Stage A full real smoke for paper accounts
+
+Goal: allow full Stage A Step 0-5 real smoke for paper/test accounts.
+Out of scope: Gate 1 polling, Stage B/C execution, Telegram push, Windows scheduling, n8n changes, and broker/live order execution.
+
+Policy:
+
+- Dry-run Stage A may run without extra confirmation.
+- Non-dry-run Stage A requires `--confirm-paper-test`.
+- When `--confirm-paper-test` is used, `account_id` must contain `paper` or `test` case-insensitively.
+- Missing confirmation returns `BLOCKED` with reason `paper_test_confirmation_required`.
+- Non-paper account IDs return `BLOCKED` with reason `paper_account_required`.
+- The paper/test account guard is intentionally simple for smoke testing and should become configurable before any live-account transition.
+- Non-dry-run Stage A can execute Step 4/5 Notion writes and must only be used against paper/test Notion data.
+
+Paper full smoke command:
+
+```cmd
+python scripts\runbook_stage_runner.py stage-a ^
+  --workspace D:\n8n\workspace\stock_screener_ops ^
+  --account-id paper_smoke ^
+  --data-date YYYY-MM-DD ^
+  --trade-date YYYY-MM-DD ^
+  --confirm-paper-test
+```
+
+After the run, inspect `stage_runs/{runbook_day_id}/latest_A.json`, the command result files, command logs, and Notion export results.
+
 ### 6-3E. Gate 1 readiness check
+
+Before 6-3E, Stage A full real smoke should be run only for paper/test accounts with `--confirm-paper-test`.
 
 Goal: poll Notion execution input readiness for Actual Price, `Status=READY`, Account ID, and Execution Date.
 Out of scope: Stage B execution.

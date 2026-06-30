@@ -124,12 +124,22 @@ def run_stage_a(
     trade_date: str,
     timezone: str = "Asia/Seoul",
     dry_run: bool = False,
+    confirm_paper_test: bool = False,
     repo_root: Path | None = None,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
 ) -> dict[str, Any]:
     workspace = Path(workspace)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
+    guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
+    if guard_error:
+        return {
+            "runner_result": "BLOCKED",
+            "stage_id": STAGE_A_ID,
+            "reason": guard_error,
+            "dry_run": dry_run,
+            "paper_test_confirmed": confirm_paper_test,
+        }
     try:
         _, state_path, state = runbook_state.init_state_file_for_context(
             workspace,
@@ -143,6 +153,8 @@ def run_stage_a(
             "runner_result": "BLOCKED",
             "stage_id": STAGE_A_ID,
             "reason": str(exc),
+            "dry_run": dry_run,
+            "paper_test_confirmed": confirm_paper_test,
         }
 
     if not runbook_state.context_matches_state(state, account_id, data_date, trade_date):
@@ -153,6 +165,8 @@ def run_stage_a(
             "stage_id": STAGE_A_ID,
             "runbook_day_id": state.runbook_day_id,
             "reason": "context_mismatch_existing_runbook_state",
+            "dry_run": dry_run,
+            "paper_test_confirmed": confirm_paper_test,
         }
 
     stage_commands = get_stage_a_commands(commands)
@@ -231,6 +245,12 @@ def run_stage_a(
         state,
         stage_summary,
     )
+    stage_summary_paths = runbook_result.get_stage_summary_paths(
+        workspace,
+        state.runbook_day_id,
+        STAGE_A_ID,
+        timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
+    )
 
     return {
         "runner_result": stage_summary["runner_result"],
@@ -239,12 +259,27 @@ def run_stage_a(
         "state_path": str(state_path),
         "stage_summary_json": str(stage_summary_json),
         "stage_summary_txt": str(stage_summary_txt),
+        "latest_stage_summary_json": str(stage_summary_paths["latest_json"]),
+        "latest_stage_summary_txt": str(stage_summary_paths["latest_txt"]),
         "command_results": [
             step["result_json_ref"]
             for step in stage_summary["steps"]
             if step.get("result_json_ref")
         ],
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
     }
+
+
+def _paper_smoke_guard(account_id: str, dry_run: bool, confirm_paper_test: bool) -> str | None:
+    if dry_run:
+        return None
+    if not confirm_paper_test:
+        return "paper_test_confirmation_required"
+    account_id_lower = str(account_id or "").lower()
+    if "paper" not in account_id_lower and "test" not in account_id_lower:
+        return "paper_account_required"
+    return None
 
 
 def _run_stage_a_command(
@@ -272,7 +307,7 @@ def _run_stage_a_command(
             process=process,
             workspace=workspace,
         )
-        return result, _format_command_log(argv, repo_root, process, "", "")
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, "", "")
 
     execution = run_allowlisted_command(argv, repo_root, timeout_sec)
     stdout = str(execution.get("stdout") or "")
@@ -294,7 +329,7 @@ def _run_stage_a_command(
         process=process,
         workspace=workspace,
     )
-    return result, _format_command_log(argv, repo_root, process, stdout, stderr)
+    return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr)
 
 
 def _parse_stdout_json(stdout: str) -> dict[str, Any]:
@@ -309,6 +344,7 @@ def _parse_stdout_json(stdout: str) -> dict[str, Any]:
 
 
 def _format_command_log(
+    rendered_argv: Sequence[str],
     argv: Sequence[str],
     cwd: Path,
     process: dict[str, Any],
@@ -317,6 +353,8 @@ def _format_command_log(
 ) -> str:
     return "\n".join(
         [
+            f"rendered_argv: {json.dumps(list(rendered_argv), ensure_ascii=False)}",
+            f"normalized_argv: {json.dumps(list(argv), ensure_ascii=False)}",
             f"argv: {json.dumps(list(argv), ensure_ascii=False)}",
             f"cwd: {cwd}",
             f"exit_code: {process.get('exit_code')}",
@@ -351,6 +389,7 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_a.add_argument("--trade-date", required=True)
     stage_a.add_argument("--timezone", default="Asia/Seoul")
     stage_a.add_argument("--dry-run", action="store_true")
+    stage_a.add_argument("--confirm-paper-test", action="store_true")
     stage_a.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
     return parser
 
@@ -366,6 +405,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trade_date=args.trade_date,
             timezone=args.timezone,
             dry_run=args.dry_run,
+            confirm_paper_test=args.confirm_paper_test,
             timeout_sec=args.timeout_sec,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
