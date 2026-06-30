@@ -709,12 +709,29 @@ Notes:
 - Recovery/reset is a later design step.
 - This step still does not execute Step 8, Step 14, Step 17, or any other command.
 
+### 6-3C-4. step result file schema and stage summary contract
+
+Goal: define command result and stage summary schemas before Stage A execution.
+Out of scope: Stage A/B/C execution, gate polling, subprocess execution, Notion read/write, and Telegram push.
+
+Notes:
+
+- Command result files must be stored under `command_runs/{runbook_day_id}/`.
+- Stage summary files must be stored under `stage_runs/{runbook_day_id}/`.
+- Command result JSON wraps each step result with `runbook_day_id`, `frozen_context`, `stage_id`, `step_id`, `command_key`, `runner_result`, process metadata, artifact refs, a Telegram-friendly summary, and raw payload.
+- Stage summary JSON aggregates command results and decides `runner_result` by priority: `FAILED > BLOCKED > WAIT > WARNING > PASS`.
+- `SKIPPED` is counted but does not make a stage fail.
+- TXT summaries must be human-readable and suitable as the base for scheduled Telegram push.
+- Log file paths are part of the contract, but log files may remain optional until subprocess execution is implemented.
+- This step does not execute registry commands.
+
 ### 6-3D. Stage A Step 0-5 execution
 
 Goal: execute Step 0-5 with fail-stop behavior, stage result files, and Telegram-ready summaries.
 Out of scope: Gate 1 polling and Stage B.
 
 6-3D must use the transition helpers and per-`runbook_day_id` state path introduced in 6-3C-3.
+6-3D must write command results and stage summaries through the 6-3C-4 result helpers.
 
 ### 6-3E. Gate 1 readiness check
 
