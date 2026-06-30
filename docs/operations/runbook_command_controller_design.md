@@ -733,6 +733,19 @@ Out of scope: Gate 1 polling and Stage B.
 6-3D must use the transition helpers and per-`runbook_day_id` state path introduced in 6-3C-3.
 6-3D must write command results and stage summaries through the 6-3C-4 result helpers.
 
+Implementation notes:
+
+- Stage A runner uses `runbook_states/{runbook_day_id}.json`; it must not use a shared single-state file for active execution.
+- Stage A runner starts with `start_stage(state, "A")`, records successful steps through `complete_step()`, and finishes with `complete_stage()` only when every Step 0-5 command passes.
+- Stage A command execution is restricted to registry entries where `stage_id="A"`, `step_id` is 0-5, `phase1_auto_execute=true`, `manual_gate=false`, and `argv_template` is present.
+- Registry argv templates are rendered with frozen `account_id`, `data_date`, and `trade_date`, then executed with `shell=False`.
+- If the first argv item is a project Python script under `scripts\*.py`, the runner invokes it through the current Python interpreter.
+- Stage A is fail-stop: the first `FAILED` or `BLOCKED` command stops later steps, records the stage state, and writes a stage summary.
+- Each command writes JSON/TXT result files under `command_runs/{runbook_day_id}/`; command logs record argv, cwd, exit code, stdout, stderr, and duration.
+- Stage summary JSON/TXT and `latest_A` files are written under `stage_runs/{runbook_day_id}/`.
+- Dry-run mode is allowed for smoke tests; it writes normal result files but does not execute subprocesses.
+- Gate 1 polling, Stage B/C execution, Telegram push, Windows scheduling, and n8n changes remain out of scope.
+
 ### 6-3E. Gate 1 readiness check
 
 Goal: poll Notion execution input readiness for Actual Price, `Status=READY`, Account ID, and Execution Date.
