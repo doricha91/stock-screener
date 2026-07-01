@@ -274,6 +274,86 @@ def test_stage_a_summary_uses_result_helper_contract(tmp_path: Path) -> None:
     assert summary["summary"]["next_stage"] == "GATE1"
 
 
+def test_parse_stdout_json_accepts_full_object() -> None:
+    assert runbook_stage_runner._parse_stdout_json('{"created_count": 4}') == {"created_count": 4}
+
+
+def test_parse_stdout_json_wraps_full_array() -> None:
+    assert runbook_stage_runner._parse_stdout_json('[{"target": "daily_plans"}]') == {
+        "json": [{"target": "daily_plans"}]
+    }
+
+
+def test_parse_stdout_json_extracts_last_object_after_text() -> None:
+    stdout = """PAPER NOTION EXPORT
+  manual_execution_template: account_id=paper_A create=4 failed=0
+{
+  "target": "manual_execution_template",
+  "created_count": 4,
+  "failed_count": 0
+}
+"""
+
+    assert runbook_stage_runner._parse_stdout_json(stdout) == {
+        "target": "manual_execution_template",
+        "created_count": 4,
+        "failed_count": 0,
+    }
+
+
+def test_parse_stdout_json_extracts_last_array_after_text() -> None:
+    stdout = """PAPER NOTION EXPORT
+[
+  {
+    "target": "daily_plans",
+    "action": "created"
+  }
+]
+"""
+
+    assert runbook_stage_runner._parse_stdout_json(stdout) == {
+        "json": [{"target": "daily_plans", "action": "created"}]
+    }
+
+
+def test_parse_stdout_json_returns_empty_without_json() -> None:
+    assert runbook_stage_runner._parse_stdout_json("PAPER NOTION EXPORT\ncreated=4") == {}
+
+
+def test_parse_stdout_json_returns_empty_for_malformed_json() -> None:
+    assert runbook_stage_runner._parse_stdout_json('PAPER NOTION EXPORT\n{"created_count":') == {}
+
+
+def test_stage_a_preserves_mixed_stdout_json_in_raw_payload(tmp_path: Path, monkeypatch) -> None:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        return {
+            "executed": True,
+            "exit_code": 0,
+            "duration_ms": 1,
+            "stdout": 'PAPER NOTION EXPORT\n{"target": "manual_execution_template", "created_count": 4}',
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+    command_json = next(
+        (tmp_path / "command_runs" / result["runbook_day_id"]).glob("*_005_export_execution_template.json")
+    )
+    payload = json.loads(command_json.read_text(encoding="utf-8"))
+
+    assert payload["raw_payload"] == {
+        "target": "manual_execution_template",
+        "created_count": 4,
+    }
+
+
 def test_real_stage_a_without_confirm_is_blocked(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 

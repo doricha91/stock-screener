@@ -560,6 +560,27 @@ def test_context_mismatch_init_cli_returns_nonzero_and_does_not_overwrite(tmp_pa
     assert loaded.frozen_context.data_date == DATA_DATE
 
 
+def test_complete_stage_clears_active_last_error_but_keeps_history() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    failed = runbook_state.fail_stage(state, "A", "stage_a_step_failed:data_prepare")
+
+    assert failed.current_status == "FAILED"
+    assert failed.last_error is not None
+    assert failed.last_error["reason"] == "stage_a_step_failed:data_prepare"
+
+    completed = runbook_state.complete_stage(failed, "A")
+
+    assert completed.current_status == "PASS"
+    assert completed.stage_status["A"] == "PASS"
+    assert completed.last_completed_stage == "A"
+    assert completed.last_error is None
+    assert any(
+        event["event_type"] == "stage_failed"
+        and event["reason"] == "stage_a_step_failed:data_prepare"
+        for event in completed.history
+    )
+
+
 def test_idempotency_cli_records_and_blocks_duplicate(tmp_path: Path) -> None:
     runbook_state.init_state_file(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     root = Path(__file__).resolve().parents[1]

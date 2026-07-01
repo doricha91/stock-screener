@@ -563,6 +563,7 @@ def complete_stage(state: RunbookState, stage_id: str) -> RunbookState:
         current_status="PASS",
         last_completed_stage=stage_id,
         stage_status=stage_status,
+        last_error=None,
         history=_append_history(state, event),
     )
 

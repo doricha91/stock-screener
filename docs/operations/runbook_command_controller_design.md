@@ -774,9 +774,25 @@ python scripts\runbook_stage_runner.py stage-a ^
 
 After the run, inspect `stage_runs/{runbook_day_id}/latest_A.json`, the command result files, command logs, and Notion export results.
 
+### 6-3D-2. State last_error clear and stdout JSON payload extraction
+
+Goal: clear stale active errors after a successful rerun and preserve mixed stdout JSON payloads for later gate/stage logic.
+Out of scope: Gate 1 polling, Stage B/C execution, Telegram push, n8n changes, Task Scheduler, Notion write behavior changes, and domain success criteria.
+
+Policy:
+
+- `complete_stage(state, stage_id)` clears `last_error` when the stage completes with `PASS`.
+- Historical failure events remain in `history`; only the active current error is cleared.
+- Stage A command result `raw_payload` should preserve JSON details even when stdout contains human-readable text before the final JSON object or array.
+- Stdout JSON extraction first accepts whole-stdout JSON, then falls back to the last parseable JSON object or array at the end of stdout.
+- Arrays are wrapped as `{"json": [...]}`.
+- Malformed or absent JSON still produces `{}`.
+- Stderr is never parsed as JSON payload.
+
 ### 6-3E. Gate 1 readiness check
 
 Before 6-3E, Stage A full real smoke should be run only for paper/test accounts with `--confirm-paper-test`.
+Before Gate 1 readiness check, Stage A `PASS` state must not carry stale `last_error` from earlier failed attempts.
 
 Goal: poll Notion execution input readiness for Actual Price, `Status=READY`, Account ID, and Execution Date.
 Out of scope: Stage B execution.

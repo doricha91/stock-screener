@@ -336,11 +336,31 @@ def _parse_stdout_json(stdout: str) -> dict[str, Any]:
     text = stdout.strip()
     if not text:
         return {}
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
+    parsed = _extract_last_json_value(text)
+    if parsed is None:
         return {}
     return parsed if isinstance(parsed, dict) else {"json": parsed}
+
+
+def _extract_last_json_value(text: str) -> Any | None:
+    decoder = json.JSONDecoder()
+    candidates: list[Any] = []
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            parsed, end_index = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if text[index + end_index :].strip():
+            continue
+        candidates.append(parsed)
+    if candidates:
+        return candidates[-1]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
 
 
 def _format_command_log(
