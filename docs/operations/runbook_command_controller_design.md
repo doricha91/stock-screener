@@ -797,6 +797,19 @@ Before Gate 1 readiness check, Stage A `PASS` state must not carry stale `last_e
 Goal: poll Notion execution input readiness for Actual Price, `Status=READY`, Account ID, and Execution Date.
 Out of scope: Stage B execution.
 
+Implementation notes:
+
+- Gate 1 reads the per-`runbook_day_id` state through `runbook_states/{runbook_day_id}.json`.
+- Gate 1 is `BLOCKED` if frozen context mismatches, Stage A is not `PASS`, or Stage A has an active `last_error`.
+- A previous `GATE1` WAIT state may be polled again; it should not permanently block readiness checks.
+- Gate 1 queries Notion Manual Executions read-only using Account ID, Execution Date, and `linked_daily_plan_key=daily_plan:{account_id}:{trade_date}`.
+- Each row is ready only when `Status=READY`, `Import Status=NOT_IMPORTED`, `Actual Price` is filled, account/date/linked plan match, and `failed_count=0`.
+- Any unready row returns `WAIT`, records missing reasons per row, and updates state through `wait_gate(state, "GATE1", ...)`.
+- All rows ready returns `PASS` and marks `GATE1` complete through the state transition helper.
+- Notion query or settings failures return `BLOCKED`.
+- Gate outputs are written under `gate_runs/{runbook_day_id}/` as timestamped JSON/TXT plus `latest_GATE1.json` and `latest_GATE1.txt`.
+- This step does not execute Stage B, import executions, update Notion, change Status, fill Actual Price, send Telegram, or modify n8n.
+
 ### 6-3F-1. Stage B execution preview and artifact pinning
 
 Goal: run Step 7 and freeze the execution preview artifact before any commit.
