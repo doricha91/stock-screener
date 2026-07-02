@@ -203,6 +203,70 @@ def test_gate1_blocks_when_notion_query_fails(tmp_path: Path) -> None:
     assert "Notion manual execution query failed" in payload["summary"]["message"]
 
 
+def test_gate1_query_uses_env_compatible_notion_settings(monkeypatch) -> None:
+    state = _stage_a_pass_state()
+    calls: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, token: str) -> None:
+            calls["token"] = token
+
+        def query_data_source(
+            self,
+            data_source_id: str,
+            *,
+            filter_payload: dict[str, object],
+            page_size: int,
+        ) -> list[dict[str, object]]:
+            calls["data_source_id"] = data_source_id
+            calls["filter_payload"] = filter_payload
+            calls["page_size"] = page_size
+            return []
+
+    def fake_load_settings(*, allow_missing: bool = False):
+        calls["allow_missing"] = allow_missing
+        return object()
+
+    def fake_data_source_id(settings, key: str, *, env_override: str | None = None) -> str:
+        calls["data_source_key"] = key
+        calls["env_override"] = env_override
+        return "manual-executions-source"
+
+    monkeypatch.setattr(runbook_gate_checker, "_load_dotenv_if_available", lambda: None)
+    monkeypatch.setattr(runbook_gate_checker, "load_notion_settings", fake_load_settings)
+    monkeypatch.setattr(
+        runbook_gate_checker,
+        "load_notion_property_mapping",
+        lambda: {
+            "manual_executions": {
+                "account_id": "Account ID",
+                "execution_date": "Execution Date",
+                "linked_daily_plan_key": "Linked Daily Plan Key",
+                "external_key": "External Key",
+                "symbol": "Symbol",
+                "side": "Side",
+                "quantity": "Quantity",
+                "actual_price": "Actual Price",
+                "status": "Status",
+                "import_status": "Import Status",
+            }
+        },
+    )
+    monkeypatch.setattr(runbook_gate_checker, "get_notion_data_source_id", fake_data_source_id)
+    monkeypatch.setattr(runbook_gate_checker, "get_notion_token", lambda settings: "fake-token")
+    monkeypatch.setattr(runbook_gate_checker, "NotionClient", FakeClient)
+
+    rows = runbook_gate_checker.query_manual_execution_rows(state)
+
+    assert rows == []
+    assert calls["allow_missing"] is True
+    assert calls["data_source_key"] == "manual_executions"
+    assert calls["env_override"] == "NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID"
+    assert calls["token"] == "fake-token"
+    assert calls["data_source_id"] == "manual-executions-source"
+    assert calls["page_size"] == 100
+
+
 def test_gate1_writes_json_txt_and_latest(tmp_path: Path) -> None:
     state = _stage_a_pass_state()
     _save_state(tmp_path, state)

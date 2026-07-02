@@ -803,6 +803,7 @@ Implementation notes:
 - Gate 1 is `BLOCKED` if frozen context mismatches, Stage A is not `PASS`, or Stage A has an active `last_error`.
 - A previous `GATE1` WAIT state may be polled again; it should not permanently block readiness checks.
 - Gate 1 queries Notion Manual Executions read-only using Account ID, Execution Date, and `linked_daily_plan_key=daily_plan:{account_id}:{trade_date}`.
+- Gate 1 uses the same env-compatible Notion access path as Stage A exports: load `.env`, call `load_notion_settings(allow_missing=True)`, use `NOTION_MANUAL_EXECUTIONS_DATA_SOURCE_ID` as the data source override, and load the `manual_executions` property mapping. See `docs/operations/notion_access_path_comparison.md`.
 - Each row is ready only when `Status=READY`, `Import Status=NOT_IMPORTED`, `Actual Price` is filled, account/date/linked plan match, and `failed_count=0`.
 - Any unready row returns `WAIT`, records missing reasons per row, and updates state through `wait_gate(state, "GATE1", ...)`.
 - All rows ready returns `PASS` and marks `GATE1` complete through the state transition helper.

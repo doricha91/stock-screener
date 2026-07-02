@@ -124,7 +124,7 @@ def check_gate1_readiness(
 
 def query_manual_execution_rows(state: RunbookState) -> list[dict[str, Any]]:
     _load_dotenv_if_available()
-    settings = load_notion_settings(allow_missing=False)
+    settings = load_notion_settings(allow_missing=True)
     mapping_root = load_notion_property_mapping()
     mapping = get_mapping_section(mapping_root, "manual_executions")
     data_source_id = get_notion_data_source_id(
