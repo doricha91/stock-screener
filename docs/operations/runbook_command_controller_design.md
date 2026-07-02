@@ -811,6 +811,19 @@ Implementation notes:
 - Gate outputs are written under `gate_runs/{runbook_day_id}/` as timestamped JSON/TXT plus `latest_GATE1.json` and `latest_GATE1.txt`.
 - This step does not execute Stage B, import executions, update Notion, change Status, fill Actual Price, send Telegram, or modify n8n.
 
+### 6-3F-0. Execution Reconciliation Architecture Review
+
+Goal: review system-wide Daily Plan vs Actual Execution flow before Stage B implementation.
+Out of scope: production code changes, Stage B execution, Notion write/read changes, ledger/account state changes, Telegram, n8n, and scheduling.
+
+Notes:
+
+- Execution Reconciliation belongs in Stage B Preview, not Gate 1.
+- Gate 1 remains responsible for input readiness only.
+- Stage B Preview should compare the frozen Daily Plan sidecar with Notion Manual Execution rows and produce a pinned reconciliation artifact before any ledger/account state commit.
+- Stage B Commit should consume only the approved pinned artifact and rely on idempotency plus existing ledger duplicate checks.
+- Review details: `docs/operations/execution_reconciliation_architecture_review.md`.
+
 ### 6-3F-1. Stage B execution preview and artifact pinning
 
 Goal: run Step 7 and freeze the execution preview artifact before any commit.
