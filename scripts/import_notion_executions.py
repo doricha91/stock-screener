@@ -16,6 +16,10 @@ from core.notion_manual_execution_importer import (  # noqa: E402
     ManualExecutionImportError,
     build_manual_execution_preview,
 )
+from core.execution_reconciliation import (  # noqa: E402
+    load_reconciliation_preview,
+    validate_reconciliation_preview_for_commit,
+)
 from core.paper_manual_execution_commit import (  # noqa: E402
     ManualExecutionCommitError,
     commit_manual_execution_preview,
@@ -40,10 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--date", required=True, help="Execution date in YYYY-MM-DD format")
+    parser.add_argument("--data-date", help="Daily Plan data date in YYYY-MM-DD format; required for --commit gate")
+    parser.add_argument("--workspace", help="Runbook workspace path for future/latest artifact resolution")
     parser.add_argument("--account-id", help="Paper account id for preview account filtering")
     parser.add_argument("--preview", action="store_true", help="Generate preview only")
     parser.add_argument("--commit", action="store_true", help="Commit validated preview JSON rows to paper ledger")
     parser.add_argument("--preview-json", help="Preview JSON path required for --commit")
+    parser.add_argument("--reconciliation-preview-json", help="Execution Reconciliation Preview JSON required for --commit")
     parser.add_argument("--allow-warnings", action="store_true", help="Allow commit when preview status is true_with_warnings")
     parser.add_argument("--json", action="store_true", help="Print machine-readable preview summary")
     return parser
@@ -95,6 +102,43 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.preview_json:
         parser.error("--preview-json is required for --commit.")
+    if not args.data_date:
+        return _print_commit_blocked(
+            args,
+            {
+                "ok": False,
+                "reason_code": "reconciliation_context_missing",
+                "message": "--data-date is required for --commit reconciliation gate.",
+            },
+        )
+    if not args.reconciliation_preview_json:
+        return _print_commit_blocked(
+            args,
+            {
+                "ok": False,
+                "reason_code": "missing_reconciliation_preview",
+                "message": "--reconciliation-preview-json is required for --commit.",
+            },
+        )
+    try:
+        reconciliation_preview = load_reconciliation_preview(args.reconciliation_preview_json)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return _print_commit_blocked(
+            args,
+            {
+                "ok": False,
+                "reason_code": "missing_reconciliation_preview",
+                "message": f"Reconciliation preview could not be loaded: {exc}",
+            },
+        )
+    gate_result = validate_reconciliation_preview_for_commit(
+        reconciliation_preview,
+        account_id=resolved_account_id,
+        data_date=args.data_date,
+        trade_date=args.date,
+    )
+    if not gate_result["ok"]:
+        return _print_commit_blocked(args, gate_result)
     try:
         account_paths = (
             None
@@ -136,6 +180,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
+
+
+def _print_commit_blocked(args: argparse.Namespace, gate_result: dict) -> int:
+    payload = {
+        "status": "BLOCKED",
+        "runner_result": "BLOCKED",
+        "reason_code": gate_result.get("reason_code"),
+        "message": gate_result.get("message"),
+        "reconciliation_runner_result": gate_result.get("runner_result"),
+        "reconciliation_preview_json": args.reconciliation_preview_json,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("MANUAL EXECUTION COMMIT BLOCKED")
+        print(payload["message"])
+    return 1
 
 
 if __name__ == "__main__":

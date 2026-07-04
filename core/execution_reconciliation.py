@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import json
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 from core.notion_account_keys import (
@@ -36,6 +38,8 @@ PASS = "PASS"
 
 NOT_IMPORTED = "NOT_IMPORTED"
 
+COMMIT_ELIGIBLE_MESSAGE = "Reconciliation preview is commit-eligible."
+
 
 @dataclass(frozen=True)
 class ReconciliationPolicy:
@@ -50,6 +54,84 @@ def build_manual_execution_key(
     sequence: int,
 ) -> str:
     return build_manual_execution_canonical_key(account_id, trade_date, symbol, side, sequence)
+
+
+def load_reconciliation_preview(path: str | Path) -> dict[str, Any]:
+    preview_path = Path(path)
+    with preview_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("Reconciliation preview JSON must contain an object.")
+    return payload
+
+
+def get_latest_reconciliation_preview_path(workspace: str | Path, runbook_day_id: str) -> Path:
+    return (
+        Path(workspace)
+        / "reconciliation_runs"
+        / runbook_day_id
+        / "latest_execution_reconciliation_preview.json"
+    )
+
+
+def validate_reconciliation_preview_for_commit(
+    preview: dict[str, Any],
+    *,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    require_runner_result: str = PASS,
+) -> dict[str, Any]:
+    normalized_account_id = normalize_notion_account_id(account_id)
+    if preview.get("schema_version") != SCHEMA_VERSION:
+        return _gate_result(
+            False,
+            preview,
+            "invalid_reconciliation_schema",
+            f"Expected schema_version {SCHEMA_VERSION}.",
+        )
+    if normalize_notion_account_id(preview.get("account_id")) != normalized_account_id:
+        return _gate_result(False, preview, "reconciliation_context_mismatch", "account_id mismatch.")
+    if preview.get("data_date") != data_date:
+        return _gate_result(False, preview, "reconciliation_context_mismatch", "data_date mismatch.")
+    if preview.get("trade_date") != trade_date:
+        return _gate_result(False, preview, "reconciliation_context_mismatch", "trade_date mismatch.")
+    runner_result = str(preview.get("runner_result") or "").strip().upper()
+    if runner_result != require_runner_result:
+        return _gate_result(
+            False,
+            preview,
+            "reconciliation_not_pass",
+            f"Reconciliation preview runner_result is {runner_result or 'blank'}; {require_runner_result} is required for commit.",
+        )
+    count_checks = (
+        ("blocked_count", "reconciliation_blocked_count_nonzero"),
+        ("needs_review_count", "reconciliation_needs_review_nonzero"),
+        ("warning_count", "reconciliation_warning_nonzero"),
+        ("missing_count", "reconciliation_missing_count_nonzero"),
+        ("extra_count", "reconciliation_extra_count_nonzero"),
+    )
+    for field, reason_code in count_checks:
+        if _int_value(preview.get(field)) != 0:
+            return _gate_result(False, preview, reason_code, f"{field} must be 0 for commit.")
+    planned_count = _int_value(preview.get("planned_count"))
+    actual_count = _int_value(preview.get("actual_count", preview.get("notion_row_count")))
+    matched_count = _int_value(preview.get("matched_count"))
+    if planned_count != actual_count:
+        return _gate_result(
+            False,
+            preview,
+            "reconciliation_count_mismatch",
+            "planned_count and actual_count must match for commit.",
+        )
+    if matched_count != planned_count:
+        return _gate_result(
+            False,
+            preview,
+            "reconciliation_count_mismatch",
+            "matched_count must equal planned_count for commit.",
+        )
+    return _gate_result(True, preview, None, COMMIT_ELIGIBLE_MESSAGE)
 
 
 def reconcile_plan_and_executions(
@@ -390,7 +472,7 @@ def _identity_errors(plan_row: dict[str, Any], execution_row: dict[str, Any]) ->
     errors = []
     if execution_row.get("manual_execution_external_key") != plan_row.get("plan_external_key"):
         errors.append("external_key mismatch")
-    if normalize_notion_account_id(execution_row.get("account_id")) != normalize_notion_account_id(plan_row.get("account_id")):
+    if _safe_normalize_account_id(execution_row.get("account_id")) != _safe_normalize_account_id(plan_row.get("account_id")):
         errors.append("account_id mismatch")
     if execution_row.get("trade_date") != plan_row.get("trade_date"):
         errors.append("trade_date mismatch")
@@ -417,6 +499,35 @@ def _runner_result_for_counts(counts: dict[str, int]) -> str:
     if counts["warning_count"]:
         return WARNING
     return PASS
+
+
+def _gate_result(
+    ok: bool,
+    preview: dict[str, Any],
+    reason_code: str | None,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "runner_result": str(preview.get("runner_result") or "").strip().upper() or None,
+        "reason_code": reason_code,
+        "message": message,
+        "planned_count": _int_value(preview.get("planned_count")),
+        "actual_count": _int_value(preview.get("actual_count", preview.get("notion_row_count"))),
+        "matched_count": _int_value(preview.get("matched_count")),
+        "warning_count": _int_value(preview.get("warning_count")),
+        "needs_review_count": _int_value(preview.get("needs_review_count")),
+        "blocked_count": _int_value(preview.get("blocked_count")),
+        "missing_count": _int_value(preview.get("missing_count")),
+        "extra_count": _int_value(preview.get("extra_count")),
+    }
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _next_required_action(runner_result: str) -> str:
@@ -471,3 +582,12 @@ def _pct(delta: Decimal | None, base: Decimal | None) -> Decimal | None:
 def _none_if_blank(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _safe_normalize_account_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return normalize_notion_account_id(str(value))
+    except Exception:
+        return str(value)

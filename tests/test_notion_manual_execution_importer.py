@@ -576,6 +576,8 @@ def test_cli_reports_missing_preview_json_for_non_default_commit(capsys):
         [
             "--date",
             "2026-05-25",
+            "--data-date",
+            "2026-05-24",
             "--commit",
             "--preview-json",
             "missing.json",
@@ -586,4 +588,154 @@ def test_cli_reports_missing_preview_json_for_non_default_commit(capsys):
     )
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "preview json not found" in captured.out.lower()
+    assert "reconciliation" in captured.out.lower()
+
+
+def _reconciliation_preview(
+    *,
+    runner_result: str = "PASS",
+    account_id: str = "paper_growth",
+    data_date: str = "2026-05-24",
+    trade_date: str = "2026-05-25",
+) -> dict:
+    return {
+        "schema_version": "execution_reconciliation_preview.v1",
+        "runner_result": runner_result,
+        "account_id": account_id,
+        "data_date": data_date,
+        "trade_date": trade_date,
+        "planned_count": 1,
+        "actual_count": 1,
+        "matched_count": 1,
+        "deviated_count": 0,
+        "missing_count": 0,
+        "extra_count": 0,
+        "warning_count": 0,
+        "needs_review_count": 0,
+        "blocked_count": 0,
+        "rows": [],
+    }
+
+
+def test_cli_commit_requires_pass_reconciliation_before_commit(monkeypatch, tmp_path, capsys):
+    preview_path = tmp_path / "manual_execution_preview.json"
+    reconciliation_path = tmp_path / "execution_reconciliation_preview.json"
+    preview_path.write_text("{}", encoding="utf-8")
+    reconciliation_path.write_text(json.dumps(_reconciliation_preview()), encoding="utf-8")
+
+    called: dict[str, object] = {}
+
+    class Result:
+        account_id = "paper_growth"
+        execution_date = "2026-05-25"
+        preview_json_path = str(preview_path)
+        commit_json_path = str(tmp_path / "commit.json")
+        commit_markdown_path = str(tmp_path / "commit.md")
+        committed_row_count = 1
+        committed_trade_ids = ["trade-1"]
+        backups = {}
+        current_state_written = True
+        account_snapshot_written = True
+        position_snapshot_written = True
+
+    def fake_commit_manual_execution_preview(**kwargs):
+        called.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(execution_script, "build_paper_account_paths", lambda account_id, create=False: object())
+    monkeypatch.setattr(execution_script, "commit_manual_execution_preview", fake_commit_manual_execution_preview)
+
+    exit_code = execution_script.main(
+        [
+            "--date",
+            "2026-05-25",
+            "--data-date",
+            "2026-05-24",
+            "--commit",
+            "--preview-json",
+            str(preview_path),
+            "--reconciliation-preview-json",
+            str(reconciliation_path),
+            "--account-id",
+            "paper_growth",
+            "--json",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert '"status": "COMMITTED"' in output
+    assert called["preview_json_path"] == preview_path
+
+
+def test_cli_commit_blocks_warning_reconciliation_without_write(monkeypatch, tmp_path, capsys):
+    preview_path = tmp_path / "manual_execution_preview.json"
+    reconciliation_path = tmp_path / "execution_reconciliation_preview.json"
+    preview_path.write_text("{}", encoding="utf-8")
+    payload = _reconciliation_preview(runner_result="WARNING")
+    payload["warning_count"] = 1
+    reconciliation_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("commit must not be called")
+
+    monkeypatch.setattr(execution_script, "commit_manual_execution_preview", fail_if_called)
+
+    exit_code = execution_script.main(
+        [
+            "--date",
+            "2026-05-25",
+            "--data-date",
+            "2026-05-24",
+            "--commit",
+            "--preview-json",
+            str(preview_path),
+            "--reconciliation-preview-json",
+            str(reconciliation_path),
+            "--account-id",
+            "paper_growth",
+            "--json",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert output["status"] == "BLOCKED"
+    assert output["reason_code"] == "reconciliation_not_pass"
+
+
+def test_cli_commit_blocks_reconciliation_context_mismatch_without_write(monkeypatch, tmp_path, capsys):
+    preview_path = tmp_path / "manual_execution_preview.json"
+    reconciliation_path = tmp_path / "execution_reconciliation_preview.json"
+    preview_path.write_text("{}", encoding="utf-8")
+    reconciliation_path.write_text(
+        json.dumps(_reconciliation_preview(account_id="paper_other")),
+        encoding="utf-8",
+    )
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("commit must not be called")
+
+    monkeypatch.setattr(execution_script, "commit_manual_execution_preview", fail_if_called)
+
+    exit_code = execution_script.main(
+        [
+            "--date",
+            "2026-05-25",
+            "--data-date",
+            "2026-05-24",
+            "--commit",
+            "--preview-json",
+            str(preview_path),
+            "--reconciliation-preview-json",
+            str(reconciliation_path),
+            "--account-id",
+            "paper_growth",
+            "--json",
+        ]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert output["status"] == "BLOCKED"
+    assert output["reason_code"] == "reconciliation_context_mismatch"

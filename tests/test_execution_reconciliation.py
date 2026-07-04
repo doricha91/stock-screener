@@ -21,6 +21,7 @@ from core.execution_reconciliation import (
     normalize_execution_row,
     normalize_plan_items,
     reconcile_plan_and_executions,
+    validate_reconciliation_preview_for_commit,
 )
 from core.notion_account_keys import build_daily_plan_external_key
 
@@ -74,6 +75,26 @@ def _reconcile(executions: list[dict[str, object]]) -> dict[str, object]:
         trade_date=TRADE_DATE,
         daily_plan_path="daily_action_plan_20260701.json",
     )
+
+
+def _pass_preview() -> dict[str, object]:
+    return {
+        "schema_version": "execution_reconciliation_preview.v1",
+        "runner_result": "PASS",
+        "account_id": ACCOUNT_ID,
+        "data_date": DATA_DATE,
+        "trade_date": TRADE_DATE,
+        "planned_count": 2,
+        "actual_count": 2,
+        "matched_count": 2,
+        "deviated_count": 0,
+        "missing_count": 0,
+        "extra_count": 0,
+        "warning_count": 0,
+        "needs_review_count": 0,
+        "blocked_count": 0,
+        "rows": [],
+    }
 
 
 def test_all_matched_returns_pass() -> None:
@@ -203,3 +224,108 @@ def test_none_or_zero_values_do_not_crash(quantity: object, actual_price: object
     )
 
     assert result["runner_result"] in {BLOCKED, NEEDS_REVIEW, WARNING, PASS}
+
+
+def test_commit_gate_accepts_pass_artifact() -> None:
+    result = validate_reconciliation_preview_for_commit(
+        _pass_preview(),
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["ok"] is True
+
+
+@pytest.mark.parametrize("runner_result", ["WARNING", "NEEDS_REVIEW", "BLOCKED"])
+def test_commit_gate_blocks_non_pass_runner_result(runner_result: str) -> None:
+    preview = _pass_preview()
+    preview["runner_result"] = runner_result
+
+    result = validate_reconciliation_preview_for_commit(
+        preview,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["ok"] is False
+    assert result["reason_code"] == "reconciliation_not_pass"
+
+
+def test_commit_gate_blocks_schema_mismatch() -> None:
+    preview = _pass_preview()
+    preview["schema_version"] = "other.v1"
+
+    result = validate_reconciliation_preview_for_commit(
+        preview,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["ok"] is False
+    assert result["reason_code"] == "invalid_reconciliation_schema"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("account_id", "paper_other"),
+        ("data_date", "2026-06-29"),
+        ("trade_date", "2026-07-02"),
+    ],
+)
+def test_commit_gate_blocks_context_mismatch(field: str, value: str) -> None:
+    preview = _pass_preview()
+    preview[field] = value
+
+    result = validate_reconciliation_preview_for_commit(
+        preview,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["ok"] is False
+    assert result["reason_code"] == "reconciliation_context_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("field", "reason_code"),
+    [
+        ("warning_count", "reconciliation_warning_nonzero"),
+        ("needs_review_count", "reconciliation_needs_review_nonzero"),
+        ("blocked_count", "reconciliation_blocked_count_nonzero"),
+        ("missing_count", "reconciliation_missing_count_nonzero"),
+        ("extra_count", "reconciliation_extra_count_nonzero"),
+    ],
+)
+def test_commit_gate_blocks_nonzero_counts(field: str, reason_code: str) -> None:
+    preview = _pass_preview()
+    preview[field] = 1
+
+    result = validate_reconciliation_preview_for_commit(
+        preview,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["ok"] is False
+    assert result["reason_code"] == reason_code
+
+
+def test_commit_gate_blocks_count_mismatch() -> None:
+    preview = _pass_preview()
+    preview["actual_count"] = 1
+
+    result = validate_reconciliation_preview_for_commit(
+        preview,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["ok"] is False
+    assert result["reason_code"] == "reconciliation_count_mismatch"

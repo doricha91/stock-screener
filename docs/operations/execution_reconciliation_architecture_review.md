@@ -468,7 +468,13 @@ Telegram:
 ### 6-3F-2 Stage B Commit Safety
 
 - Commit only from a pinned reconciliation/preview artifact.
-- Block if reconciliation is `BLOCKED` or unresolved `NEEDS_REVIEW`.
+- Require a pinned `execution_reconciliation_preview_json` whose
+  `runner_result` is `PASS`.
+- Block `WARNING`, `NEEDS_REVIEW`, and `BLOCKED` reconciliation previews in
+  Phase 1; no automatic warning approval exists.
+- Validate schema, account/date context, warning/needs_review/blocked/missing/
+  extra counts, and planned/actual/matched counts before ledger/account writes.
+- Do not re-query Notion or recalculate reconciliation during commit.
 - Use runbook idempotency records for Step 8.
 - Keep existing ledger duplicate checks.
 - Do not auto-use `--allow-warnings` in scheduled automation until policy exists.

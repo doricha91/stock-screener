@@ -847,7 +847,10 @@ Out of scope: Gate 2 polling and Stage C.
 
 Notes:
 
-- Step 8 must use only the `preview_json` pinned by Step 7.
+- Step 8 must use only the `preview_json` pinned by Step 7 and a pinned `execution_reconciliation_preview_json`.
+- The reconciliation preview must have `schema_version=execution_reconciliation_preview.v1`, matching account/date context, `runner_result=PASS`, zero warning/needs_review/blocked/missing/extra counts, and matching planned/actual/matched counts.
+- Phase 1 does not auto-commit `WARNING`, `NEEDS_REVIEW`, or `BLOCKED` reconciliation previews.
+- Step 8 must not re-query Notion or recalculate plan-vs-actual judgment; it only validates the pinned reconciliation artifact before commit.
 - Step 9 must use only the `commit_report` produced by Step 8.
 - If Step 8 succeeds and Step 9 fails, do not attempt automatic local source-of-truth rollback.
 - Telegram summary must say whether retry should use the same `commit_report`.

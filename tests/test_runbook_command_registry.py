@@ -90,6 +90,8 @@ def test_artifact_dependency_metadata_for_commit_steps() -> None:
 
     assert execution_commit.requires_preview_artifact is True
     assert "execution_preview_json" in execution_commit.required_prior_artifacts
+    assert "execution_reconciliation_preview_json" in execution_commit.required_prior_artifacts
+    assert "--reconciliation-preview-json" in execution_commit.argv_template
     assert execution_commit.duplicate_run_policy == registry.STRICT_ONCE_PER_ACCOUNT_TRADE_DATE
 
     assert review_append.requires_preview_artifact is True
