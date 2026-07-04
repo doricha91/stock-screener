@@ -484,3 +484,14 @@ Telegram:
 - Summarize stage/gate/reconciliation artifacts.
 - Include counts and next required operator action.
 - Keep all judgment in controller artifacts, not Telegram workflow text.
+
+### 6-3F-3 Stage B Runner Integration
+
+- Run Step 7 import preview, Step 7R reconciliation preview, Step 8 commit, and
+  Step 9 Notion status sync in a fail-stop Stage B sequence.
+- Pin every successful artifact into `runbook_state.json`.
+- Step 8 consumes only pinned `execution_preview_json` and
+  `execution_reconciliation_preview_json`.
+- Step 9 consumes only pinned `execution_commit_report_json`.
+- Dry-run renders all commands and simulates pinning without ledger/account state
+  writes or Notion updates.

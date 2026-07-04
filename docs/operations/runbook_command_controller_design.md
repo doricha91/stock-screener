@@ -855,6 +855,42 @@ Notes:
 - If Step 8 succeeds and Step 9 fails, do not attempt automatic local source-of-truth rollback.
 - Telegram summary must say whether retry should use the same `commit_report`.
 
+### 6-3F-3. Stage B runner integration with pinned artifacts
+
+Goal: integrate Stage B Step 7, Step 7R, Step 8, and Step 9 in the runbook stage runner.
+Out of scope: Gate 2, Stage C, Telegram, n8n, Task Scheduler, warning approval, and live/broker actions.
+
+Sequence:
+
+```text
+Step 7  execution_preview
+Step 7R execution_reconciliation_preview
+Step 8  execution_commit
+Step 9  sync_execution_status
+```
+
+Artifact pinning contract:
+
+- Step 7 pins `execution_preview_json` and `execution_preview_md`.
+- Step 7R pins `execution_reconciliation_preview_json` and `execution_reconciliation_preview_md`.
+- Step 8 consumes only the pinned Step 7 and Step 7R artifacts and pins `execution_commit_report_json` and `execution_commit_report_md`.
+- Step 9 consumes only the pinned `execution_commit_report_json` and records `execution_status_sync_report`.
+- The runner must not discover `latest_*` artifacts for commit. `latest_*` is an operator convenience only.
+
+Safety policy:
+
+- Stage B requires Stage A `PASS`, Gate 1 `PASS`, no active `last_error`, paper/test account confirmation, and no prior PASS idempotency record for `execution_commit`.
+- Step 7 and Step 7R are preview steps and may be rerun; their latest successful artifacts replace the pinned state artifacts.
+- Step 8 is strict once by runbook idempotency and existing ledger duplicate checks.
+- `WARNING`, `NEEDS_REVIEW`, or `BLOCKED` reconciliation preview blocks Stage B before commit.
+- Stage B is fail-stop. Step 9 is not attempted if Step 8 fails.
+- Dry-run renders all four commands and simulates artifact pinning without executing subprocesses, ledger/account writes, or Notion updates.
+
+Manual smoke note:
+
+- The `paper_pilot_202606 / 2026-07-01` flow was manually verified through reconciliation PASS, import preview PASS, commit COMMITTED, and Notion status sync SUCCESS.
+- Because that trade date is already committed, a real Stage B rerun should be blocked by duplicate/import status controls; use `--dry-run` for verification on that date.
+
 ### 6-3G. Gate 2 readiness check
 
 Goal: poll Notion review input readiness for Manual Answer, Review Status, Import Status, Account ID, and Review Date.
