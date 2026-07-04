@@ -764,7 +764,14 @@ def _validate_execution_sync_payload(payload: dict[str, Any]) -> dict[str, Any]:
         blockers.append("updated_count must equal candidate_count")
     if _int_payload(payload, "failed_count") != 0:
         blockers.append("failed_count must be 0")
-    artifacts = {"execution_status_sync_report": "embedded:sync_execution_status"}
+    sync_json = str(payload.get("sync_json_path") or "").strip()
+    sync_md = str(payload.get("sync_markdown_path") or "").strip()
+    if not sync_json or not Path(sync_json).exists():
+        blockers.append("sync_json_path must exist")
+    artifacts = {
+        "execution_status_sync_report": sync_json,
+        "execution_status_sync_report_md": sync_md,
+    }
     return _payload_validation(
         "FAILED" if blockers else "PASS",
         "Notion execution status sync completed." if not blockers else "Notion execution status sync failed validation.",

@@ -891,6 +891,32 @@ Manual smoke note:
 - The `paper_pilot_202606 / 2026-07-01` flow was manually verified through reconciliation PASS, import preview PASS, commit COMMITTED, and Notion status sync SUCCESS.
 - Because that trade date is already committed, a real Stage B rerun should be blocked by duplicate/import status controls; use `--dry-run` for verification on that date.
 
+### 6-3F-4. Stage B completion verification
+
+Goal: verify that Stage B closed cleanly by reading the pinned commit report and pinned Notion sync report.
+Out of scope: Gate 2, Stage C, Telegram, n8n, Task Scheduler, rollback, commit rerun, and live/broker actions.
+
+This is not a user input gate. It is an automatic integrity verification step after Stage B commit/sync.
+
+Input artifacts:
+
+- `execution_commit_report_json`
+- `execution_status_sync_report`
+
+Verification policy:
+
+- Commit report must have `status=COMMITTED`, a positive `committed_row_count`, matching `committed_trade_ids`, matching account/date, and successful current state/account snapshot/position snapshot write flags.
+- Sync report must have `overall_status=SUCCESS`, matching account/date, `failed_count=0`, and `candidate_count` / `updated_count` equal to `committed_row_count`.
+- The sync report row `committed_trade_id` set must match the commit report `committed_trade_ids` set.
+- Missing or unreadable reports are `FAILED`; inconsistent reports are `BLOCKED`.
+
+Output contract:
+
+- Write `verification_runs/{runbook_day_id}/{timestamp}_stage_b_verification.json/md`.
+- Write `verification_runs/{runbook_day_id}/latest_stage_b_verification.json/md`.
+- Pin `stage_b_verification_json` and `stage_b_verification_md` into runbook state when `data_date` is provided and the matching state exists.
+- A `PASS` result means Stage C daily review work may proceed.
+
 ### 6-3G. Gate 2 readiness check
 
 Goal: poll Notion review input readiness for Manual Answer, Review Status, Import Status, Account ID, and Review Date.

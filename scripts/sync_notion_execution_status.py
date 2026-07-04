@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -24,6 +25,7 @@ from core.notion_settings import (  # noqa: E402
     get_notion_token,
     load_notion_settings,
 )
+from core.paper_account_paths import build_paper_account_paths  # noqa: E402
 
 load_dotenv()
 
@@ -57,6 +59,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Build sync payload without updating Notion pages")
     parser.add_argument("--json", action="store_true", help="Print machine-readable result JSON")
     return parser
+
+
+def write_status_sync_report(payload: dict, account_id: str, execution_date: str) -> tuple[Path, Path]:
+    account_paths = build_paper_account_paths(account_id, create=True)
+    compact_date = str(execution_date).replace("-", "")
+    json_path = account_paths.reports_dir / f"manual_execution_status_sync_{compact_date}.json"
+    markdown_path = account_paths.reports_dir / f"manual_execution_status_sync_{compact_date}.md"
+    account_paths.reports_dir.mkdir(parents=True, exist_ok=True)
+    payload["sync_json_path"] = str(json_path)
+    payload["sync_markdown_path"] = str(markdown_path)
+    payload["written_at"] = datetime.now().isoformat(timespec="seconds")
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    markdown_path.write_text(_format_status_sync_markdown(payload), encoding="utf-8")
+    return json_path, markdown_path
+
+
+def _format_status_sync_markdown(payload: dict) -> str:
+    lines = [
+        f"# Manual Execution Status Sync [{payload.get('execution_date', '-')}]",
+        "",
+        f"- account_id: {payload.get('account_id', '-')}",
+        f"- overall_status: {payload.get('overall_status', '-')}",
+        f"- candidate_count: {payload.get('candidate_count', 0)}",
+        f"- updated_count: {payload.get('updated_count', 0)}",
+        f"- skipped_count: {payload.get('skipped_count', 0)}",
+        f"- failed_count: {payload.get('failed_count', 0)}",
+        f"- dry_run: {payload.get('dry_run', False)}",
+        f"- commit_report_path: {payload.get('commit_report_path', '-')}",
+        "",
+        "## Rows",
+    ]
+    for row in payload.get("rows", []):
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            "- "
+            f"{row.get('canonical_key') or row.get('legacy_canonical_key') or row.get('page_id') or '-'} "
+            f"status={row.get('status', '-')} trade_id={row.get('committed_trade_id') or '-'}"
+        )
+    return "\n".join(lines).strip() + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -106,6 +148,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     payload = result.to_dict()
+    try:
+        write_status_sync_report(payload, resolved_account_id, args.date)
+    except OSError as exc:
+        if args.json:
+            print(json.dumps({"overall_status": "FAILED", "error": str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            print(f"MANUAL EXECUTION STATUS SYNC REPORT WRITE FAILED\n{exc}")
+        return 1
     mode = "DRY RUN" if args.dry_run else "APPLY"
     print("MANUAL EXECUTION STATUS SYNC")
     print(

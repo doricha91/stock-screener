@@ -30,6 +30,8 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]]):
     recon_md = tmp_path / "execution_reconciliation_preview_20260615.md"
     commit_json = tmp_path / "manual_execution_import_commit_20260615.json"
     commit_md = tmp_path / "manual_execution_import_commit_20260615.md"
+    sync_json = tmp_path / "manual_execution_status_sync_20260615.json"
+    sync_md = tmp_path / "manual_execution_status_sync_20260615.md"
 
     def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
         calls.append(argv)
@@ -73,11 +75,15 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]]):
             }
         elif "sync_notion_execution_status.py" in joined:
             assert str(commit_json) in argv
+            sync_json.write_text("{}", encoding="utf-8")
+            sync_md.write_text("sync", encoding="utf-8")
             payload = {
                 "overall_status": "SUCCESS",
                 "candidate_count": 4,
                 "updated_count": 4,
                 "failed_count": 0,
+                "sync_json_path": str(sync_json),
+                "sync_markdown_path": str(sync_md),
             }
         else:
             raise AssertionError(f"unexpected argv: {argv}")
@@ -238,7 +244,7 @@ def test_stage_b_success_pins_artifacts_and_completes(tmp_path: Path, monkeypatc
     assert state.artifacts["execution_preview_json"].endswith("manual_execution_import_preview_20260615.json")
     assert state.artifacts["execution_reconciliation_preview_json"].endswith("execution_reconciliation_preview_20260615.json")
     assert state.artifacts["execution_commit_report_json"].endswith("manual_execution_import_commit_20260615.json")
-    assert state.artifacts["execution_status_sync_report"] == "embedded:sync_execution_status"
+    assert state.artifacts["execution_status_sync_report"].endswith("manual_execution_status_sync_20260615.json")
     assert any(
         record.get("command_key") == "execution_commit" and record.get("status") == "PASS"
         for record in state.idempotency_records.values()

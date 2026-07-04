@@ -457,9 +457,15 @@ def _write_commit_sidecar(
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {
+        "status": "COMMITTED",
         "account_id": account_id,
         "execution_date": execution_date,
         "preview_json_path": str(preview_json_path),
+        "committed_row_count": len(committed_rows),
+        "committed_trade_ids": [str(row.get("trade_id") or "").strip() for row in committed_rows],
+        "current_state_written": True,
+        "account_snapshot_written": True,
+        "position_snapshot_written": True,
         "backup_paths": {key: (None if path is None else str(path)) for key, path in backup_paths.items()},
         "committed_rows": [
             {

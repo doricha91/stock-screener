@@ -287,3 +287,35 @@ def test_cli_account_id_mismatch_fails(monkeypatch, tmp_path, capsys):
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "does not match commit report account_id" in captured.out
+
+
+def test_status_sync_report_writer_creates_json_and_markdown(monkeypatch, tmp_path):
+    class FakeAccountPaths:
+        reports_dir = tmp_path / "reports"
+
+    monkeypatch.setattr(execution_sync_script, "build_paper_account_paths", lambda account_id, create=True: FakeAccountPaths())
+    payload = {
+        "account_id": "paper_growth",
+        "execution_date": "2026-05-25",
+        "overall_status": "SUCCESS",
+        "candidate_count": 1,
+        "updated_count": 1,
+        "skipped_count": 0,
+        "failed_count": 0,
+        "dry_run": False,
+        "commit_report_path": "commit.json",
+        "rows": [{"canonical_key": "manual_execution:paper_growth:2026-05-25:AAPL:BUY:01", "status": "UPDATED", "committed_trade_id": "trade-1"}],
+    }
+
+    json_path, markdown_path = execution_sync_script.write_status_sync_report(
+        payload,
+        "paper_growth",
+        "2026-05-25",
+    )
+
+    assert json_path.exists()
+    assert markdown_path.exists()
+    loaded = json.loads(json_path.read_text(encoding="utf-8"))
+    assert loaded["sync_json_path"] == str(json_path)
+    assert loaded["sync_markdown_path"] == str(markdown_path)
+    assert "overall_status: SUCCESS" in markdown_path.read_text(encoding="utf-8")

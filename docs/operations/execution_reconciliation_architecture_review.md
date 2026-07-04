@@ -495,3 +495,16 @@ Telegram:
 - Step 9 consumes only pinned `execution_commit_report_json`.
 - Dry-run renders all commands and simulates pinning without ledger/account state
   writes or Notion updates.
+
+### 6-3F-4 Stage B Completion Verification
+
+- Read the pinned `execution_commit_report_json` and
+  `execution_status_sync_report`.
+- Verify commit status, committed row count, snapshot write flags, sync success,
+  updated count, failed count, and committed trade id set consistency.
+- Write `stage_b_verification.v1` JSON/MD artifacts under
+  `verification_runs/{runbook_day_id}/`.
+- Pin `stage_b_verification_json` and `stage_b_verification_md` into
+  controller-owned runbook state when the matching state exists.
+- Treat this as automatic completion verification, not Gate 2. Gate 2 remains
+  the future Manual Review input readiness check.
