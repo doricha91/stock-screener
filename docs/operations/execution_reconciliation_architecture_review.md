@@ -456,6 +456,12 @@ Telegram:
 - Read Notion Manual Execution rows for the same account/date/linked plan.
 - Match by `manual_execution:{account_id}:{trade_date}:{symbol}:{side}:{sequence}`.
 - Produce `execution_reconciliation_preview_YYYYMMDD.json/md`.
+- Also write runbook workspace copies under
+  `reconciliation_runs/{runbook_day_id}/` with `latest_execution_reconciliation_preview.json/md`.
+- Use the Phase 1 simplified status model:
+  `MATCHED`, `DEVIATED`, `MISSING`, and `EXTRA`.
+- Use row severities `INFO`, `WARNING`, `NEEDS_REVIEW`, and `BLOCKED`.
+- Aggregate runner result by `BLOCKED > NEEDS_REVIEW > WARNING > PASS`.
 - Do not write ledger, account state, or Notion status.
 - Return `PASS`, `WARNING`, `NEEDS_REVIEW`, or `BLOCKED`.
 

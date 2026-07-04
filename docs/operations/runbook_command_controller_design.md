@@ -826,14 +826,19 @@ Notes:
 
 ### 6-3F-1. Stage B execution preview and artifact pinning
 
-Goal: run Step 7 and freeze the execution preview artifact before any commit.
-Out of scope: Step 8 commit and later Stage B steps.
+Goal: create a read-only Execution Reconciliation Preview artifact before any commit.
+Out of scope: Step 8 commit, ledger/account state writes, Notion status sync, Telegram, n8n, and later Stage B steps.
 
 Notes:
 
-- Pin the `preview_json` path from Step 7 `execution_preview`.
-- Do not advance to Step 8 when preview `fail_count` is not 0.
-- Distinguish Notion rows that are not ready from hard failures; they may require `WAIT` or `BLOCKED` rather than `FAILED`.
+- `core/execution_reconciliation.py` owns pure plan-vs-actual comparison logic and performs no file, Notion, ledger, or account state I/O.
+- `scripts/runbook_execution_reconciliation_preview.py` reads the frozen Daily Plan sidecar and Notion Manual Execution rows, then writes preview artifacts.
+- Preview artifacts are written under both the paper account reconciliation directory and `reconciliation_runs/{runbook_day_id}/`.
+- Matching uses `manual_execution:{account_id}:{trade_date}:{symbol}:{side}:{sequence}`.
+- Row results use `MATCHED`, `DEVIATED`, `MISSING`, and `EXTRA`; severity uses `INFO`, `WARNING`, `NEEDS_REVIEW`, and `BLOCKED`.
+- Overall runner result is aggregated by priority: `BLOCKED > NEEDS_REVIEW > WARNING > PASS`.
+- This step does not run Stage B commit, update Notion, append the ledger, write snapshots, send Telegram, or modify n8n.
+- Step 8 must later consume a pinned reconciliation/preview artifact; it must not reconstruct judgment from Telegram text.
 
 ### 6-3F-2. Stage B commit / sync / review template execution
 
