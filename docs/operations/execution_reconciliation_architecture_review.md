@@ -405,6 +405,9 @@ Gate 2:
 
 - should consume Stage C review template outputs and manual review input
 - should not reinterpret execution rows
+- returns `WAIT` while Manual Review input is incomplete
+- returns `PASS` only when Manual Answer, reviewed/complete Review Status, and Import Status `READY` are present for the frozen account/trade date
+- returns `BLOCKED` for mapping/query failures, account/date mismatch, or ambiguous duplicate READY rows
 
 Stage C:
 

@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import runbook_command_registry as registry
+from scripts import runbook_gate_checker
 from scripts import runbook_result
 from scripts import runbook_state
 from scripts.runbook_command_registry import RunbookCommand
@@ -782,6 +783,33 @@ def run_stage_b_review(*args: Any, **kwargs: Any) -> dict[str, Any]:
     result = run_stage_c(*args, **kwargs)
     result["deprecated_alias"] = "stage-b-review"
     result["canonical_stage_id"] = STAGE_C_ID
+    return result
+
+
+def check_gate2(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    timezone: str = "Asia/Seoul",
+    confirm_paper_test: bool = False,
+) -> dict[str, Any]:
+    guard_error = _paper_smoke_guard(account_id, dry_run=False, confirm_paper_test=confirm_paper_test)
+    if guard_error:
+        return {
+            "runner_result": "BLOCKED",
+            "gate_id": "GATE2",
+            "reason": guard_error,
+            "paper_test_confirmed": confirm_paper_test,
+        }
+    result = runbook_gate_checker.check_gate2_readiness(
+        workspace=workspace,
+        account_id=account_id,
+        data_date=data_date,
+        trade_date=trade_date,
+        timezone=timezone,
+    )
+    result["paper_test_confirmed"] = confirm_paper_test
     return result
 
 
@@ -1592,6 +1620,14 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_b_review.add_argument("--dry-run", action="store_true")
     stage_b_review.add_argument("--confirm-paper-test", action="store_true")
     stage_b_review.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
+
+    gate2 = subparsers.add_parser("gate2", help="Check Gate 2 manual review readiness")
+    gate2.add_argument("--workspace", type=Path, required=True)
+    gate2.add_argument("--account-id", required=True)
+    gate2.add_argument("--data-date", required=True)
+    gate2.add_argument("--trade-date", required=True)
+    gate2.add_argument("--timezone", default="Asia/Seoul")
+    gate2.add_argument("--confirm-paper-test", action="store_true")
     return parser
 
 
@@ -1650,6 +1686,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("runner_result") == "PASS" else 1
+    if args.command == "gate2":
+        result = check_gate2(
+            workspace=args.workspace,
+            account_id=args.account_id,
+            data_date=args.data_date,
+            trade_date=args.trade_date,
+            timezone=args.timezone,
+            confirm_paper_test=args.confirm_paper_test,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("runner_result") in {"PASS", "WAIT"} else 1
     parser.error(f"unknown command: {args.command}")
     return 2
 

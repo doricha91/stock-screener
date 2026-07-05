@@ -978,14 +978,35 @@ Notes:
 - Step 11 Notion export is an upsert-style paper/test smoke path. Its command result JSON/TXT are pinned as `notion_review_template_report_json` and `notion_review_template_report_md`.
 - On success, `stage_status.C=PASS`, `last_completed_stage=C`, and the next required action is: `Fill Manual Review in Notion, then run Gate 2.`
 
-### 6-3G. Gate 2 readiness check
+### 6-3G-2. Gate 2 manual review input readiness
 
 Goal: poll Notion review input readiness for Manual Answer, Review Status, Import Status, Account ID, and Review Date.
 Out of scope: Stage D execution.
 
+Preconditions:
+
+- Stage A, Gate 1, Stage B, Stage B Verify, and Stage C must be `PASS`.
+- `stage_b_verification_json` must exist and have `runner_result=PASS`.
+- Stage C must have produced review prep artifacts such as `manual_review_template_csv` or `notion_review_template_report_json`.
+- Active `last_error` outside Gate 2 blocks the check.
+
+Readiness policy:
+
+- `PASS`: every Manual Review row for the frozen account/trade date has Manual Answer filled, Review Status in a reviewed/complete state, and Import Status `READY`.
+- `WAIT`: user input is incomplete, such as blank Manual Answer, pending Review Status, or Import Status not `READY`.
+- `BLOCKED`: Notion settings/mapping/query failure, account/date mismatch, missing Stage C, missing review template artifacts, or duplicate READY rows that make the import target ambiguous.
+
+Output contract:
+
+- Write `gate_runs/{runbook_day_id}/{timestamp}_GATE2.json/txt`.
+- Write `gate_runs/{runbook_day_id}/latest_GATE2.json/txt`.
+- Pin `gate2_readiness_json` and `gate2_readiness_md` in `runbook_state.json`.
+- On `PASS`, mark Step 12 and `GATE2` complete, set `next_stage=D`, and allow Stage D Review Import & Sync to proceed.
+- On `WAIT`, keep the workflow in user-input wait state and do not advance to Stage D.
+
 ### 6-3H-1. Stage D review preview and artifact pinning
 
-Goal: run Step 13 and freeze the review preview artifact before append.
+Goal: run Step 13 after Gate 2 `PASS` and freeze the review preview artifact before append.
 Out of scope: Step 14 append and later Stage D/E steps.
 
 Notes:
