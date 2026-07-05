@@ -251,6 +251,179 @@ def test_stage_b_success_pins_artifacts_and_completes(tmp_path: Path, monkeypatc
     )
 
 
+def test_stage_b_copies_repo_output_artifacts_into_workspace(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    repo_outputs = tmp_path / "repo_outputs"
+    workspace.mkdir()
+    repo_outputs.mkdir()
+    _seed_gate1_pass_state(workspace)
+    calls: list[list[str]] = []
+    preview_json = repo_outputs / "manual_execution_import_preview_20260615.json"
+    preview_md = repo_outputs / "manual_execution_import_preview_20260615.md"
+    recon_json = repo_outputs / "execution_reconciliation_preview_20260615.json"
+    recon_md = repo_outputs / "execution_reconciliation_preview_20260615.md"
+    commit_json = repo_outputs / "manual_execution_import_commit_20260615.json"
+    commit_md = repo_outputs / "manual_execution_import_commit_20260615.md"
+    sync_json = repo_outputs / "manual_execution_status_sync_20260615.json"
+    sync_md = repo_outputs / "manual_execution_status_sync_20260615.md"
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        joined = " ".join(argv)
+        if "import_notion_executions.py" in joined and "--preview" in argv:
+            preview_json.write_text("{}", encoding="utf-8")
+            preview_md.write_text("preview", encoding="utf-8")
+            payload = {
+                "candidate_count": 4,
+                "fail_count": 0,
+                "commit_allowed": "true",
+                "json_path": str(preview_json),
+                "markdown_path": str(preview_md),
+            }
+        elif "runbook_execution_reconciliation_preview.py" in joined:
+            assert str(workspace / "artifacts" / f"{ACCOUNT_ID}_{DATA_DATE}_{TRADE_DATE}" / "stage_b" / preview_json.name) not in argv
+            recon_json.write_text("{}", encoding="utf-8")
+            recon_md.write_text("recon", encoding="utf-8")
+            payload = {
+                "runner_result": "PASS",
+                "blocked_count": 0,
+                "needs_review_count": 0,
+                "warning_count": 0,
+                "missing_count": 0,
+                "extra_count": 0,
+                "preview_json": str(recon_json),
+                "preview_md": str(recon_md),
+            }
+        elif "import_notion_executions.py" in joined and "--commit" in argv:
+            assert str(preview_json) not in argv
+            assert str(recon_json) not in argv
+            assert any("workspace" in part and preview_json.name in part for part in argv)
+            assert any("workspace" in part and recon_json.name in part for part in argv)
+            commit_json.write_text("{}", encoding="utf-8")
+            commit_md.write_text("commit", encoding="utf-8")
+            payload = {
+                "status": "COMMITTED",
+                "committed_row_count": 4,
+                "current_state_written": True,
+                "account_snapshot_written": True,
+                "position_snapshot_written": True,
+                "commit_json_path": str(commit_json),
+                "commit_markdown_path": str(commit_md),
+            }
+        elif "sync_notion_execution_status.py" in joined:
+            assert str(commit_json) not in argv
+            assert any("workspace" in part and commit_json.name in part for part in argv)
+            sync_json.write_text("{}", encoding="utf-8")
+            sync_md.write_text("sync", encoding="utf-8")
+            payload = {
+                "overall_status": "SUCCESS",
+                "candidate_count": 4,
+                "updated_count": 4,
+                "failed_count": 0,
+                "sync_json_path": str(sync_json),
+                "sync_markdown_path": str(sync_md),
+            }
+        else:
+            raise AssertionError(f"unexpected argv: {argv}")
+        return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": json.dumps(payload), "stderr": ""}
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+
+    result = runbook_stage_runner.run_stage_b(
+        workspace,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "PASS"
+    state = runbook_state.load_state(Path(result["state_path"]))
+    for key in (
+        "execution_preview_json",
+        "execution_reconciliation_preview_json",
+        "execution_commit_report_json",
+        "execution_status_sync_report",
+    ):
+        assert state.artifacts[key].startswith(f"artifacts/{state.runbook_day_id}/stage_b/")
+        assert (workspace / state.artifacts[key]).exists()
+    command_json = next((workspace / "command_runs" / state.runbook_day_id).glob("*_007_execution_preview.json"))
+    payload = json.loads(command_json.read_text(encoding="utf-8"))
+    assert payload["outputs"]["artifact_refs"]["execution_preview_json"].startswith("artifacts/")
+
+
+def test_stage_b_stale_running_without_commit_record_restarts(tmp_path: Path, monkeypatch) -> None:
+    state_path = _seed_gate1_pass_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.start_stage(state, "B")
+    runbook_state.save_state(state, state_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", _fake_stage_b_run(tmp_path, calls))
+
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "PASS"
+    loaded = runbook_state.load_state(state_path)
+    assert loaded.stage_status["B"] == "PASS"
+    assert any(event.get("event_type") == "stale_stage_recovered" for event in loaded.history)
+
+
+def test_stage_b_stale_running_with_commit_idempotency_pass_blocks(tmp_path: Path) -> None:
+    state_path = _seed_gate1_pass_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.start_stage(state, "B")
+    state, key = runbook_state.reserve_idempotency(
+        state,
+        "execution_commit",
+        8,
+        "B",
+        {"execution_preview_json": "a.json", "execution_reconciliation_preview_json": "b.json"},
+        tmp_path,
+    )
+    state = runbook_state.mark_idempotency_pass(state, key, result_ref="commit.json")
+    runbook_state.save_state(state, state_path)
+
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "execution_commit_already_recorded"
+
+
+def test_stage_b_command_exception_does_not_leave_running_state(tmp_path: Path, monkeypatch) -> None:
+    state_path = _seed_gate1_pass_state(tmp_path)
+
+    def boom(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", boom)
+
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "FAILED"
+    state = runbook_state.load_state(state_path)
+    assert state.current_status == "FAILED"
+    assert state.stage_status["B"] == "FAILED"
+    assert state.last_error["reason"] == "stage_b_step_exception:execution_preview"
+
+
 def test_stage_b_confirm_guard_blocks_missing_confirmation(tmp_path: Path) -> None:
     result = runbook_stage_runner.run_stage_b(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
 

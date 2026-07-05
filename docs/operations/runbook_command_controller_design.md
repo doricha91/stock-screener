@@ -874,8 +874,11 @@ Artifact pinning contract:
 - Step 7 pins `execution_preview_json` and `execution_preview_md`.
 - Step 7R pins `execution_reconciliation_preview_json` and `execution_reconciliation_preview_md`.
 - Step 8 consumes only the pinned Step 7 and Step 7R artifacts and pins `execution_commit_report_json` and `execution_commit_report_md`.
-- Step 9 consumes only the pinned `execution_commit_report_json` and records `execution_status_sync_report`.
+- Step 9 consumes only the pinned `execution_commit_report_json` and records `execution_status_sync_report` / `execution_status_sync_report_json`.
 - The runner must not discover `latest_*` artifacts for commit. `latest_*` is an operator convenience only.
+- Existing scripts may write reports under repo `outputs/`. Stage B must copy those reports into `workspace/artifacts/{runbook_day_id}/stage_b/` before pinning them.
+- State and command result artifact refs must remain workspace-relative. Repo `outputs/` paths are source artifacts only, not controller-owned pinned artifacts.
+- Step 8 and Step 9 must consume the workspace-pinned copies, not the original repo output paths.
 
 Safety policy:
 
@@ -885,6 +888,9 @@ Safety policy:
 - `WARNING`, `NEEDS_REVIEW`, or `BLOCKED` reconciliation preview blocks Stage B before commit.
 - Stage B is fail-stop. Step 9 is not attempted if Step 8 fails.
 - Dry-run renders all four commands and simulates artifact pinning without executing subprocesses, ledger/account writes, or Notion updates.
+- If a previous crash leaves Stage B in `RUNNING` before Step 8 commit idempotency `PASS` and without a pinned commit report, Stage B may recover the stale state and restart from Step 7.
+- If Step 8 has a `PASS` idempotency record or a pinned commit report already exists, Stage B must return `BLOCKED` and require manual recovery; it must not force/replace/recommit the same trade date.
+- Stage B exceptions must be caught by the runner, recorded as `FAILED` or `BLOCKED`, and summarized; traceback-only exits must not leave the state in `RUNNING`.
 
 Manual smoke note:
 

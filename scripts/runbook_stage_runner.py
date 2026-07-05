@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -338,6 +340,16 @@ def run_stage_b(
             "runbook_day_id": state.runbook_day_id,
             "state_path": str(state_path),
         }
+    state, recovery_error = _recover_stale_stage_b_running(state)
+    if recovery_error:
+        state = runbook_state.block_stage(state, STAGE_B_ID, recovery_error)
+        runbook_state.save_state(state, state_path)
+        return {
+            **_blocked_stage_b_payload(recovery_error, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+    runbook_state.save_state(state, state_path)
 
     command_by_key = {command.command_key: command for command in get_stage_b_commands(commands)}
     sequence = [
@@ -399,24 +411,55 @@ def run_stage_b(
                 stage_result = "BLOCKED"
                 break
 
-        command_result, log_text, rendered_argv = _run_stage_b_command(
-            state,
-            workspace,
-            repo_root,
-            command,
-            dry_run,
-            timeout_sec,
-        )
-        rendered_commands.append({"command_key": command.command_key, "argv": rendered_argv})
-        command_json_path, command_txt_path = _write_command_result_and_log(
-            workspace,
-            state,
-            command,
-            command_result,
-            log_text,
-        )
-        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
-        command_results.append(command_result)
+        try:
+            command_result, log_text, rendered_argv = _run_stage_b_command(
+                state,
+                workspace,
+                repo_root,
+                command,
+                dry_run,
+                timeout_sec,
+            )
+            rendered_commands.append({"command_key": command.command_key, "argv": rendered_argv})
+            command_json_path, command_txt_path = _write_command_result_and_log(
+                workspace,
+                state,
+                command,
+                command_result,
+                log_text,
+            )
+            command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+            command_results.append(command_result)
+        except Exception as exc:
+            rendered_commands.append({"command_key": command.command_key, "argv": []})
+            command_result = runbook_result.create_command_result(
+                state,
+                command,
+                "FAILED",
+                f"Stage B command raised {type(exc).__name__}.",
+                raw_payload={},
+                blockers=[str(exc)],
+                process={"executed": False, "exit_code": None, "duration_ms": None},
+                workspace=workspace,
+            )
+            command_json_path, command_txt_path = _write_command_result_and_log(
+                workspace,
+                state,
+                command,
+                command_result,
+                f"exception: {type(exc).__name__}: {exc}\n",
+            )
+            command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+            command_results.append(command_result)
+            stage_result = "FAILED"
+            state = runbook_state.fail_stage(
+                state,
+                STAGE_B_ID,
+                f"stage_b_step_exception:{command.command_key}",
+                {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+            )
+            runbook_state.save_state(state, state_path)
+            break
         runner_result = command_result["runner_result"]
 
         if runner_result == "PASS":
@@ -482,6 +525,7 @@ def run_stage_b(
         "execution_reconciliation_preview_json": state.artifacts.get("execution_reconciliation_preview_json"),
         "execution_commit_report_json": state.artifacts.get("execution_commit_report_json"),
         "execution_status_sync_report": state.artifacts.get("execution_status_sync_report"),
+        "execution_status_sync_report_json": state.artifacts.get("execution_status_sync_report_json"),
         "committed_row_count": _last_raw_value(command_results, "committed_row_count"),
         "notion_updated_count": _last_raw_value(command_results, "updated_count"),
     }
@@ -546,6 +590,50 @@ def _stage_b_precondition_error(state: RunbookState) -> str | None:
         if record.get("command_key") == "execution_commit" and record.get("status") == "PASS":
             return "execution_commit_already_recorded"
     return None
+
+
+def _recover_stale_stage_b_running(state: RunbookState) -> tuple[RunbookState, str | None]:
+    if state.current_stage != STAGE_B_ID or state.current_status != "RUNNING":
+        return state, None
+    if state.artifacts.get("execution_commit_report_json"):
+        return state, "stage_b_running_with_commit_report"
+    for record in state.idempotency_records.values():
+        if record.get("command_key") == "execution_commit" and record.get("status") == "PASS":
+            return state, "stage_b_running_with_committed_idempotency"
+    timestamp = _next_recovery_timestamp(state)
+    stage_status = dict(state.stage_status)
+    stage_status[STAGE_B_ID] = "PENDING"
+    event = {
+        "event_type": "stale_stage_recovered",
+        "stage_id": STAGE_B_ID,
+        "step_id": None,
+        "status": "PENDING",
+        "reason": "stage_b_running_without_commit_artifact_or_pass_idempotency",
+        "created_at": timestamp,
+    }
+    return (
+        replace(
+            state,
+            updated_at=timestamp,
+            current_stage="GATE1",
+            current_status="PASS",
+            stage_status=stage_status,
+            last_error=None,
+            history=[*state.history, event],
+        ),
+        None,
+    )
+
+
+def _next_recovery_timestamp(state: RunbookState) -> str:
+    try:
+        previous = datetime.fromisoformat(state.updated_at)
+    except ValueError:
+        return datetime.now().isoformat(timespec="microseconds")
+    now = datetime.now(previous.tzinfo).replace(tzinfo=previous.tzinfo)
+    if now <= previous:
+        now = previous + timedelta(microseconds=1)
+    return now.isoformat(timespec="microseconds")
 
 
 def _execution_reconciliation_preview_command() -> RunbookCommand:
@@ -622,6 +710,12 @@ def _run_stage_b_command(
         return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
     validation = _validate_stage_b_payload(command.command_key, raw_payload)
+    if validation["artifact_refs"]:
+        validation["artifact_refs"] = _pin_stage_b_artifact_refs(
+            workspace,
+            state.runbook_day_id,
+            validation["artifact_refs"],
+        )
     result = runbook_result.create_command_result(
         state,
         command,
@@ -648,6 +742,37 @@ def _stage_b_render_artifacts(artifacts: dict[str, str], workspace: Path) -> dic
     if "execution_commit_report_json" in rendered:
         rendered["execution_commit_report"] = rendered["execution_commit_report_json"]
     return rendered
+
+
+def _pin_stage_b_artifact_refs(
+    workspace: Path,
+    runbook_day_id: str,
+    artifact_refs: dict[str, str],
+) -> dict[str, str]:
+    pinned: dict[str, str] = {}
+    destination_dir = workspace / "artifacts" / runbook_day_id / "stage_b"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    workspace_resolved = workspace.resolve(strict=False)
+    for artifact_name, artifact_ref in artifact_refs.items():
+        if not artifact_ref:
+            continue
+        source_path = Path(str(artifact_ref))
+        if not source_path.is_absolute():
+            source_path = (Path.cwd() / source_path).resolve(strict=False)
+        else:
+            source_path = source_path.resolve(strict=False)
+        try:
+            source_path.relative_to(workspace_resolved)
+            pinned[artifact_name] = runbook_state.canonicalize_artifact_ref(str(source_path), workspace)
+            continue
+        except ValueError:
+            pass
+        if not source_path.exists():
+            raise ValueError(f"artifact_not_found:{artifact_name}:{source_path}")
+        destination_path = destination_dir / source_path.name
+        shutil.copy2(source_path, destination_path)
+        pinned[artifact_name] = runbook_state.canonicalize_artifact_ref(str(destination_path), workspace)
+    return pinned
 
 
 def _dry_run_stage_b_artifacts(command: RunbookCommand) -> dict[str, str]:
@@ -770,6 +895,7 @@ def _validate_execution_sync_payload(payload: dict[str, Any]) -> dict[str, Any]:
         blockers.append("sync_json_path must exist")
     artifacts = {
         "execution_status_sync_report": sync_json,
+        "execution_status_sync_report_json": sync_json,
         "execution_status_sync_report_md": sync_md,
     }
     return _payload_validation(

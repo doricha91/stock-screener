@@ -493,6 +493,12 @@ Telegram:
 - Step 8 consumes only pinned `execution_preview_json` and
   `execution_reconciliation_preview_json`.
 - Step 9 consumes only pinned `execution_commit_report_json`.
+- Reports produced under repo `outputs/` are copied into
+  `workspace/artifacts/{runbook_day_id}/stage_b/` before pinning, so later
+  Stage B commands consume controller-owned workspace copies.
+- A stale Stage B `RUNNING` state may be recovered only when there is no Step 8
+  PASS idempotency record and no pinned commit report. Already committed dates
+  remain blocked from automatic rerun.
 - Dry-run renders all commands and simulates pinning without ledger/account state
   writes or Notion updates.
 
