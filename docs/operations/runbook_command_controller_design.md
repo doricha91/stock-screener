@@ -1011,9 +1011,15 @@ Out of scope: Step 14 append and later Stage D/E steps.
 
 Notes:
 
-- Pin the `review_preview_json` path from Step 13 `review_preview`.
-- Do not advance to Step 14 when `fail_count` is not 0.
-- Manual Answer, Review Status, and Import Status mismatch should be treated as Gate 2 readiness problems.
+- Add a local `stage-d-preview` runner command for Step 13 only.
+- Require Stage A `PASS`, Gate 1 `PASS`, Stage B `PASS`, Stage B Verify `PASS`, Stage C `PASS`, Gate 2 `PASS`, no active `last_error`, and paper/test account confirmation.
+- Pin `review_preview_json` and `review_preview_md` from Step 13 `review_preview`.
+- Existing scripts may write the preview under repo `outputs/`; the runner copies it into `workspace/artifacts/{runbook_day_id}/stage_d/` before pinning.
+- Write a preview-specific summary as `stage_runs/{runbook_day_id}/latest_D_PREVIEW.json/txt` so later full Stage D append/sync summaries can remain distinct.
+- Step 13 preview is rerunnable; the latest successful preview replaces the pinned `review_preview_json` / `review_preview_md`.
+- Do not advance to Step 14 when `fail_count` is not 0, when `append_allowed=false`, or when preview artifacts are missing.
+- Manual Answer, Review Status, and Import Status mismatch should be treated as Gate 2 readiness problems; if they change after Gate 2, Stage D preview blocks rather than appending.
+- Step 14 must later consume only the pinned `review_preview_json`; it must not reinterpret Notion rows independently.
 
 ### 6-3H-2. Stage D append/sync and Stage E eod dry-run/eod commit/final status
 

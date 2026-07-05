@@ -417,6 +417,14 @@ Stage C:
 Stage D/E:
 
 - should consume pinned review/EOD artifacts after Gate 2
+- Step 13 review preview runs only after Gate 2 `PASS`
+- Step 13 copies its preview JSON/MD into
+  `workspace/artifacts/{runbook_day_id}/stage_d/` and pins
+  `review_preview_json` / `review_preview_md` in controller-owned state
+- Step 13 writes a distinct `latest_D_PREVIEW` summary so it cannot be confused
+  with the later full Stage D append/sync result
+- Step 14 must consume the pinned `review_preview_json`; it must not re-query
+  or reinterpret Notion Manual Review rows independently
 - should distinguish "execution accepted with review reason" from "unexpected
   mismatch"
 
