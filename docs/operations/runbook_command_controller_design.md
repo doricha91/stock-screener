@@ -926,6 +926,27 @@ Output contract:
 - Pin `stage_b_verification_json` and `stage_b_verification_md` into runbook state when `data_date` is provided and the matching state exists.
 - A `PASS` result means Stage C daily review work may proceed. Stage C can treat Stage B verification `PASS` as a precondition.
 
+### 6-3G-1. Integrate existing Step 10-11 review template flow
+
+Goal: connect existing Step 10 `daily_review` and Step 11 `export_review_template` to the runbook runner after Stage B Verify `PASS`.
+
+Scope:
+
+- Add a local `stage-b-review` runner command.
+- Reuse `scripts\\paper.py review --account-id {account_id} --date {trade_date} --json`.
+- Reuse `scripts\\export_paper_to_notion.py --manual-review-template --account-id {account_id} --date {trade_date} --confirm-actual --json`.
+- Require Stage A `PASS`, Gate 1 `PASS`, Stage B `PASS`, Stage B verification `PASS`, no active `last_error`, and paper/test account confirmation.
+- Copy Step 10/11 repo output artifacts into `workspace/artifacts/{runbook_day_id}/review_prep/` before pinning them to `runbook_state.json`.
+- Preserve Stage B `PASS`; Step 10/11 completion records step/artifact history but does not rerun Step 7-9 or change commit/sync state.
+
+Out of scope: Gate 2 readiness check, review import/append/sync, EOD dry-run/commit, Telegram, n8n, Task Scheduler, Notion schema changes, and any live/broker action.
+
+Notes:
+
+- Step 10 may write local review reports/templates under repo `outputs/`; the runner pins workspace copies such as `daily_review_report_md`, `manual_review_template_csv`, and `manual_review_template_md`.
+- Step 11 Notion export is an upsert-style paper/test smoke path. Its command result JSON/TXT are pinned as `notion_review_template_report_json` and `notion_review_template_report_md`.
+- On success, the next required action is: `Fill Manual Review in Notion, then run Gate 2.`
+
 ### 6-3G. Gate 2 readiness check
 
 Goal: poll Notion review input readiness for Manual Answer, Review Status, Import Status, Account ID, and Review Date.

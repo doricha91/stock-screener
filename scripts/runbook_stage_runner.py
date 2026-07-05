@@ -26,6 +26,7 @@ STAGE_A_ID = "A"
 STAGE_B_ID = "B"
 STAGE_A_STEP_IDS = tuple(range(0, 6))
 STAGE_B_STEP_IDS = (7, 8, 9)
+STAGE_B_REVIEW_STEP_IDS = (10, 11)
 DEFAULT_TIMEOUT_SEC = 1800
 
 
@@ -118,6 +119,17 @@ def get_stage_b_commands(commands: Sequence[RunbookCommand] | None = None) -> li
     return selected
 
 
+def get_stage_b_review_commands(commands: Sequence[RunbookCommand] | None = None) -> list[RunbookCommand]:
+    selected = [
+        command
+        for command in (commands or registry.list_commands())
+        if command.step_id in STAGE_B_REVIEW_STEP_IDS
+    ]
+    selected.sort(key=lambda command: command.step_id)
+    validate_stage_b_review_commands(selected)
+    return selected
+
+
 def validate_stage_a_commands(commands: Sequence[RunbookCommand]) -> None:
     step_ids = [command.step_id for command in commands]
     if step_ids != list(STAGE_A_STEP_IDS):
@@ -146,6 +158,21 @@ def validate_stage_b_commands(commands: Sequence[RunbookCommand]) -> None:
             raise ValueError(f"Stage B command cannot be a manual gate: {command.command_key}")
         if not command.argv_template:
             raise ValueError(f"Stage B command argv_template is required: {command.command_key}")
+
+
+def validate_stage_b_review_commands(commands: Sequence[RunbookCommand]) -> None:
+    step_ids = [command.step_id for command in commands]
+    if step_ids != list(STAGE_B_REVIEW_STEP_IDS):
+        raise ValueError(f"Stage B review commands must cover steps 10..11 in order, found {step_ids}")
+    for command in commands:
+        if command.stage_id != STAGE_B_ID:
+            raise ValueError(f"Stage B review command has invalid stage_id: {command.command_key}")
+        if not command.phase1_auto_execute:
+            raise ValueError(f"Stage B review command is not phase1 auto executable: {command.command_key}")
+        if command.manual_gate:
+            raise ValueError(f"Stage B review command cannot be a manual gate: {command.command_key}")
+        if not command.argv_template:
+            raise ValueError(f"Stage B review command argv_template is required: {command.command_key}")
 
 
 def run_stage_a(
@@ -556,6 +583,181 @@ def run_stage_b(
     }
 
 
+def run_stage_b_review(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    timezone: str = "Asia/Seoul",
+    dry_run: bool = False,
+    confirm_paper_test: bool = False,
+    repo_root: Path | None = None,
+    timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+    commands: Sequence[RunbookCommand] | None = None,
+) -> dict[str, Any]:
+    workspace = Path(workspace)
+    repo_root = repo_root or Path(__file__).resolve().parents[1]
+    guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
+    if guard_error:
+        return _blocked_stage_b_review_payload(guard_error, dry_run, confirm_paper_test)
+
+    try:
+        _, state_path, state = runbook_state.init_state_file_for_context(
+            workspace,
+            account_id,
+            data_date,
+            trade_date,
+            timezone,
+        )
+    except ValueError as exc:
+        return _blocked_stage_b_review_payload(str(exc), dry_run, confirm_paper_test)
+
+    precondition_error = _stage_b_review_precondition_error(state, workspace)
+    if precondition_error:
+        return {
+            **_blocked_stage_b_review_payload(precondition_error, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+
+    review_commands = get_stage_b_review_commands(commands)
+    command_results: list[dict[str, Any]] = []
+    rendered_commands: list[dict[str, Any]] = []
+    stage_result = "PASS"
+
+    for command in review_commands:
+        try:
+            command_result, log_text, rendered_argv = _run_stage_b_review_command(
+                state,
+                workspace,
+                repo_root,
+                command,
+                dry_run,
+                timeout_sec,
+            )
+            rendered_commands.append({"command_key": command.command_key, "argv": rendered_argv})
+            command_json_path, command_txt_path = _write_command_result_and_log(
+                workspace,
+                state,
+                command,
+                command_result,
+                log_text,
+            )
+            command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+            command_results.append(command_result)
+        except Exception as exc:
+            rendered_commands.append({"command_key": command.command_key, "argv": []})
+            command_result = runbook_result.create_command_result(
+                state,
+                command,
+                "FAILED",
+                f"Stage B review prep command raised {type(exc).__name__}.",
+                raw_payload={},
+                blockers=[str(exc)],
+                process={"executed": False, "exit_code": None, "duration_ms": None},
+                workspace=workspace,
+            )
+            command_json_path, command_txt_path = _write_command_result_and_log(
+                workspace,
+                state,
+                command,
+                command_result,
+                f"exception: {type(exc).__name__}: {exc}\n",
+            )
+            command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+            command_results.append(command_result)
+            stage_result = "FAILED"
+            state = runbook_state.record_artifact(
+                state,
+                "stage_b_review_prep_error_result_json",
+                str(command_json_path),
+                workspace,
+            )
+            runbook_state.save_state(state, state_path)
+            break
+
+        runner_result = command_result["runner_result"]
+        if runner_result == "PASS":
+            artifact_refs = command_result.get("outputs", {}).get("artifact_refs", {})
+            if command.command_key == "export_review_template":
+                artifact_refs = {
+                    **artifact_refs,
+                    "notion_review_template_report_json": runbook_state.canonicalize_artifact_ref(
+                        str(command_json_path),
+                        workspace,
+                    ),
+                    "notion_review_template_report_md": runbook_state.canonicalize_artifact_ref(
+                        str(command_txt_path),
+                        workspace,
+                    ),
+                }
+            state = runbook_state.complete_step(
+                state,
+                command.step_id,
+                STAGE_B_ID,
+                artifact_refs,
+                workspace,
+            )
+            runbook_state.save_state(state, state_path)
+            continue
+
+        stage_result = "BLOCKED" if runner_result == "BLOCKED" else "FAILED"
+        state = runbook_state.record_artifact(
+            state,
+            "stage_b_review_prep_error_result_json",
+            str(command_json_path),
+            workspace,
+        )
+        runbook_state.save_state(state, state_path)
+        break
+
+    stage_summary = runbook_result.create_stage_summary(
+        state,
+        STAGE_B_ID,
+        command_results,
+        next_required_action=(
+            "Fill Manual Review in Notion, then run Gate 2."
+            if stage_result == "PASS"
+            else "Inspect Stage B review prep command result before retry."
+        ),
+        next_stage="GATE2" if stage_result == "PASS" else None,
+    )
+    stage_summary["raw_payload"] = {
+        "daily_review_report_md": state.artifacts.get("daily_review_report_md"),
+        "manual_review_template_csv": state.artifacts.get("manual_review_template_csv"),
+        "manual_review_template_md": state.artifacts.get("manual_review_template_md"),
+        "notion_review_template_report_json": state.artifacts.get("notion_review_template_report_json"),
+        "notion_review_template_report_md": state.artifacts.get("notion_review_template_report_md"),
+        "next_required_action": stage_summary["summary"].get("next_required_action"),
+    }
+    stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
+    stage_summary_paths = runbook_result.get_stage_summary_paths(
+        workspace,
+        state.runbook_day_id,
+        STAGE_B_ID,
+        timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
+    )
+    return {
+        "runner_result": stage_summary["runner_result"],
+        "stage_id": STAGE_B_ID,
+        "runbook_day_id": state.runbook_day_id,
+        "state_path": str(state_path),
+        "stage_summary_json": str(stage_summary_json),
+        "stage_summary_txt": str(stage_summary_txt),
+        "latest_stage_summary_json": str(stage_summary_paths["latest_json"]),
+        "latest_stage_summary_txt": str(stage_summary_paths["latest_txt"]),
+        "command_results": [
+            step["result_json_ref"]
+            for step in stage_summary["steps"]
+            if step.get("result_json_ref")
+        ],
+        "rendered_commands": rendered_commands,
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
+        "next_required_action": stage_summary["summary"].get("next_required_action"),
+    }
+
+
 def _paper_smoke_guard(account_id: str, dry_run: bool, confirm_paper_test: bool) -> str | None:
     if dry_run:
         return None
@@ -568,6 +770,16 @@ def _paper_smoke_guard(account_id: str, dry_run: bool, confirm_paper_test: bool)
 
 
 def _blocked_stage_b_payload(reason: str, dry_run: bool, confirm_paper_test: bool) -> dict[str, Any]:
+    return {
+        "runner_result": "BLOCKED",
+        "stage_id": STAGE_B_ID,
+        "reason": reason,
+        "dry_run": dry_run,
+        "paper_test_confirmed": confirm_paper_test,
+    }
+
+
+def _blocked_stage_b_review_payload(reason: str, dry_run: bool, confirm_paper_test: bool) -> dict[str, Any]:
     return {
         "runner_result": "BLOCKED",
         "stage_id": STAGE_B_ID,
@@ -590,6 +802,48 @@ def _stage_b_precondition_error(state: RunbookState) -> str | None:
         if record.get("command_key") == "execution_commit" and record.get("status") == "PASS":
             return "execution_commit_already_recorded"
     return None
+
+
+def _stage_b_review_precondition_error(state: RunbookState, workspace: Path) -> str | None:
+    if state.stage_status.get(STAGE_A_ID) != "PASS":
+        return "stage_a_not_pass"
+    if state.stage_status.get("GATE1") != "PASS":
+        return "gate1_not_pass"
+    if state.stage_status.get(STAGE_B_ID) != "PASS":
+        return "stage_b_not_pass"
+    if state.last_error:
+        return "active_last_error"
+    commit_ref = state.artifacts.get("execution_commit_report_json")
+    if not commit_ref or not _artifact_ref_exists(workspace, commit_ref):
+        return "execution_commit_report_required"
+    verification_ref = state.artifacts.get("stage_b_verification_json")
+    if not verification_ref:
+        return "stage_b_verification_required"
+    verification_path = _artifact_ref_path(workspace, verification_ref)
+    if not verification_path.exists():
+        return "stage_b_verification_required"
+    try:
+        verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "stage_b_verification_required"
+    if verification.get("schema_version") != "stage_b_verification.v1":
+        return "stage_b_verification_required"
+    if str(verification.get("runner_result") or "").upper() != "PASS":
+        return "stage_b_verification_required"
+    if _int_payload(verification, "committed_row_count") <= 0:
+        return "stage_b_verification_required"
+    if _int_payload(verification, "failed_count") != 0:
+        return "stage_b_verification_required"
+    return None
+
+
+def _artifact_ref_path(workspace: Path, artifact_ref: str) -> Path:
+    path = Path(str(artifact_ref))
+    return path if path.is_absolute() else workspace / path
+
+
+def _artifact_ref_exists(workspace: Path, artifact_ref: str) -> bool:
+    return _artifact_ref_path(workspace, artifact_ref).exists()
 
 
 def _recover_stale_stage_b_running(state: RunbookState) -> tuple[RunbookState, str | None]:
@@ -730,6 +984,78 @@ def _run_stage_b_command(
     return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
 
+def _run_stage_b_review_command(
+    state: RunbookState,
+    workspace: Path,
+    repo_root: Path,
+    command: RunbookCommand,
+    dry_run: bool,
+    timeout_sec: int,
+) -> tuple[dict[str, Any], str, list[str]]:
+    artifact_refs = _stage_b_render_artifacts(state.artifacts, workspace)
+    artifact_refs["workspace"] = str(workspace)
+    rendered_argv = render_argv_template(command, state.frozen_context, artifact_refs)
+    argv = normalize_python_script_argv(rendered_argv, repo_root)
+    if dry_run:
+        process = {"executed": False, "exit_code": None, "duration_ms": None}
+        artifacts = _dry_run_stage_b_review_artifacts(command)
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "PASS",
+            "Dry-run only; command not executed.",
+            artifact_refs=artifacts,
+            raw_payload={},
+            process=process,
+            workspace=workspace,
+        )
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, "", ""), rendered_argv
+
+    execution = run_allowlisted_command(argv, repo_root, timeout_sec)
+    stdout = str(execution.get("stdout") or "")
+    stderr = str(execution.get("stderr") or "")
+    raw_payload = _parse_stdout_json(stdout)
+    exit_code = execution.get("exit_code")
+    process = {
+        "executed": True,
+        "exit_code": exit_code,
+        "duration_ms": execution.get("duration_ms"),
+    }
+    if exit_code != 0:
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "FAILED",
+            "Command failed.",
+            raw_payload=raw_payload,
+            blockers=[stderr.strip() or f"exit_code={exit_code}"],
+            process=process,
+            workspace=workspace,
+        )
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
+
+    validation = _validate_stage_b_review_payload(command.command_key, raw_payload)
+    if validation["artifact_refs"]:
+        validation["artifact_refs"] = _pin_artifact_refs(
+            workspace,
+            state.runbook_day_id,
+            validation["artifact_refs"],
+            "review_prep",
+        )
+    result = runbook_result.create_command_result(
+        state,
+        command,
+        validation["runner_result"],
+        validation["message"],
+        artifact_refs=validation["artifact_refs"],
+        raw_payload=raw_payload,
+        blockers=validation["blockers"],
+        process=process,
+        workspace=workspace,
+    )
+    return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
+
+
 def _stage_b_render_artifacts(artifacts: dict[str, str], workspace: Path) -> dict[str, str]:
     rendered: dict[str, str] = {}
     for key, value in artifacts.items():
@@ -749,8 +1075,17 @@ def _pin_stage_b_artifact_refs(
     runbook_day_id: str,
     artifact_refs: dict[str, str],
 ) -> dict[str, str]:
+    return _pin_artifact_refs(workspace, runbook_day_id, artifact_refs, "stage_b")
+
+
+def _pin_artifact_refs(
+    workspace: Path,
+    runbook_day_id: str,
+    artifact_refs: dict[str, str],
+    stage_subdir: str,
+) -> dict[str, str]:
     pinned: dict[str, str] = {}
-    destination_dir = workspace / "artifacts" / runbook_day_id / "stage_b"
+    destination_dir = workspace / "artifacts" / runbook_day_id / stage_subdir
     destination_dir.mkdir(parents=True, exist_ok=True)
     workspace_resolved = workspace.resolve(strict=False)
     for artifact_name, artifact_ref in artifact_refs.items():
@@ -796,6 +1131,21 @@ def _dry_run_stage_b_artifacts(command: RunbookCommand) -> dict[str, str]:
     return {}
 
 
+def _dry_run_stage_b_review_artifacts(command: RunbookCommand) -> dict[str, str]:
+    if command.command_key == "daily_review":
+        return {
+            "daily_review_report_md": "dry_run/paper_daily_review_summary.md",
+            "manual_review_template_csv": "dry_run/paper_manual_review_log_template.csv",
+            "manual_review_template_md": "dry_run/paper_manual_review_log_template.md",
+        }
+    if command.command_key == "export_review_template":
+        return {
+            "notion_review_template_report_json": "dry_run/manual_review_template_export.json",
+            "notion_review_template_report_md": "dry_run/manual_review_template_export.md",
+        }
+    return {}
+
+
 def _validate_stage_b_payload(command_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     if command_key == "execution_preview":
         return _validate_execution_preview_payload(payload)
@@ -806,6 +1156,91 @@ def _validate_stage_b_payload(command_key: str, payload: dict[str, Any]) -> dict
     if command_key == "sync_execution_status":
         return _validate_execution_sync_payload(payload)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
+
+
+def _validate_stage_b_review_payload(command_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if command_key == "daily_review":
+        return _validate_daily_review_payload(payload)
+    if command_key == "export_review_template":
+        return _validate_export_review_template_payload(payload)
+    return _payload_validation("PASS", "Command completed successfully.", {}, [])
+
+
+def _validate_daily_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    blockers = []
+    status = str(payload.get("status") or "").upper()
+    validation_result = str(payload.get("validation_result") or "").upper()
+    if status and status != "PASS":
+        blockers.append("status must be PASS")
+    if validation_result == "FAIL":
+        blockers.append("validation_result must not be FAIL")
+    template_csv = str(payload.get("manual_review_template_csv") or "").strip()
+    template_md = str(payload.get("manual_review_template_md") or "").strip()
+    if not template_csv or not Path(template_csv).exists():
+        blockers.append("manual_review_template_csv must exist")
+    if not template_md or not Path(template_md).exists():
+        blockers.append("manual_review_template_md must exist")
+    artifacts = _existing_artifacts_from_payload(
+        payload,
+        {
+            "daily_review_report_md": "daily_review_report_md",
+            "report_index_md": "report_index_md",
+            "manual_review_template_csv": "manual_review_template_csv",
+            "manual_review_template_md": "manual_review_template_md",
+            "validation_report_md": "validation_report_md",
+            "validation_issues_csv": "validation_issues_csv",
+        },
+    )
+    return _payload_validation(
+        "FAILED" if blockers else "PASS",
+        "Daily review artifacts are pinned." if not blockers else "Daily review failed validation.",
+        artifacts if not blockers else {},
+        blockers,
+    )
+
+
+def _validate_export_review_template_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    blockers = []
+    candidate_count = _int_payload(payload, "candidate_count")
+    if candidate_count <= 0:
+        blockers.append("candidate_count must be greater than 0")
+    if _int_payload(payload, "failed_count") != 0:
+        blockers.append("failed_count must be 0")
+    processed_count = (
+        _int_payload(payload, "create_count")
+        + _int_payload(payload, "update_count")
+        + _int_payload(payload, "skip_count")
+    )
+    if processed_count < candidate_count:
+        blockers.append("create_count + update_count + skip_count must cover candidate_count")
+    source_template_path = str(payload.get("source_template_path") or "").strip()
+    if source_template_path and not Path(source_template_path).exists():
+        blockers.append("source_template_path must exist")
+    artifacts = _existing_artifacts_from_payload(
+        payload,
+        {
+            "source_template_path": "manual_review_template_csv",
+            "json_path": "notion_review_template_report_json",
+            "report_json_path": "notion_review_template_report_json",
+            "markdown_path": "notion_review_template_report_md",
+            "report_markdown_path": "notion_review_template_report_md",
+        },
+    )
+    return _payload_validation(
+        "FAILED" if blockers else "PASS",
+        "Manual review template was exported to Notion." if not blockers else "Manual review template export failed validation.",
+        artifacts if not blockers else {},
+        blockers,
+    )
+
+
+def _existing_artifacts_from_payload(payload: dict[str, Any], mapping: dict[str, str]) -> dict[str, str]:
+    artifacts: dict[str, str] = {}
+    for payload_key, artifact_key in mapping.items():
+        artifact_ref = str(payload.get(payload_key) or "").strip()
+        if artifact_ref and Path(artifact_ref).exists():
+            artifacts[artifact_key] = artifact_ref
+    return artifacts
 
 
 def _validate_execution_preview_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1109,6 +1544,16 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_b.add_argument("--dry-run", action="store_true")
     stage_b.add_argument("--confirm-paper-test", action="store_true")
     stage_b.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
+
+    stage_b_review = subparsers.add_parser("stage-b-review", help="Run Stage B Step 10-11 review prep")
+    stage_b_review.add_argument("--workspace", type=Path, required=True)
+    stage_b_review.add_argument("--account-id", required=True)
+    stage_b_review.add_argument("--data-date", required=True)
+    stage_b_review.add_argument("--trade-date", required=True)
+    stage_b_review.add_argument("--timezone", default="Asia/Seoul")
+    stage_b_review.add_argument("--dry-run", action="store_true")
+    stage_b_review.add_argument("--confirm-paper-test", action="store_true")
+    stage_b_review.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
     return parser
 
 
@@ -1130,6 +1575,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if result.get("runner_result") == "PASS" else 1
     if args.command == "stage-b":
         result = run_stage_b(
+            workspace=args.workspace,
+            account_id=args.account_id,
+            data_date=args.data_date,
+            trade_date=args.trade_date,
+            timezone=args.timezone,
+            dry_run=args.dry_run,
+            confirm_paper_test=args.confirm_paper_test,
+            timeout_sec=args.timeout_sec,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("runner_result") == "PASS" else 1
+    if args.command == "stage-b-review":
+        result = run_stage_b_review(
             workspace=args.workspace,
             account_id=args.account_id,
             data_date=args.data_date,

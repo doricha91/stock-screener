@@ -520,3 +520,17 @@ Telegram:
   the future Manual Review input readiness check.
 - Stage C can require Stage B verification `PASS` before daily review/report
   automation begins.
+
+### 6-3G-1 Stage B Review Template Prep
+
+- Reuse the existing Step 10 `paper.py review` shortcut and Step 11
+  `export_paper_to_notion.py --manual-review-template` command.
+- Run them only after Stage A `PASS`, Gate 1 `PASS`, Stage B `PASS`, and Stage B
+  verification `PASS`.
+- Treat this as review input preparation, not reconciliation or commit logic.
+- Copy local review reports/templates from repo `outputs/` into
+  `workspace/artifacts/{runbook_day_id}/review_prep/` before pinning them in
+  controller-owned state.
+- Pin the Step 11 command result as the Notion review template report artifact.
+- Do not implement Gate 2 here; the next manual action is to fill Manual Review
+  in Notion and then run the future Gate 2 readiness check.

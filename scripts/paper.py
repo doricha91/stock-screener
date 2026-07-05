@@ -373,11 +373,42 @@ def handle_review(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Paper review aborted: {exc}")
         return 1
-    return run_review_shortcut(
+    exit_code = run_review_shortcut(
         allow_warnings=args.allow_warnings,
         account_id=args.account_id,
         review_date=review_date,
     )
+    if args.json:
+        summary = _review_shortcut_json_summary(args.account_id, review_date, exit_code)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return exit_code
+
+
+def _review_shortcut_json_summary(account_id: str | None, review_date: str | None, exit_code: int) -> dict[str, object]:
+    account_paths = build_paper_account_paths(account_id, create=False)
+    reviews_dir = account_paths.reviews_dir
+    reports_dir = account_paths.reports_dir
+    template_csv = reviews_dir / "paper_manual_review_log_template.csv"
+    template_md = reviews_dir / "paper_manual_review_log_template.md"
+    validation_report = reviews_dir / "paper_manual_review_log_validation_report.md"
+    validation_issues = reviews_dir / "paper_manual_review_log_validation_issues.csv"
+    daily_review_md = reports_dir / "paper_daily_review_summary.md"
+    report_index_md = reports_dir / "paper_report_index.md"
+    template_exists = template_csv.exists() and template_md.exists()
+    validation_failed = exit_code != 0
+    return {
+        "status": "PASS" if exit_code == 0 else "FAIL",
+        "account_id": account_paths.account_id,
+        "review_date": review_date or "",
+        "validation_result": "FAIL" if validation_failed else "PASS",
+        "daily_review_report_md": str(daily_review_md),
+        "report_index_md": str(report_index_md),
+        "manual_review_template_csv": str(template_csv),
+        "manual_review_template_md": str(template_md),
+        "validation_report_md": str(validation_report),
+        "validation_issues_csv": str(validation_issues),
+        "manual_review_template_exists": template_exists,
+    }
 
 
 def handle_status(args: argparse.Namespace) -> int:
@@ -910,6 +941,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--allow-warnings", action="store_true", help="Allow PASS_WITH_WARNINGS during reports preflight")
     review_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     review_parser.add_argument("--date", help="Review date / trade date (YYYYMMDD or YYYY-MM-DD)")
+    review_parser.add_argument("--json", action="store_true", help="Print machine-readable review shortcut summary")
     review_parser.set_defaults(handler=handle_review)
 
     review_template_parser = subparsers.add_parser(
