@@ -49,6 +49,7 @@ def _sync_report(**overrides) -> dict:
 
 
 def _write_json(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
@@ -61,6 +62,28 @@ def _reports(tmp_path: Path, commit_payload: dict | None = None, sync_payload: d
     if sync_payload is not None:
         _write_json(sync_path, sync_payload)
     return commit_path, sync_path
+
+
+def _seed_stage_b_state(
+    workspace: Path,
+    commit_path: Path | None,
+    sync_path: Path | None,
+    *,
+    sync_key: str = "execution_status_sync_report_json",
+    stage_b_pass: bool = True,
+) -> Path:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.complete_stage(state, "A")
+    state = runbook_state.complete_stage(state, "GATE1")
+    if stage_b_pass:
+        state = runbook_state.complete_stage(state, "B")
+    if commit_path is not None:
+        state = runbook_state.record_artifact(state, "execution_commit_report_json", str(commit_path), workspace)
+    if sync_path is not None:
+        state = runbook_state.record_artifact(state, sync_key, str(sync_path), workspace)
+    state_path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    runbook_state.save_state(state, state_path)
+    return state_path
 
 
 def test_stage_b_verifier_passes_normal_reports_and_writes_artifacts(tmp_path: Path) -> None:
@@ -82,6 +105,163 @@ def test_stage_b_verifier_passes_normal_reports_and_writes_artifacts(tmp_path: P
     assert Path(result["verification_md"]).exists()
     assert Path(result["latest_verification_json"]).exists()
     assert "Proceed to Stage C" in Path(result["verification_md"]).read_text(encoding="utf-8")
+
+
+def test_stage_b_verifier_prefers_cli_paths_when_both_are_provided(tmp_path: Path) -> None:
+    state_commit, state_sync = _reports(tmp_path / "state", _commit_report(committed_row_count=1), _sync_report())
+    cli_commit, cli_sync = _reports(tmp_path / "cli", _commit_report(), _sync_report())
+    _seed_stage_b_state(tmp_path, state_commit, state_sync)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=cli_commit,
+        sync_report=cli_sync,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["resolved_from_state"] is False
+    assert result["resolved_commit_report_json"] == str(cli_commit)
+    assert result["resolved_sync_report_json"] == str(cli_sync)
+
+
+def test_stage_b_verifier_auto_resolves_reports_from_state(tmp_path: Path) -> None:
+    commit_path, sync_path = _reports(tmp_path, _commit_report(), _sync_report())
+    _seed_stage_b_state(tmp_path, commit_path, sync_path)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["resolved_from_state"] is True
+    assert result["resolved_commit_report_json"] == str(commit_path)
+    assert result["resolved_sync_report_json"] == str(sync_path)
+    loaded = runbook_state.load_state(runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE))
+    assert "stage_b_verification_json" in loaded.artifacts
+
+
+def test_stage_b_verifier_prefers_sync_json_key_over_fallback(tmp_path: Path) -> None:
+    commit_path = _write_json(tmp_path / "commit.json", _commit_report())
+    preferred_sync = _write_json(tmp_path / "sync_preferred.json", _sync_report())
+    fallback_sync = _write_json(tmp_path / "sync_fallback.json", _sync_report(updated_count=1))
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.complete_stage(state, "A")
+    state = runbook_state.complete_stage(state, "GATE1")
+    state = runbook_state.complete_stage(state, "B")
+    state = runbook_state.record_artifact(state, "execution_commit_report_json", str(commit_path), tmp_path)
+    state = runbook_state.record_artifact(state, "execution_status_sync_report", str(fallback_sync), tmp_path)
+    state = runbook_state.record_artifact(state, "execution_status_sync_report_json", str(preferred_sync), tmp_path)
+    state_path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    runbook_state.save_state(state, state_path)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["resolved_sync_report_json"] == str(preferred_sync)
+
+
+def test_stage_b_verifier_uses_sync_report_fallback_key(tmp_path: Path) -> None:
+    commit_path, sync_path = _reports(tmp_path, _commit_report(), _sync_report())
+    _seed_stage_b_state(tmp_path, commit_path, sync_path, sync_key="execution_status_sync_report")
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["resolved_sync_report_json"] == str(sync_path)
+
+
+def test_stage_b_verifier_blocks_when_state_is_missing(tmp_path: Path) -> None:
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "runbook_state_missing" for check in result["checks"])
+
+
+def test_stage_b_verifier_blocks_when_stage_b_not_pass(tmp_path: Path) -> None:
+    commit_path, sync_path = _reports(tmp_path, _commit_report(), _sync_report())
+    _seed_stage_b_state(tmp_path, commit_path, sync_path, stage_b_pass=False)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "stage_b_not_pass" for check in result["checks"])
+
+
+def test_stage_b_verifier_blocks_when_artifact_ref_missing(tmp_path: Path) -> None:
+    _, sync_path = _reports(tmp_path, _commit_report(), _sync_report())
+    _seed_stage_b_state(tmp_path, None, sync_path)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "missing_stage_b_artifact_ref" for check in result["checks"])
+
+
+def test_stage_b_verifier_fails_when_pinned_file_is_missing(tmp_path: Path) -> None:
+    commit_path, sync_path = _reports(tmp_path, _commit_report(), _sync_report())
+    missing_commit = tmp_path / "missing_commit.json"
+    _seed_stage_b_state(tmp_path, missing_commit, sync_path)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "FAILED"
+    assert any(check["reason_code"] == "stage_b_artifact_file_missing" for check in result["checks"])
+
+
+def test_stage_b_verifier_resolves_workspace_relative_paths(tmp_path: Path) -> None:
+    commit_path = tmp_path / "artifacts" / "commit.json"
+    sync_path = tmp_path / "artifacts" / "sync.json"
+    commit_path.parent.mkdir(parents=True)
+    _write_json(commit_path, _commit_report())
+    _write_json(sync_path, _sync_report())
+    _seed_stage_b_state(tmp_path, commit_path, sync_path)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["resolved_commit_report_json"] == str(commit_path)
+    assert result["resolved_sync_report_json"] == str(sync_path)
 
 
 def test_stage_b_verifier_pins_artifact_to_existing_state(tmp_path: Path) -> None:

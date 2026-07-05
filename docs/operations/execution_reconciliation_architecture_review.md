@@ -505,7 +505,11 @@ Telegram:
 ### 6-3F-4 Stage B Completion Verification
 
 - Read the pinned `execution_commit_report_json` and
-  `execution_status_sync_report`.
+  `execution_status_sync_report_json`.
+- CLI report paths are optional overrides; when omitted, the verifier resolves
+  the pinned artifacts from controller-owned `runbook_state.json`.
+- The sync report auto-resolve fallback key is `execution_status_sync_report`
+  for compatibility with earlier state records.
 - Verify commit status, committed row count, snapshot write flags, sync success,
   updated count, failed count, and committed trade id set consistency.
 - Write `stage_b_verification.v1` JSON/MD artifacts under
@@ -514,3 +518,5 @@ Telegram:
   controller-owned runbook state when the matching state exists.
 - Treat this as automatic completion verification, not Gate 2. Gate 2 remains
   the future Manual Review input readiness check.
+- Stage C can require Stage B verification `PASS` before daily review/report
+  automation begins.

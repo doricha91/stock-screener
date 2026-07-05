@@ -26,8 +26,8 @@ def verify_stage_b_completion(
     workspace: Path,
     account_id: str,
     trade_date: str,
-    commit_report: Path,
-    sync_report: Path,
+    commit_report: Path | None = None,
+    sync_report: Path | None = None,
     data_date: str | None = None,
     timezone: str = "Asia/Seoul",
 ) -> dict[str, Any]:
@@ -35,8 +35,19 @@ def verify_stage_b_completion(
     runbook_day_id = _runbook_day_id(account_id, data_date, trade_date)
     created_at = _now_iso()
     checks: list[dict[str, Any]] = []
-    commit_payload = _load_json_report(commit_report, "commit_report", checks)
-    sync_payload = _load_json_report(sync_report, "sync_report", checks)
+    resolution = _resolve_stage_b_reports(
+        workspace=workspace,
+        account_id=account_id,
+        data_date=data_date,
+        trade_date=trade_date,
+        commit_report=commit_report,
+        sync_report=sync_report,
+        checks=checks,
+    )
+    commit_report = resolution["commit_report"]
+    sync_report = resolution["sync_report"]
+    commit_payload = _load_json_report(commit_report, "commit_report", checks) if commit_report else None
+    sync_payload = _load_json_report(sync_report, "sync_report", checks) if sync_report else None
 
     if commit_payload is not None and sync_payload is not None:
         _check_commit_report(commit_payload, account_id, trade_date, checks)
@@ -56,8 +67,11 @@ def verify_stage_b_completion(
         "account_id": account_id,
         "data_date": data_date,
         "trade_date": trade_date,
-        "commit_report_json": str(commit_report),
-        "sync_report_json": str(sync_report),
+        "commit_report_json": str(commit_report) if commit_report else None,
+        "sync_report_json": str(sync_report) if sync_report else None,
+        "resolved_from_state": resolution["resolved_from_state"],
+        "resolved_commit_report_json": str(commit_report) if commit_report else None,
+        "resolved_sync_report_json": str(sync_report) if sync_report else None,
         "committed_row_count": committed_row_count,
         "updated_count": updated_count,
         "failed_count": failed_count,
@@ -92,6 +106,127 @@ def verify_stage_b_completion(
         _write_json(json_path, payload)
         _write_json(latest_json, payload)
     return payload
+
+
+def _resolve_stage_b_reports(
+    *,
+    workspace: Path,
+    account_id: str,
+    data_date: str | None,
+    trade_date: str,
+    commit_report: Path | None,
+    sync_report: Path | None,
+    checks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    resolved_from_state = False
+    state: runbook_state.RunbookState | None = None
+    if commit_report is None or sync_report is None:
+        if not data_date:
+            checks.append(
+                _check(
+                    "stage_b_state",
+                    BLOCKED,
+                    "missing_data_date_for_state_resolution",
+                    "data_date is required when commit/sync report paths are omitted.",
+                )
+            )
+        else:
+            state_path = runbook_state.get_state_path_for_context(workspace, account_id, data_date, trade_date)
+            if not state_path.exists():
+                checks.append(
+                    _check(
+                        "stage_b_state",
+                        BLOCKED,
+                        "runbook_state_missing",
+                        f"runbook state not found: {state_path}",
+                    )
+                )
+            else:
+                state = runbook_state.load_state(state_path)
+                if not runbook_state.context_matches_state(state, account_id, data_date, trade_date):
+                    checks.append(
+                        _check(
+                            "stage_b_state",
+                            BLOCKED,
+                            "runbook_state_context_mismatch",
+                            "runbook state frozen_context does not match requested context.",
+                        )
+                    )
+                elif state.stage_status.get("B") != PASS or not (
+                    state.current_status == PASS or state.last_completed_stage == "B"
+                ):
+                    checks.append(
+                        _check(
+                            "stage_b_state",
+                            BLOCKED,
+                            "stage_b_not_pass",
+                            "Stage B must pass before verification.",
+                        )
+                    )
+                else:
+                    resolved_from_state = True
+    if commit_report is None and state is not None:
+        commit_report = _resolve_pinned_artifact(
+            workspace,
+            state,
+            "execution_commit_report_json",
+            "commit_report",
+            checks,
+        )
+    if sync_report is None and state is not None:
+        sync_report = _resolve_pinned_artifact(
+            workspace,
+            state,
+            "execution_status_sync_report_json",
+            "sync_report",
+            checks,
+            fallback_key="execution_status_sync_report",
+        )
+    return {
+        "commit_report": Path(commit_report) if commit_report else None,
+        "sync_report": Path(sync_report) if sync_report else None,
+        "resolved_from_state": resolved_from_state and commit_report is not None and sync_report is not None,
+    }
+
+
+def _resolve_pinned_artifact(
+    workspace: Path,
+    state: runbook_state.RunbookState,
+    artifact_key: str,
+    label: str,
+    checks: list[dict[str, Any]],
+    fallback_key: str | None = None,
+) -> Path | None:
+    artifact_ref = state.artifacts.get(artifact_key)
+    used_key = artifact_key
+    if not artifact_ref and fallback_key:
+        artifact_ref = state.artifacts.get(fallback_key)
+        used_key = fallback_key
+    if not artifact_ref:
+        checks.append(
+            _check(
+                label,
+                BLOCKED,
+                "missing_stage_b_artifact_ref",
+                f"{artifact_key} is not pinned in runbook state.",
+            )
+        )
+        return None
+    path = Path(str(artifact_ref))
+    if not path.is_absolute():
+        path = workspace / path
+    if not path.exists():
+        checks.append(
+            _check(
+                label,
+                FAILED,
+                "stage_b_artifact_file_missing",
+                f"Pinned artifact file does not exist: {path}",
+            )
+        )
+        return path
+    checks.append(_check(label, PASS, "artifact_resolved_from_state", f"{used_key}={path}"))
+    return path
 
 
 def get_verification_runs_dir(workspace: Path, runbook_day_id: str) -> Path:
@@ -403,8 +538,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--data-date")
     parser.add_argument("--trade-date", required=True)
-    parser.add_argument("--commit-report", type=Path, required=True)
-    parser.add_argument("--sync-report", type=Path, required=True)
+    parser.add_argument("--commit-report", type=Path)
+    parser.add_argument("--sync-report", type=Path)
     parser.add_argument("--timezone", default="Asia/Seoul")
     parser.add_argument("--json", action="store_true")
     return parser

@@ -907,7 +907,7 @@ This is not a user input gate. It is an automatic integrity verification step af
 Input artifacts:
 
 - `execution_commit_report_json`
-- `execution_status_sync_report`
+- `execution_status_sync_report_json`
 
 Verification policy:
 
@@ -915,13 +915,16 @@ Verification policy:
 - Sync report must have `overall_status=SUCCESS`, matching account/date, `failed_count=0`, and `candidate_count` / `updated_count` equal to `committed_row_count`.
 - The sync report row `committed_trade_id` set must match the commit report `committed_trade_ids` set.
 - Missing or unreadable reports are `FAILED`; inconsistent reports are `BLOCKED`.
+- CLI `--commit-report` and `--sync-report` are optional overrides. When omitted, the verifier resolves pinned artifacts from `runbook_state.json`.
+- Auto-resolve uses `execution_commit_report_json` and `execution_status_sync_report_json`; for backward compatibility, `execution_status_sync_report` is a sync fallback key.
+- Stage B must be `PASS` before auto-resolved verification. Existing `stage_b_verification_json` does not block re-verification.
 
 Output contract:
 
 - Write `verification_runs/{runbook_day_id}/{timestamp}_stage_b_verification.json/md`.
 - Write `verification_runs/{runbook_day_id}/latest_stage_b_verification.json/md`.
 - Pin `stage_b_verification_json` and `stage_b_verification_md` into runbook state when `data_date` is provided and the matching state exists.
-- A `PASS` result means Stage C daily review work may proceed.
+- A `PASS` result means Stage C daily review work may proceed. Stage C can treat Stage B verification `PASS` as a precondition.
 
 ### 6-3G. Gate 2 readiness check
 
