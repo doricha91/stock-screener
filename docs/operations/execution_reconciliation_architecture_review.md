@@ -244,7 +244,7 @@ Risks:
   reordered or manually added
 - commit can correctly protect ledger consistency while still committing a
   semantically unintended execution
-- Stage C can report committed trades, but it is late for preventing bad import
+- Stage C review prep can report committed trades, but it is late for preventing bad import
 
 ## 9. Reconciliation Responsibility Boundary
 
@@ -272,7 +272,7 @@ Stage B Commit:
 - must not re-query and reinterpret Notion rows independently
 - uses idempotency and existing duplicate trade controls
 
-Stage C Report:
+Stage C Review Prep / Later Review Reporting:
 
 - reports plan-vs-actual deltas and operator reasons
 - should not discover first-time blockers that should have stopped Stage B
@@ -380,7 +380,7 @@ Step 8 execution_commit
 This avoids expanding Gate 1 beyond readiness while preventing commit of
 semantically unsafe actual execution rows.
 
-## 13. Impact on Gate 1 / Stage B / Gate 2 / Stage C / Telegram
+## 13. Impact on Gate 1 / Stage B / Stage C / Gate 2 / Later Stages / Telegram
 
 Gate 1:
 
@@ -403,12 +403,17 @@ Stage B Commit:
 
 Gate 2:
 
-- should consume Stage B commit/report outputs
+- should consume Stage C review template outputs and manual review input
 - should not reinterpret execution rows
 
 Stage C:
 
-- should surface plan-vs-actual deltas in daily review summaries
+- prepares the daily review and manual review template after Stage B verification
+- can surface plan-vs-actual deltas in daily review summaries
+
+Stage D/E:
+
+- should consume pinned review/EOD artifacts after Gate 2
 - should distinguish "execution accepted with review reason" from "unexpected
   mismatch"
 
@@ -518,10 +523,10 @@ Telegram:
   controller-owned runbook state when the matching state exists.
 - Treat this as automatic completion verification, not Gate 2. Gate 2 remains
   the future Manual Review input readiness check.
-- Stage C can require Stage B verification `PASS` before daily review/report
+- Stage C Review Prep requires Stage B verification `PASS` before Step 10-11
   automation begins.
 
-### 6-3G-1 Stage B Review Template Prep
+### 6-3G-1 Stage C Review Template Prep
 
 - Reuse the existing Step 10 `paper.py review` shortcut and Step 11
   `export_paper_to_notion.py --manual-review-template` command.
@@ -532,5 +537,7 @@ Telegram:
   `workspace/artifacts/{runbook_day_id}/review_prep/` before pinning them in
   controller-owned state.
 - Pin the Step 11 command result as the Notion review template report artifact.
+- Write Stage C summaries as `latest_C.json` so Stage B Step 7-9 summaries remain
+  available as `latest_B.json`.
 - Do not implement Gate 2 here; the next manual action is to fill Manual Review
   in Notion and then run the future Gate 2 readiness check.

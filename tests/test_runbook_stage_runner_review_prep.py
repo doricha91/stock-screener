@@ -29,6 +29,8 @@ def _seed_stage_b_verified_state(
     state = runbook_state.complete_stage(state, "GATE1")
     if stage_b_pass:
         state = runbook_state.complete_stage(state, "B")
+        latest_b = workspace / "stage_runs" / state.runbook_day_id / "latest_B.json"
+        _write_json(latest_b, {"stage_id": "B", "marker": "original-stage-b-summary"})
     commit_report = _write_json(
         workspace / "artifacts" / state.runbook_day_id / "stage_b" / "commit.json",
         {"status": "COMMITTED"},
@@ -109,7 +111,10 @@ def _fake_review_prep_run(repo_outputs: Path, calls: list[list[str]], *, step11_
     return fake_run
 
 
-def test_stage_b_review_runs_step_10_11_after_stage_b_verify_pass(tmp_path: Path, monkeypatch) -> None:
+def test_stage_c_runs_step_10_11_after_stage_b_verify_pass_without_overwriting_latest_b(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     workspace = tmp_path / "workspace"
     repo_outputs = tmp_path / "repo_outputs"
     workspace.mkdir()
@@ -117,7 +122,7 @@ def test_stage_b_review_runs_step_10_11_after_stage_b_verify_pass(tmp_path: Path
     calls: list[list[str]] = []
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", _fake_review_prep_run(repo_outputs, calls))
 
-    result = runbook_stage_runner.run_stage_b_review(
+    result = runbook_stage_runner.run_stage_c(
         workspace,
         ACCOUNT_ID,
         DATA_DATE,
@@ -126,20 +131,34 @@ def test_stage_b_review_runs_step_10_11_after_stage_b_verify_pass(tmp_path: Path
     )
 
     assert result["runner_result"] == "PASS"
+    assert result["stage_id"] == "C"
+    assert result["canonical_stage_id"] == "C"
     assert [item["command_key"] for item in result["rendered_commands"]] == ["daily_review", "export_review_template"]
     assert "--json" in result["rendered_commands"][0]["argv"]
     assert len(calls) == 2
     state = runbook_state.load_state(Path(result["state_path"]))
     assert state.stage_status["B"] == "PASS"
+    assert state.stage_status["C"] == "PASS"
+    assert state.last_completed_stage == "C"
     assert state.last_completed_step == 11
+    assert [
+        event["stage_id"]
+        for event in state.history
+        if event.get("event_type") == "step_completed" and event.get("step_id") in {10, 11}
+    ] == ["C", "C"]
     assert state.artifacts["manual_review_template_csv"].startswith(f"artifacts/{state.runbook_day_id}/review_prep/")
     assert state.artifacts["manual_review_template_md"].startswith(f"artifacts/{state.runbook_day_id}/review_prep/")
     assert state.artifacts["notion_review_template_report_json"].startswith("command_runs/")
     assert (workspace / state.artifacts["manual_review_template_csv"]).exists()
+    latest_c = workspace / "stage_runs" / state.runbook_day_id / "latest_C.json"
+    latest_b = workspace / "stage_runs" / state.runbook_day_id / "latest_B.json"
+    assert latest_c.exists()
+    assert json.loads(latest_c.read_text(encoding="utf-8"))["stage_id"] == "C"
+    assert json.loads(latest_b.read_text(encoding="utf-8")) == {"stage_id": "B", "marker": "original-stage-b-summary"}
     assert "Gate 2" in result["next_required_action"]
 
 
-def test_stage_b_review_missing_verification_is_blocked(tmp_path: Path) -> None:
+def test_stage_c_missing_verification_is_blocked(tmp_path: Path) -> None:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
@@ -149,7 +168,7 @@ def test_stage_b_review_missing_verification_is_blocked(tmp_path: Path) -> None:
     state_path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     runbook_state.save_state(state, state_path)
 
-    result = runbook_stage_runner.run_stage_b_review(
+    result = runbook_stage_runner.run_stage_c(
         tmp_path,
         ACCOUNT_ID,
         DATA_DATE,
@@ -159,13 +178,14 @@ def test_stage_b_review_missing_verification_is_blocked(tmp_path: Path) -> None:
     )
 
     assert result["runner_result"] == "BLOCKED"
+    assert result["canonical_stage_id"] == "C"
     assert result["reason"] == "stage_b_verification_required"
 
 
-def test_stage_b_review_verification_not_pass_is_blocked(tmp_path: Path) -> None:
+def test_stage_c_verification_not_pass_is_blocked(tmp_path: Path) -> None:
     _seed_stage_b_verified_state(tmp_path, verification_runner_result="BLOCKED")
 
-    result = runbook_stage_runner.run_stage_b_review(
+    result = runbook_stage_runner.run_stage_c(
         tmp_path,
         ACCOUNT_ID,
         DATA_DATE,
@@ -178,7 +198,7 @@ def test_stage_b_review_verification_not_pass_is_blocked(tmp_path: Path) -> None
     assert result["reason"] == "stage_b_verification_required"
 
 
-def test_stage_b_review_step_11_failed_count_fails(tmp_path: Path, monkeypatch) -> None:
+def test_stage_c_step_11_failed_count_fails(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     repo_outputs = tmp_path / "repo_outputs"
     workspace.mkdir()
@@ -190,7 +210,7 @@ def test_stage_b_review_step_11_failed_count_fails(tmp_path: Path, monkeypatch) 
         _fake_review_prep_run(repo_outputs, calls, step11_failed_count=1),
     )
 
-    result = runbook_stage_runner.run_stage_b_review(
+    result = runbook_stage_runner.run_stage_c(
         workspace,
         ACCOUNT_ID,
         DATA_DATE,
@@ -202,10 +222,11 @@ def test_stage_b_review_step_11_failed_count_fails(tmp_path: Path, monkeypatch) 
     assert len(calls) == 2
     state = runbook_state.load_state(Path(result["state_path"]))
     assert state.stage_status["B"] == "PASS"
-    assert state.artifacts["stage_b_review_prep_error_result_json"].startswith("command_runs/")
+    assert state.stage_status["C"] == "PENDING"
+    assert state.artifacts["stage_c_error_result_json"].startswith("command_runs/")
 
 
-def test_stage_b_review_update_only_export_is_pass(tmp_path: Path, monkeypatch) -> None:
+def test_stage_c_update_only_export_is_pass(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     repo_outputs = tmp_path / "repo_outputs"
     workspace.mkdir()
@@ -217,7 +238,7 @@ def test_stage_b_review_update_only_export_is_pass(tmp_path: Path, monkeypatch) 
         _fake_review_prep_run(repo_outputs, calls, update_only=True),
     )
 
-    result = runbook_stage_runner.run_stage_b_review(
+    result = runbook_stage_runner.run_stage_c(
         workspace,
         ACCOUNT_ID,
         DATA_DATE,
@@ -227,3 +248,21 @@ def test_stage_b_review_update_only_export_is_pass(tmp_path: Path, monkeypatch) 
 
     assert result["runner_result"] == "PASS"
     assert len(calls) == 2
+
+
+def test_stage_b_review_alias_reports_canonical_stage_c(tmp_path: Path) -> None:
+    _seed_stage_b_verified_state(tmp_path)
+
+    result = runbook_stage_runner.run_stage_b_review(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        dry_run=True,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["stage_id"] == "C"
+    assert result["canonical_stage_id"] == "C"
+    assert result["deprecated_alias"] == "stage-b-review"

@@ -52,9 +52,11 @@ def test_stage_eligibility_mapping() -> None:
 
     assert {by_step[step].stage_id for step in range(0, 6)} == {"A"}
     assert by_step[6].stage_id == "GATE1"
-    assert {by_step[step].stage_id for step in range(7, 12)} == {"B"}
+    assert {by_step[step].stage_id for step in range(7, 10)} == {"B"}
+    assert {by_step[step].stage_id for step in range(10, 12)} == {"C"}
     assert by_step[12].stage_id == "GATE2"
-    assert {by_step[step].stage_id for step in range(13, 19)} == {"C"}
+    assert {by_step[step].stage_id for step in range(13, 16)} == {"D"}
+    assert {by_step[step].stage_id for step in range(16, 19)} == {"E"}
 
 
 def test_phase1_auto_execute_and_manual_gates() -> None:

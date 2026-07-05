@@ -77,9 +77,9 @@ def verify_stage_b_completion(
         "failed_count": failed_count,
         "checks": checks,
         "next_required_action": (
-            "Proceed to Stage C daily review."
+            "Proceed to Stage C review prep."
             if runner_result == PASS
-            else "Inspect Stage B commit/sync reports before Stage C."
+            else "Inspect Stage B commit/sync reports before Stage C review prep."
         ),
         "state_updated": False,
     }

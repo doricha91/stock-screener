@@ -29,7 +29,7 @@ The controller is not a trading bot. It is a guarded operator tool for the docum
 - The controller runs on local Windows without ngrok, Cloudflare Tunnel, or VPS.
 - Stage A starts at a user-configured scheduled time.
 - Step 6 and Step 12 are the only manual input gates.
-- Step 0-5, Step 7-11, and Step 13-18 run automatically when their guard conditions are satisfied.
+- Step 0-5, Step 7-9, Step 10-11, Step 13-15, and Step 16-18 run automatically when their guard conditions are satisfied.
 - Each step and stage writes txt/json/log results.
 - Telegram receives stage result, wait, blocked, and failure messages through outbound `sendMessage`.
 - Broker/API/live order execution is out of scope.
@@ -87,7 +87,7 @@ RUNBOOK_POLL_INTERVAL_MINUTES=60
 RUNBOOK_TIMEZONE=Asia/Seoul
 ```
 
-### Stage A: Pre-market / Daily Plan Stage
+### Stage A: Plan Prep
 
 Trigger: user-configured scheduled time.
 
@@ -111,7 +111,7 @@ Readiness conditions:
 - Account ID matches the frozen runbook context.
 - Execution Date matches `trade_date`.
 
-### Stage B: Execution Import / Review Template Stage
+### Stage B: Execution Commit & Sync
 
 Trigger: Gate 1 readiness is met, either during a scheduled check or periodic polling.
 
@@ -120,12 +120,30 @@ Steps:
 - Step 7 Execution preview
 - Step 8 Execution commit
 - Step 9 Execution status sync
+
+### Stage B Verify: Execution Commit Verification
+
+Trigger: Stage B has completed.
+
+Role:
+
+- Read the pinned execution commit report and pinned Notion sync report.
+- Verify commit/sync consistency.
+- Pin `stage_b_verification_json` / `stage_b_verification_md`.
+- This is a verifier script, not a registry command.
+
+### Stage C: Review Prep
+
+Trigger: Stage B Verify is `PASS`.
+
+Steps:
+
 - Step 10 Daily Review
 - Step 11 Manual Review template export
 
 ### Manual Gate 2: Step 12 Notion Review Input
 
-The controller polls for readiness. It must not run Stage C until every readiness condition is met.
+The controller polls for readiness. It must not run Stage D until every readiness condition is met.
 
 Readiness conditions:
 
@@ -135,7 +153,7 @@ Readiness conditions:
 - Account ID matches the frozen runbook context.
 - Review Date matches `trade_date`.
 
-### Stage C: Review Import / EOD Close Stage
+### Stage D: Review Import & Sync
 
 Trigger: Gate 2 readiness is met, either during a scheduled check or periodic polling.
 
@@ -144,6 +162,13 @@ Steps:
 - Step 13 Review preview
 - Step 14 Review append
 - Step 15 Review status sync
+
+### Stage E: EOD Close & Final Status
+
+Trigger: Stage D has completed.
+
+Steps:
+
 - Step 16 EOD dry-run
 - Step 17 EOD commit
 - Step 18 Final status
@@ -196,7 +221,7 @@ resolve dates
 
 It should remain safe for status freshness checks. It does not run plan generation, Notion export/import, commit, sync, approval, or live broker activity.
 
-`daily_refresh` can still be used by the controller as a freshness helper or fallback diagnostic. It is not the center of Phase 1. The center of Phase 1 is the Runbook Command Controller, which controls Stage A/B/C execution and gate polling.
+`daily_refresh` can still be used by the controller as a freshness helper or fallback diagnostic. It is not the center of Phase 1. The center of Phase 1 is the Runbook Command Controller, which controls Stage A/B/C/D/E execution and gate polling.
 
 `daily_refresh` helper outputs:
 
@@ -220,7 +245,7 @@ It is responsible for:
 - preview/commit dependency checks
 - command run result files
 - post-run refresh policy
-- Stage A/B/C state transitions
+- Stage A/B/C/D/E state transitions
 - Gate 1/2 polling and readiness checks
 - duplicate-run prevention
 
@@ -234,9 +259,12 @@ Phase 1 controller scope:
 - last/latest result lookup
 - Stage A Step 0-5 execution
 - Gate 1 readiness polling
-- Stage B Step 7-11 execution
+- Stage B Step 7-9 execution
+- Stage B Verify completion check
+- Stage C Step 10-11 review prep execution
 - Gate 2 readiness polling
-- Stage C Step 13-18 execution
+- Stage D Step 13-15 execution
+- Stage E Step 16-18 execution
 - Telegram scheduled push summaries
 
 Phase 1 does not include:
@@ -452,9 +480,12 @@ These gate rules apply to Phase 2 interactive Telegram control and ad hoc local 
 | --- | --- |
 | 0-5 | Run automatically in Stage A when schedule and guard conditions are satisfied. |
 | 6 | Manual Gate 1; never auto-execute. |
-| 7-11 | Run automatically after Gate 1 readiness is confirmed. |
+| 7-9 | Run automatically after Gate 1 readiness is confirmed. |
+| Stage B Verify | Run automatically after Stage B to verify commit/sync artifacts. |
+| 10-11 | Run automatically after Stage B Verify `PASS`. |
 | 12 | Manual Gate 2; never auto-execute. |
-| 13-18 | Run automatically after Gate 2 readiness is confirmed. |
+| 13-15 | Run automatically after Gate 2 readiness is confirmed. |
+| 16-18 | Run automatically after Stage D completion. |
 
 Each stage must stop immediately on failure and push `FAILED` or `BLOCKED` to Telegram. A waiting gate should push `WAIT`, not run the next stage.
 
@@ -840,9 +871,9 @@ Notes:
 - This step does not run Stage B commit, update Notion, append the ledger, write snapshots, send Telegram, or modify n8n.
 - Step 8 must later consume a pinned reconciliation/preview artifact; it must not reconstruct judgment from Telegram text.
 
-### 6-3F-2. Stage B commit / sync / review template execution
+### 6-3F-2. Stage B commit gate with pinned reconciliation preview
 
-Goal: run Step 8-11 using pinned artifacts and fail-stop behavior.
+Goal: require a `PASS` reconciliation preview artifact before Step 8 can commit.
 Out of scope: Gate 2 polling and Stage C.
 
 Notes:
@@ -851,7 +882,7 @@ Notes:
 - The reconciliation preview must have `schema_version=execution_reconciliation_preview.v1`, matching account/date context, `runner_result=PASS`, zero warning/needs_review/blocked/missing/extra counts, and matching planned/actual/matched counts.
 - Phase 1 does not auto-commit `WARNING`, `NEEDS_REVIEW`, or `BLOCKED` reconciliation previews.
 - Step 8 must not re-query Notion or recalculate plan-vs-actual judgment; it only validates the pinned reconciliation artifact before commit.
-- Step 9 must use only the `commit_report` produced by Step 8.
+- Step 9 must use only the `commit_report` produced by Step 8 when Stage B runner integration is added.
 - If Step 8 succeeds and Step 9 fails, do not attempt automatic local source-of-truth rollback.
 - Telegram summary must say whether retry should use the same `commit_report`.
 
@@ -924,20 +955,20 @@ Output contract:
 - Write `verification_runs/{runbook_day_id}/{timestamp}_stage_b_verification.json/md`.
 - Write `verification_runs/{runbook_day_id}/latest_stage_b_verification.json/md`.
 - Pin `stage_b_verification_json` and `stage_b_verification_md` into runbook state when `data_date` is provided and the matching state exists.
-- A `PASS` result means Stage C daily review work may proceed. Stage C can treat Stage B verification `PASS` as a precondition.
+- A `PASS` result means Stage C review prep may proceed. Stage C treats Stage B verification `PASS` as a precondition.
 
-### 6-3G-1. Integrate existing Step 10-11 review template flow
+### 6-3G-1. Stage C review prep from existing Step 10-11 flow
 
-Goal: connect existing Step 10 `daily_review` and Step 11 `export_review_template` to the runbook runner after Stage B Verify `PASS`.
+Goal: connect existing Step 10 `daily_review` and Step 11 `export_review_template` to Stage C after Stage B Verify `PASS`.
 
 Scope:
 
-- Add a local `stage-b-review` runner command.
+- Add a local `stage-c` runner command. Keep `stage-b-review` only as a temporary deprecated alias.
 - Reuse `scripts\\paper.py review --account-id {account_id} --date {trade_date} --json`.
 - Reuse `scripts\\export_paper_to_notion.py --manual-review-template --account-id {account_id} --date {trade_date} --confirm-actual --json`.
 - Require Stage A `PASS`, Gate 1 `PASS`, Stage B `PASS`, Stage B verification `PASS`, no active `last_error`, and paper/test account confirmation.
 - Copy Step 10/11 repo output artifacts into `workspace/artifacts/{runbook_day_id}/review_prep/` before pinning them to `runbook_state.json`.
-- Preserve Stage B `PASS`; Step 10/11 completion records step/artifact history but does not rerun Step 7-9 or change commit/sync state.
+- Preserve Stage B `PASS`; Step 10/11 completion records Stage C step/artifact history and writes `latest_C.json`, not `latest_B.json`.
 
 Out of scope: Gate 2 readiness check, review import/append/sync, EOD dry-run/commit, Telegram, n8n, Task Scheduler, Notion schema changes, and any live/broker action.
 
@@ -945,17 +976,17 @@ Notes:
 
 - Step 10 may write local review reports/templates under repo `outputs/`; the runner pins workspace copies such as `daily_review_report_md`, `manual_review_template_csv`, and `manual_review_template_md`.
 - Step 11 Notion export is an upsert-style paper/test smoke path. Its command result JSON/TXT are pinned as `notion_review_template_report_json` and `notion_review_template_report_md`.
-- On success, the next required action is: `Fill Manual Review in Notion, then run Gate 2.`
+- On success, `stage_status.C=PASS`, `last_completed_stage=C`, and the next required action is: `Fill Manual Review in Notion, then run Gate 2.`
 
 ### 6-3G. Gate 2 readiness check
 
 Goal: poll Notion review input readiness for Manual Answer, Review Status, Import Status, Account ID, and Review Date.
-Out of scope: Stage C execution.
+Out of scope: Stage D execution.
 
-### 6-3H-1. Stage C review preview and artifact pinning
+### 6-3H-1. Stage D review preview and artifact pinning
 
 Goal: run Step 13 and freeze the review preview artifact before append.
-Out of scope: Step 14 append and later Stage C steps.
+Out of scope: Step 14 append and later Stage D/E steps.
 
 Notes:
 
@@ -963,9 +994,9 @@ Notes:
 - Do not advance to Step 14 when `fail_count` is not 0.
 - Manual Answer, Review Status, and Import Status mismatch should be treated as Gate 2 readiness problems.
 
-### 6-3H-2. Stage C append / sync / eod dry-run / eod commit / final status
+### 6-3H-2. Stage D append/sync and Stage E eod dry-run/eod commit/final status
 
-Goal: run Step 14-18 using pinned artifacts, EOD dry-run gating, and fail-stop behavior.
+Goal: run Step 14-15 and Step 16-18 using pinned artifacts, EOD dry-run gating, and fail-stop behavior.
 Out of scope: inbound Telegram control.
 
 Notes:
@@ -1019,7 +1050,9 @@ During the 3-6 month forward test:
 - Stage A starts automatically once per operating day at the user-configured scheduled time.
 - Gate 1 and Gate 2 polling runs at the configured interval.
 - Stage B runs once after Step 6 Notion execution input is ready.
-- Stage C runs once after Step 12 Notion review input is ready.
+- Stage C runs once after Stage B Verify `PASS`.
+- Stage D runs once after Step 12 Notion review input is ready.
+- Stage E runs once after Stage D completion.
 - Telegram push reports `PASS` / `WARNING` / `WAIT` / `BLOCKED` / `FAILED`, `stage`, `account_id`, `data_date`, `trade_date`, `current_step`, `last_completed_step`, `blocked_reason`, `next_required_manual_action`, and `next_poll_time`.
 - The operator manually provides Step 6 and Step 12 Notion inputs.
 - The operator manually resolves blocked or failed states.
@@ -1028,7 +1061,7 @@ During the 3-6 month forward test:
 
 Tracking metrics:
 
-- Stage A/B/C success rate
+- Stage A/B/C/D/E success rate
 - stale data frequency
 - failed step frequency
 - blocked/wait frequency

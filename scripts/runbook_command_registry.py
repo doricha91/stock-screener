@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Iterable, Sequence
 
 
-STAGE_IDS = {"A", "GATE1", "B", "GATE2", "C"}
+STAGE_IDS = {"A", "GATE1", "B", "C", "GATE2", "D", "E"}
 COMMAND_TYPES = {
     "READ_ONLY",
     "READ_ONLY_PREVIEW",
@@ -339,8 +339,8 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
     _command(
         command_key="daily_review",
         step_id=10,
-        stage_id="B",
-        stage_order=3,
+        stage_id="C",
+        stage_order=0,
         display_name="Daily review",
         argv_template=_argv(
             "scripts\\paper.py",
@@ -362,8 +362,8 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
     _command(
         command_key="export_review_template",
         step_id=11,
-        stage_id="B",
-        stage_order=4,
+        stage_id="C",
+        stage_order=1,
         display_name="Export review template",
         argv_template=_argv(
             "scripts\\export_paper_to_notion.py",
@@ -405,7 +405,7 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
     _command(
         command_key="review_preview",
         step_id=13,
-        stage_id="C",
+        stage_id="D",
         stage_order=0,
         display_name="Review preview",
         argv_template=_argv(
@@ -426,7 +426,7 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
     _command(
         command_key="review_append",
         step_id=14,
-        stage_id="C",
+        stage_id="D",
         stage_order=1,
         display_name="Review append",
         argv_template=_argv(
@@ -452,7 +452,7 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
     _command(
         command_key="sync_review_status",
         step_id=15,
-        stage_id="C",
+        stage_id="D",
         stage_order=2,
         display_name="Sync review status",
         argv_template=_argv(
@@ -476,8 +476,8 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
     _command(
         command_key="eod_dryrun",
         step_id=16,
-        stage_id="C",
-        stage_order=3,
+        stage_id="E",
+        stage_order=0,
         display_name="EOD dry-run",
         argv_template=_argv("scripts\\paper.py", "eod", "--date", "{trade_date}", "--account-id", "{account_id}", "--dry-run"),
         command_type="READ_ONLY_PREVIEW",
@@ -489,8 +489,8 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
     _command(
         command_key="eod_commit",
         step_id=17,
-        stage_id="C",
-        stage_order=4,
+        stage_id="E",
+        stage_order=1,
         display_name="EOD commit",
         argv_template=_argv("scripts\\paper.py", "eod", "--date", "{trade_date}", "--account-id", "{account_id}", "--commit"),
         command_type="STATE_SNAPSHOT_WRITE",
@@ -506,8 +506,8 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
     _command(
         command_key="final_status",
         step_id=18,
-        stage_id="C",
-        stage_order=5,
+        stage_id="E",
+        stage_order=2,
         display_name="Final status",
         argv_template=_argv(
             "scripts\\paper_daily_ops.py",
@@ -588,12 +588,16 @@ def validate_registry(commands: Sequence[RunbookCommand] = RUNBOOK_COMMANDS) -> 
             errors.append(f"{command.command_key}: Stage A must map to Step 0..5")
         if command.stage_id == "GATE1" and command.step_id != 6:
             errors.append(f"{command.command_key}: GATE1 must map to Step 6")
-        if command.stage_id == "B" and command.step_id not in range(7, 12):
-            errors.append(f"{command.command_key}: Stage B must map to Step 7..11")
+        if command.stage_id == "B" and command.step_id not in range(7, 10):
+            errors.append(f"{command.command_key}: Stage B must map to Step 7..9")
+        if command.stage_id == "C" and command.step_id not in range(10, 12):
+            errors.append(f"{command.command_key}: Stage C must map to Step 10..11")
         if command.stage_id == "GATE2" and command.step_id != 12:
             errors.append(f"{command.command_key}: GATE2 must map to Step 12")
-        if command.stage_id == "C" and command.step_id not in range(13, 19):
-            errors.append(f"{command.command_key}: Stage C must map to Step 13..18")
+        if command.stage_id == "D" and command.step_id not in range(13, 16):
+            errors.append(f"{command.command_key}: Stage D must map to Step 13..15")
+        if command.stage_id == "E" and command.step_id not in range(16, 19):
+            errors.append(f"{command.command_key}: Stage E must map to Step 16..18")
         if command.requires_preview_artifact and not command.required_prior_artifacts:
             errors.append(f"{command.command_key}: preview artifact requirement must name required_prior_artifacts")
         if command.requires_commit_report and not command.required_prior_artifacts:

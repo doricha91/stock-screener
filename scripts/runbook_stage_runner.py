@@ -24,9 +24,10 @@ from scripts.runbook_state import RunbookState
 
 STAGE_A_ID = "A"
 STAGE_B_ID = "B"
+STAGE_C_ID = "C"
 STAGE_A_STEP_IDS = tuple(range(0, 6))
 STAGE_B_STEP_IDS = (7, 8, 9)
-STAGE_B_REVIEW_STEP_IDS = (10, 11)
+STAGE_C_STEP_IDS = (10, 11)
 DEFAULT_TIMEOUT_SEC = 1800
 
 
@@ -119,14 +120,14 @@ def get_stage_b_commands(commands: Sequence[RunbookCommand] | None = None) -> li
     return selected
 
 
-def get_stage_b_review_commands(commands: Sequence[RunbookCommand] | None = None) -> list[RunbookCommand]:
+def get_stage_c_commands(commands: Sequence[RunbookCommand] | None = None) -> list[RunbookCommand]:
     selected = [
         command
         for command in (commands or registry.list_commands())
-        if command.step_id in STAGE_B_REVIEW_STEP_IDS
+        if command.step_id in STAGE_C_STEP_IDS
     ]
     selected.sort(key=lambda command: command.step_id)
-    validate_stage_b_review_commands(selected)
+    validate_stage_c_commands(selected)
     return selected
 
 
@@ -160,19 +161,19 @@ def validate_stage_b_commands(commands: Sequence[RunbookCommand]) -> None:
             raise ValueError(f"Stage B command argv_template is required: {command.command_key}")
 
 
-def validate_stage_b_review_commands(commands: Sequence[RunbookCommand]) -> None:
+def validate_stage_c_commands(commands: Sequence[RunbookCommand]) -> None:
     step_ids = [command.step_id for command in commands]
-    if step_ids != list(STAGE_B_REVIEW_STEP_IDS):
-        raise ValueError(f"Stage B review commands must cover steps 10..11 in order, found {step_ids}")
+    if step_ids != list(STAGE_C_STEP_IDS):
+        raise ValueError(f"Stage C commands must cover steps 10..11 in order, found {step_ids}")
     for command in commands:
-        if command.stage_id != STAGE_B_ID:
-            raise ValueError(f"Stage B review command has invalid stage_id: {command.command_key}")
+        if command.stage_id != STAGE_C_ID:
+            raise ValueError(f"Stage C command has invalid stage_id: {command.command_key}")
         if not command.phase1_auto_execute:
-            raise ValueError(f"Stage B review command is not phase1 auto executable: {command.command_key}")
+            raise ValueError(f"Stage C command is not phase1 auto executable: {command.command_key}")
         if command.manual_gate:
-            raise ValueError(f"Stage B review command cannot be a manual gate: {command.command_key}")
+            raise ValueError(f"Stage C command cannot be a manual gate: {command.command_key}")
         if not command.argv_template:
-            raise ValueError(f"Stage B review command argv_template is required: {command.command_key}")
+            raise ValueError(f"Stage C command argv_template is required: {command.command_key}")
 
 
 def run_stage_a(
@@ -541,7 +542,7 @@ def run_stage_b(
         STAGE_B_ID,
         command_results,
         next_required_action=(
-            "Proceed to Gate 2 or Stage C daily review."
+            "Proceed to Stage B Verify, then Stage C review prep."
             if stage_result == "PASS"
             else "Inspect Stage B command result and pinned artifacts before retry."
         ),
@@ -583,7 +584,7 @@ def run_stage_b(
     }
 
 
-def run_stage_b_review(
+def run_stage_c(
     workspace: Path,
     account_id: str,
     data_date: str,
@@ -599,7 +600,7 @@ def run_stage_b_review(
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
     if guard_error:
-        return _blocked_stage_b_review_payload(guard_error, dry_run, confirm_paper_test)
+        return _blocked_stage_c_payload(guard_error, dry_run, confirm_paper_test)
 
     try:
         _, state_path, state = runbook_state.init_state_file_for_context(
@@ -610,24 +611,24 @@ def run_stage_b_review(
             timezone,
         )
     except ValueError as exc:
-        return _blocked_stage_b_review_payload(str(exc), dry_run, confirm_paper_test)
+        return _blocked_stage_c_payload(str(exc), dry_run, confirm_paper_test)
 
-    precondition_error = _stage_b_review_precondition_error(state, workspace)
+    precondition_error = _stage_c_precondition_error(state, workspace)
     if precondition_error:
         return {
-            **_blocked_stage_b_review_payload(precondition_error, dry_run, confirm_paper_test),
+            **_blocked_stage_c_payload(precondition_error, dry_run, confirm_paper_test),
             "runbook_day_id": state.runbook_day_id,
             "state_path": str(state_path),
         }
 
-    review_commands = get_stage_b_review_commands(commands)
+    review_commands = get_stage_c_commands(commands)
     command_results: list[dict[str, Any]] = []
     rendered_commands: list[dict[str, Any]] = []
     stage_result = "PASS"
 
     for command in review_commands:
         try:
-            command_result, log_text, rendered_argv = _run_stage_b_review_command(
+            command_result, log_text, rendered_argv = _run_stage_c_command(
                 state,
                 workspace,
                 repo_root,
@@ -651,7 +652,7 @@ def run_stage_b_review(
                 state,
                 command,
                 "FAILED",
-                f"Stage B review prep command raised {type(exc).__name__}.",
+                f"Stage C command raised {type(exc).__name__}.",
                 raw_payload={},
                 blockers=[str(exc)],
                 process={"executed": False, "exit_code": None, "duration_ms": None},
@@ -669,7 +670,7 @@ def run_stage_b_review(
             stage_result = "FAILED"
             state = runbook_state.record_artifact(
                 state,
-                "stage_b_review_prep_error_result_json",
+                "stage_c_error_result_json",
                 str(command_json_path),
                 workspace,
             )
@@ -694,7 +695,7 @@ def run_stage_b_review(
             state = runbook_state.complete_step(
                 state,
                 command.step_id,
-                STAGE_B_ID,
+                STAGE_C_ID,
                 artifact_refs,
                 workspace,
             )
@@ -704,7 +705,7 @@ def run_stage_b_review(
         stage_result = "BLOCKED" if runner_result == "BLOCKED" else "FAILED"
         state = runbook_state.record_artifact(
             state,
-            "stage_b_review_prep_error_result_json",
+            "stage_c_error_result_json",
             str(command_json_path),
             workspace,
         )
@@ -713,12 +714,12 @@ def run_stage_b_review(
 
     stage_summary = runbook_result.create_stage_summary(
         state,
-        STAGE_B_ID,
+        STAGE_C_ID,
         command_results,
         next_required_action=(
             "Fill Manual Review in Notion, then run Gate 2."
             if stage_result == "PASS"
-            else "Inspect Stage B review prep command result before retry."
+            else "Inspect Stage C review prep command result before retry."
         ),
         next_stage="GATE2" if stage_result == "PASS" else None,
     )
@@ -730,16 +731,35 @@ def run_stage_b_review(
         "notion_review_template_report_md": state.artifacts.get("notion_review_template_report_md"),
         "next_required_action": stage_summary["summary"].get("next_required_action"),
     }
+    if stage_result == "PASS":
+        state = runbook_state.complete_stage(state, STAGE_C_ID)
+        runbook_state.save_state(state, state_path)
+        stage_summary = runbook_result.create_stage_summary(
+            state,
+            STAGE_C_ID,
+            command_results,
+            next_required_action="Fill Manual Review in Notion, then run Gate 2.",
+            next_stage="GATE2",
+        )
+        stage_summary["raw_payload"] = {
+            "daily_review_report_md": state.artifacts.get("daily_review_report_md"),
+            "manual_review_template_csv": state.artifacts.get("manual_review_template_csv"),
+            "manual_review_template_md": state.artifacts.get("manual_review_template_md"),
+            "notion_review_template_report_json": state.artifacts.get("notion_review_template_report_json"),
+            "notion_review_template_report_md": state.artifacts.get("notion_review_template_report_md"),
+            "next_required_action": stage_summary["summary"].get("next_required_action"),
+        }
     stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
     stage_summary_paths = runbook_result.get_stage_summary_paths(
         workspace,
         state.runbook_day_id,
-        STAGE_B_ID,
+        STAGE_C_ID,
         timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
     )
     return {
         "runner_result": stage_summary["runner_result"],
-        "stage_id": STAGE_B_ID,
+        "stage_id": STAGE_C_ID,
+        "canonical_stage_id": STAGE_C_ID,
         "runbook_day_id": state.runbook_day_id,
         "state_path": str(state_path),
         "stage_summary_json": str(stage_summary_json),
@@ -756,6 +776,13 @@ def run_stage_b_review(
         "dry_run": dry_run,
         "next_required_action": stage_summary["summary"].get("next_required_action"),
     }
+
+
+def run_stage_b_review(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    result = run_stage_c(*args, **kwargs)
+    result["deprecated_alias"] = "stage-b-review"
+    result["canonical_stage_id"] = STAGE_C_ID
+    return result
 
 
 def _paper_smoke_guard(account_id: str, dry_run: bool, confirm_paper_test: bool) -> str | None:
@@ -779,10 +806,11 @@ def _blocked_stage_b_payload(reason: str, dry_run: bool, confirm_paper_test: boo
     }
 
 
-def _blocked_stage_b_review_payload(reason: str, dry_run: bool, confirm_paper_test: bool) -> dict[str, Any]:
+def _blocked_stage_c_payload(reason: str, dry_run: bool, confirm_paper_test: bool) -> dict[str, Any]:
     return {
         "runner_result": "BLOCKED",
-        "stage_id": STAGE_B_ID,
+        "stage_id": STAGE_C_ID,
+        "canonical_stage_id": STAGE_C_ID,
         "reason": reason,
         "dry_run": dry_run,
         "paper_test_confirmed": confirm_paper_test,
@@ -804,7 +832,7 @@ def _stage_b_precondition_error(state: RunbookState) -> str | None:
     return None
 
 
-def _stage_b_review_precondition_error(state: RunbookState, workspace: Path) -> str | None:
+def _stage_c_precondition_error(state: RunbookState, workspace: Path) -> str | None:
     if state.stage_status.get(STAGE_A_ID) != "PASS":
         return "stage_a_not_pass"
     if state.stage_status.get("GATE1") != "PASS":
@@ -984,7 +1012,7 @@ def _run_stage_b_command(
     return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
 
-def _run_stage_b_review_command(
+def _run_stage_c_command(
     state: RunbookState,
     workspace: Path,
     repo_root: Path,
@@ -998,7 +1026,7 @@ def _run_stage_b_review_command(
     argv = normalize_python_script_argv(rendered_argv, repo_root)
     if dry_run:
         process = {"executed": False, "exit_code": None, "duration_ms": None}
-        artifacts = _dry_run_stage_b_review_artifacts(command)
+        artifacts = _dry_run_stage_c_artifacts(command)
         result = runbook_result.create_command_result(
             state,
             command,
@@ -1034,7 +1062,7 @@ def _run_stage_b_review_command(
         )
         return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
-    validation = _validate_stage_b_review_payload(command.command_key, raw_payload)
+    validation = _validate_stage_c_payload(command.command_key, raw_payload)
     if validation["artifact_refs"]:
         validation["artifact_refs"] = _pin_artifact_refs(
             workspace,
@@ -1131,7 +1159,7 @@ def _dry_run_stage_b_artifacts(command: RunbookCommand) -> dict[str, str]:
     return {}
 
 
-def _dry_run_stage_b_review_artifacts(command: RunbookCommand) -> dict[str, str]:
+def _dry_run_stage_c_artifacts(command: RunbookCommand) -> dict[str, str]:
     if command.command_key == "daily_review":
         return {
             "daily_review_report_md": "dry_run/paper_daily_review_summary.md",
@@ -1158,7 +1186,7 @@ def _validate_stage_b_payload(command_key: str, payload: dict[str, Any]) -> dict
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
-def _validate_stage_b_review_payload(command_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _validate_stage_c_payload(command_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     if command_key == "daily_review":
         return _validate_daily_review_payload(payload)
     if command_key == "export_review_template":
@@ -1545,7 +1573,17 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_b.add_argument("--confirm-paper-test", action="store_true")
     stage_b.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
 
-    stage_b_review = subparsers.add_parser("stage-b-review", help="Run Stage B Step 10-11 review prep")
+    stage_c = subparsers.add_parser("stage-c", help="Run Stage C Step 10-11 review prep")
+    stage_c.add_argument("--workspace", type=Path, required=True)
+    stage_c.add_argument("--account-id", required=True)
+    stage_c.add_argument("--data-date", required=True)
+    stage_c.add_argument("--trade-date", required=True)
+    stage_c.add_argument("--timezone", default="Asia/Seoul")
+    stage_c.add_argument("--dry-run", action="store_true")
+    stage_c.add_argument("--confirm-paper-test", action="store_true")
+    stage_c.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
+
+    stage_b_review = subparsers.add_parser("stage-b-review", help="Deprecated alias for stage-c")
     stage_b_review.add_argument("--workspace", type=Path, required=True)
     stage_b_review.add_argument("--account-id", required=True)
     stage_b_review.add_argument("--data-date", required=True)
@@ -1575,6 +1613,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if result.get("runner_result") == "PASS" else 1
     if args.command == "stage-b":
         result = run_stage_b(
+            workspace=args.workspace,
+            account_id=args.account_id,
+            data_date=args.data_date,
+            trade_date=args.trade_date,
+            timezone=args.timezone,
+            dry_run=args.dry_run,
+            confirm_paper_test=args.confirm_paper_test,
+            timeout_sec=args.timeout_sec,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("runner_result") == "PASS" else 1
+    if args.command == "stage-c":
+        result = run_stage_c(
             workspace=args.workspace,
             account_id=args.account_id,
             data_date=args.data_date,

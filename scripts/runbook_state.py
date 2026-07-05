@@ -19,7 +19,7 @@ STATE_DIRNAME = "runbook_states"
 # It does not replace the existing n8n runner context.json contract.
 # It shares account_id/data_date/trade_date concepts but owns controller state.
 SCHEMA_VERSION = "runbook_state.v1"
-STAGE_IDS = ("A", "GATE1", "B", "GATE2", "C")
+STAGE_IDS = ("A", "GATE1", "B", "C", "GATE2", "D", "E")
 ALLOWED_STATUSES = {"READY", "PENDING", "RUNNING", "WAIT", "PASS", "BLOCKED", "FAILED", "DONE"}
 ALLOWED_IDEMPOTENCY_STATUSES = {
     "RESERVED",
@@ -223,7 +223,7 @@ def validate_state(state: RunbookState) -> list[str]:
     except ValueError as exc:
         errors.append(str(exc))
     if state.current_stage not in STAGE_IDS:
-        errors.append("current_stage must be one of A/GATE1/B/GATE2/C")
+        errors.append("current_stage must be one of A/GATE1/B/C/GATE2/D/E")
     if state.current_status not in ALLOWED_STATUSES:
         errors.append("current_status is not allowed")
     missing_stage_status = [stage_id for stage_id in STAGE_IDS if stage_id not in state.stage_status]
@@ -238,7 +238,7 @@ def validate_state(state: RunbookState) -> list[str]:
         if not isinstance(state.last_completed_step, int) or not 0 <= state.last_completed_step <= 18:
             errors.append("last_completed_step must be null or 0..18")
     if state.last_completed_stage is not None and state.last_completed_stage not in STAGE_IDS:
-        errors.append("last_completed_stage must be null or one of A/GATE1/B/GATE2/C")
+        errors.append("last_completed_stage must be null or one of A/GATE1/B/C/GATE2/D/E")
     if not isinstance(state.artifacts, dict):
         errors.append("artifacts must be an object")
     if not isinstance(state.idempotency_records, dict):

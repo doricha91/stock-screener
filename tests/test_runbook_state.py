@@ -76,7 +76,7 @@ def test_initial_state_defaults() -> None:
     assert state.current_status in {"READY", "PENDING"}
     assert state.last_completed_step is None
     assert state.last_completed_stage is None
-    assert set(state.stage_status) == {"A", "GATE1", "B", "GATE2", "C"}
+    assert set(state.stage_status) == {"A", "GATE1", "B", "C", "GATE2", "D", "E"}
     assert all(status == "PENDING" for status in state.stage_status.values())
     assert state.idempotency_records == {}
 
@@ -155,7 +155,7 @@ def test_validate_state_reports_schema_errors() -> None:
     errors = runbook_state.validate_state(broken)
 
     assert "schema_version must be runbook_state.v1" in errors
-    assert "current_stage must be one of A/GATE1/B/GATE2/C" in errors
+    assert "current_stage must be one of A/GATE1/B/C/GATE2/D/E" in errors
     assert "last_completed_step must be null or 0..18" in errors
 
 
