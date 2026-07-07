@@ -425,6 +425,14 @@ Stage D/E:
   with the later full Stage D append/sync result
 - Step 14 must consume the pinned `review_preview_json`; it must not re-query
   or reinterpret Notion Manual Review rows independently
+- Step 14 appends only when the pinned preview has `append_allowed=true`,
+  `fail_count=0`, no duplicate candidates, and matching frozen account/date
+- Step 14 is idempotent by `runbook_day_id:review_append:review_preview_json`;
+  once PASS is recorded, automatic rerun of the same append is blocked
+- Step 15 must consume only the append report pinned by Step 14; if sync fails
+  after append PASS, retry Step 15 with that pinned report rather than appending
+  again
+- Stage D PASS is recorded only after Step 15 status sync succeeds
 - should distinguish "execution accepted with review reason" from "unexpected
   mismatch"
 

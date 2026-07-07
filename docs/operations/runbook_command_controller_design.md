@@ -1021,15 +1021,32 @@ Notes:
 - Manual Answer, Review Status, and Import Status mismatch should be treated as Gate 2 readiness problems; if they change after Gate 2, Stage D preview blocks rather than appending.
 - Step 14 must later consume only the pinned `review_preview_json`; it must not reinterpret Notion rows independently.
 
-### 6-3H-2. Stage D append/sync and Stage E eod dry-run/eod commit/final status
+### 6-3H-2. Stage D review append and sync
 
-Goal: run Step 14-15 and Step 16-18 using pinned artifacts, EOD dry-run gating, and fail-stop behavior.
-Out of scope: inbound Telegram control.
+Goal: run Step 14 `review_append` and Step 15 `sync_review_status` from the pinned Step 13 preview artifact.
+Out of scope: Step 16-18 EOD close, inbound Telegram control, and warning approval.
 
 Notes:
 
 - Step 14 must use only the `review_preview_json` pinned by Step 13.
-- Step 15 must use only the `review_commit_report` produced by Step 14.
+- Step 14 must not re-query or reinterpret Notion Manual Review rows.
+- Step 14 is duplicate-sensitive; its idempotency key includes `runbook_day_id`, `review_append`, and the pinned `review_preview_json`.
+- Step 14 can run only when the pinned preview has `append_allowed=true`, `fail_count=0`, no duplicate candidates, and matching account/date context.
+- `append_allowed=true_with_warnings` is blocked in Phase 1; no automatic warning approval exists.
+- Step 15 must use only the append report produced and pinned by Step 14.
+- If Step 14 has already passed but Step 15 failed, the runner may retry Step 15 with the pinned append report without re-running Step 14.
+- Stage D `PASS` is recorded only after Step 15 sync succeeds.
+- Write the full Stage D summary as `stage_runs/{runbook_day_id}/latest_D.json/txt`; do not overwrite `latest_D_PREVIEW.json/txt`.
+- Pin `review_append_report_json`, `review_append_report_md`, `review_status_sync_report_json`, and `review_status_sync_report_md` in `runbook_state.json`.
+- On success, set `next_stage=E` and direct the operator to Stage E EOD dry-run/commit/final status.
+
+### 6-3H-3. Stage E eod dry-run/eod commit/final status
+
+Goal: run Step 16-18 using pinned Stage D artifacts, EOD dry-run gating, and fail-stop behavior.
+Out of scope: inbound Telegram control.
+
+Notes:
+
 - Step 17 `eod_commit` must not run without Step 16 `eod_dryrun` PASS.
 - Step 17 same-date commit re-execution must return `BLOCKED`.
 - If Step 18 `final_status` returns `WARNING`, the operator action must be explicit.

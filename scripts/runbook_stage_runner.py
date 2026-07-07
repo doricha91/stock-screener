@@ -32,6 +32,7 @@ STAGE_A_STEP_IDS = tuple(range(0, 6))
 STAGE_B_STEP_IDS = (7, 8, 9)
 STAGE_C_STEP_IDS = (10, 11)
 STAGE_D_PREVIEW_STEP_IDS = (13,)
+STAGE_D_APPEND_STEP_IDS = (14, 15)
 DEFAULT_TIMEOUT_SEC = 1800
 
 
@@ -146,6 +147,17 @@ def get_stage_d_preview_commands(commands: Sequence[RunbookCommand] | None = Non
     return selected
 
 
+def get_stage_d_append_commands(commands: Sequence[RunbookCommand] | None = None) -> list[RunbookCommand]:
+    selected = [
+        command
+        for command in (commands or registry.list_commands())
+        if command.step_id in STAGE_D_APPEND_STEP_IDS
+    ]
+    selected.sort(key=lambda command: command.step_id)
+    validate_stage_d_append_commands(selected)
+    return selected
+
+
 def validate_stage_a_commands(commands: Sequence[RunbookCommand]) -> None:
     step_ids = [command.step_id for command in commands]
     if step_ids != list(STAGE_A_STEP_IDS):
@@ -204,6 +216,21 @@ def validate_stage_d_preview_commands(commands: Sequence[RunbookCommand]) -> Non
             raise ValueError(f"Stage D preview command cannot be a manual gate: {command.command_key}")
         if not command.argv_template:
             raise ValueError(f"Stage D preview command argv_template is required: {command.command_key}")
+
+
+def validate_stage_d_append_commands(commands: Sequence[RunbookCommand]) -> None:
+    step_ids = [command.step_id for command in commands]
+    if step_ids != list(STAGE_D_APPEND_STEP_IDS):
+        raise ValueError(f"Stage D append commands must cover Step 14-15 only, found {step_ids}")
+    for command in commands:
+        if command.stage_id != STAGE_D_ID:
+            raise ValueError(f"Stage D append command has invalid stage_id: {command.command_key}")
+        if not command.phase1_auto_execute:
+            raise ValueError(f"Stage D append command is not phase1 auto executable: {command.command_key}")
+        if command.manual_gate:
+            raise ValueError(f"Stage D append command cannot be a manual gate: {command.command_key}")
+        if not command.argv_template:
+            raise ValueError(f"Stage D append command argv_template is required: {command.command_key}")
 
 
 def run_stage_a(
@@ -1020,6 +1047,248 @@ def run_stage_d_preview(
     }
 
 
+def run_stage_d_append(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    timezone: str = "Asia/Seoul",
+    dry_run: bool = False,
+    confirm_paper_test: bool = False,
+    repo_root: Path | None = None,
+    timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+    commands: Sequence[RunbookCommand] | None = None,
+) -> dict[str, Any]:
+    workspace = Path(workspace)
+    repo_root = repo_root or Path(__file__).resolve().parents[1]
+    guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
+    if guard_error:
+        return _blocked_stage_d_append_payload(guard_error, dry_run, confirm_paper_test)
+
+    try:
+        _, state_path, state = runbook_state.init_state_file_for_context(
+            workspace,
+            account_id,
+            data_date,
+            trade_date,
+            timezone,
+        )
+    except ValueError as exc:
+        return _blocked_stage_d_append_payload(str(exc), dry_run, confirm_paper_test)
+
+    precondition_error = _stage_d_append_precondition_error(state, workspace)
+    if precondition_error:
+        return {
+            **_blocked_stage_d_append_payload(precondition_error, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+            "next_required_action": (
+                "Run Stage D preview after Gate 2 PASS."
+                if precondition_error in {"review_preview_required", "review_preview_not_append_ready"}
+                else "Fix runbook state before retrying Stage D append/sync."
+            ),
+        }
+
+    append_commands = get_stage_d_append_commands(commands)
+    command_by_key = {command.command_key: command for command in append_commands}
+    append_command = command_by_key["review_append"]
+    sync_command = command_by_key["sync_review_status"]
+    command_results: list[dict[str, Any]] = []
+    rendered_commands: list[dict[str, Any]] = []
+    stage_result = "PASS"
+    append_idempotency_key: str | None = _review_append_idempotency_key(state, workspace)
+    append_record = state.idempotency_records.get(append_idempotency_key) if append_idempotency_key else None
+    append_already_pass = bool(append_record and append_record.get("status") == "PASS")
+
+    if append_already_pass:
+        if not _artifact_ref_exists(workspace, state.artifacts.get("review_append_report_json", "")):
+            return {
+                **_blocked_stage_d_append_payload(
+                    "review_append_already_committed_missing_report",
+                    dry_run,
+                    confirm_paper_test,
+                ),
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+                "next_required_action": "Recover the pinned review append report before syncing.",
+            }
+        if state.stage_status.get(STAGE_D_ID) == "PASS":
+            return {
+                **_blocked_stage_d_append_payload(
+                    "review_append_already_committed",
+                    dry_run,
+                    confirm_paper_test,
+                ),
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+                "next_required_action": "Stage D is already complete.",
+            }
+        skipped = _skipped_stage_d_append_result(
+            state,
+            workspace,
+            append_command,
+            "Review append already committed; reusing pinned report for sync.",
+        )
+        command_json_path, command_txt_path = _write_command_result_and_log(workspace, state, append_command, skipped, "")
+        command_results.append(json.loads(command_json_path.read_text(encoding="utf-8")))
+        rendered_commands.append({"command_key": append_command.command_key, "argv": []})
+    else:
+        if not dry_run:
+            try:
+                state, append_idempotency_key = runbook_state.reserve_idempotency(
+                    state,
+                    append_command.command_key,
+                    append_command.step_id,
+                    STAGE_D_ID,
+                    {"review_preview_json": state.artifacts.get("review_preview_json", "")},
+                    workspace,
+                )
+                state = runbook_state.mark_idempotency_running(state, append_idempotency_key)
+                runbook_state.save_state(state, state_path)
+            except ValueError as exc:
+                command_result = _blocked_command_result(
+                    state,
+                    workspace,
+                    append_command,
+                    f"review_append idempotency blocked: {exc}",
+                )
+                command_json_path, command_txt_path = _write_command_result_and_log(
+                    workspace,
+                    state,
+                    append_command,
+                    command_result,
+                    "",
+                )
+                command_results.append(json.loads(command_json_path.read_text(encoding="utf-8")))
+                state = runbook_state.block_stage(
+                    state,
+                    STAGE_D_ID,
+                    str(exc),
+                    {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+                )
+                runbook_state.save_state(state, state_path)
+                stage_result = "BLOCKED"
+
+        if stage_result == "PASS":
+            state, command_result, rendered_argv, log_text, stage_result = _execute_stage_d_append_step(
+                state,
+                workspace,
+                state_path,
+                repo_root,
+                append_command,
+                dry_run,
+                timeout_sec,
+                append_idempotency_key,
+            )
+            rendered_commands.append({"command_key": append_command.command_key, "argv": rendered_argv})
+            command_json_path, command_txt_path = _write_command_result_and_log(
+                workspace,
+                state,
+                append_command,
+                command_result,
+                log_text,
+            )
+            command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+            command_results.append(command_result)
+            state = _apply_stage_d_append_step_result(
+                state,
+                state_path,
+                workspace,
+                append_command,
+                command_result,
+                command_json_path,
+                command_txt_path,
+                append_idempotency_key,
+            )
+            if command_result["runner_result"] != "PASS":
+                stage_result = "BLOCKED" if command_result["runner_result"] == "BLOCKED" else "FAILED"
+
+    if stage_result == "PASS":
+        state, command_result, rendered_argv, log_text, stage_result = _execute_stage_d_append_step(
+            state,
+            workspace,
+            state_path,
+            repo_root,
+            sync_command,
+            dry_run,
+            timeout_sec,
+            None,
+        )
+        rendered_commands.append({"command_key": sync_command.command_key, "argv": rendered_argv})
+        command_json_path, command_txt_path = _write_command_result_and_log(
+            workspace,
+            state,
+            sync_command,
+            command_result,
+            log_text,
+        )
+        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+        command_results.append(command_result)
+        state = _apply_stage_d_append_step_result(
+            state,
+            state_path,
+            workspace,
+            sync_command,
+            command_result,
+            command_json_path,
+            command_txt_path,
+            None,
+        )
+        if command_result["runner_result"] != "PASS":
+            stage_result = "BLOCKED" if command_result["runner_result"] == "BLOCKED" else "FAILED"
+
+    if stage_result == "PASS":
+        state = runbook_state.complete_stage(state, STAGE_D_ID)
+        runbook_state.save_state(state, state_path)
+
+    stage_summary = runbook_result.create_stage_summary(
+        state,
+        STAGE_D_ID,
+        command_results,
+        next_required_action=(
+            "Run Stage E EOD dry-run/commit/final status."
+            if stage_result == "PASS"
+            else "Inspect Stage D command result before retry."
+        ),
+        next_stage="E" if stage_result == "PASS" else None,
+    )
+    stage_summary["raw_payload"] = {
+        "review_preview_json": state.artifacts.get("review_preview_json"),
+        "review_append_report_json": state.artifacts.get("review_append_report_json"),
+        "review_status_sync_report_json": state.artifacts.get("review_status_sync_report_json"),
+        "next_required_action": stage_summary["summary"].get("next_required_action"),
+    }
+    stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
+    stage_summary_paths = runbook_result.get_stage_summary_paths(
+        workspace,
+        state.runbook_day_id,
+        STAGE_D_ID,
+        timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
+    )
+    return {
+        "runner_result": stage_summary["runner_result"],
+        "stage_id": STAGE_D_ID,
+        "canonical_stage_id": STAGE_D_ID,
+        "runbook_day_id": state.runbook_day_id,
+        "state_path": str(state_path),
+        "stage_summary_json": str(stage_summary_json),
+        "stage_summary_txt": str(stage_summary_txt),
+        "latest_stage_summary_json": str(stage_summary_paths["latest_json"]),
+        "latest_stage_summary_txt": str(stage_summary_paths["latest_txt"]),
+        "command_results": [
+            step["result_json_ref"]
+            for step in stage_summary["steps"]
+            if step.get("result_json_ref")
+        ],
+        "rendered_commands": rendered_commands,
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
+        "review_append_report_json": state.artifacts.get("review_append_report_json"),
+        "review_status_sync_report_json": state.artifacts.get("review_status_sync_report_json"),
+        "next_required_action": stage_summary["summary"].get("next_required_action"),
+    }
+
+
 def _paper_smoke_guard(account_id: str, dry_run: bool, confirm_paper_test: bool) -> str | None:
     if dry_run:
         return None
@@ -1056,6 +1325,17 @@ def _blocked_stage_d_preview_payload(reason: str, dry_run: bool, confirm_paper_t
     return {
         "runner_result": "BLOCKED",
         "stage_id": STAGE_D_PREVIEW_ID,
+        "canonical_stage_id": STAGE_D_ID,
+        "reason": reason,
+        "dry_run": dry_run,
+        "paper_test_confirmed": confirm_paper_test,
+    }
+
+
+def _blocked_stage_d_append_payload(reason: str, dry_run: bool, confirm_paper_test: bool) -> dict[str, Any]:
+    return {
+        "runner_result": "BLOCKED",
+        "stage_id": STAGE_D_ID,
         "canonical_stage_id": STAGE_D_ID,
         "reason": reason,
         "dry_run": dry_run,
@@ -1142,6 +1422,60 @@ def _stage_d_preview_precondition_error(state: RunbookState, workspace: Path) ->
         return "manual_review_template_required"
     if state.last_error:
         return "active_last_error"
+    return None
+
+
+def _stage_d_append_precondition_error(state: RunbookState, workspace: Path) -> str | None:
+    base_error = _stage_d_preview_precondition_error(state, workspace)
+    if base_error:
+        if base_error != "active_last_error" or not _stage_d_sync_retry_allowed(state, workspace):
+            return base_error
+    if state.stage_status.get(STAGE_D_ID) == "PASS":
+        return "stage_d_already_pass"
+    preview_ref = state.artifacts.get("review_preview_json")
+    if not preview_ref or not _artifact_ref_exists(workspace, preview_ref):
+        return "review_preview_required"
+    try:
+        preview = json.loads(_artifact_ref_path(workspace, preview_ref).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "review_preview_required"
+    preview_error = _review_preview_append_readiness_error(preview, state)
+    if preview_error:
+        return preview_error
+    return None
+
+
+def _stage_d_sync_retry_allowed(state: RunbookState, workspace: Path) -> bool:
+    reason = ""
+    if isinstance(state.last_error, dict):
+        reason = str(state.last_error.get("reason") or "")
+    if "sync_review_status" not in reason:
+        return False
+    key = _review_append_idempotency_key(state, workspace)
+    if not key:
+        return False
+    record = state.idempotency_records.get(key)
+    if not record or record.get("status") != "PASS":
+        return False
+    report_ref = state.artifacts.get("review_append_report_json")
+    return bool(report_ref and _artifact_ref_exists(workspace, report_ref))
+
+
+def _review_preview_append_readiness_error(preview: dict[str, Any], state: RunbookState) -> str | None:
+    if str(preview.get("account_id") or "").strip() != state.frozen_context.account_id:
+        return "review_preview_context_mismatch"
+    if str(preview.get("review_date") or "").strip() != state.frozen_context.trade_date:
+        return "review_preview_context_mismatch"
+    if _int_payload(preview, "candidate_count") <= 0:
+        return "review_preview_not_append_ready"
+    if _int_payload(preview, "fail_count") != 0:
+        return "review_preview_not_append_ready"
+    duplicate_candidates = preview.get("duplicate_candidates")
+    if isinstance(duplicate_candidates, list) and duplicate_candidates:
+        return "review_preview_not_append_ready"
+    append_allowed = str(preview.get("append_allowed") or "").strip().lower()
+    if append_allowed != "true":
+        return "review_preview_not_append_ready"
     return None
 
 
@@ -1453,6 +1787,173 @@ def _run_stage_d_preview_command(
     return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
 
+def _execute_stage_d_append_step(
+    state: RunbookState,
+    workspace: Path,
+    state_path: Path,
+    repo_root: Path,
+    command: RunbookCommand,
+    dry_run: bool,
+    timeout_sec: int,
+    idempotency_key: str | None,
+) -> tuple[RunbookState, dict[str, Any], list[str], str, str]:
+    try:
+        command_result, log_text, rendered_argv = _run_stage_d_append_command(
+            state,
+            workspace,
+            repo_root,
+            command,
+            dry_run,
+            timeout_sec,
+        )
+        return state, command_result, rendered_argv, log_text, "PASS"
+    except Exception as exc:
+        if command.command_key == "review_append" and idempotency_key:
+            state = runbook_state.mark_idempotency_failed(
+                state,
+                idempotency_key,
+                f"review_append_exception:{type(exc).__name__}",
+            )
+            runbook_state.save_state(state, state_path)
+        command_result = runbook_result.create_command_result(
+            state,
+            command,
+            "FAILED",
+            f"Stage D command raised {type(exc).__name__}.",
+            raw_payload={},
+            blockers=[str(exc)],
+            process={"executed": False, "exit_code": None, "duration_ms": None},
+            workspace=workspace,
+        )
+        return state, command_result, [], f"exception: {type(exc).__name__}: {exc}\n", "FAILED"
+
+
+def _apply_stage_d_append_step_result(
+    state: RunbookState,
+    state_path: Path,
+    workspace: Path,
+    command: RunbookCommand,
+    command_result: dict[str, Any],
+    command_json_path: Path,
+    command_txt_path: Path,
+    idempotency_key: str | None,
+) -> RunbookState:
+    runner_result = command_result["runner_result"]
+    if runner_result == "PASS":
+        artifact_refs = command_result.get("outputs", {}).get("artifact_refs", {})
+        state = runbook_state.complete_step(
+            state,
+            command.step_id,
+            STAGE_D_ID,
+            artifact_refs,
+            workspace,
+        )
+        if command.command_key == "review_append" and idempotency_key:
+            state = runbook_state.mark_idempotency_pass(
+                state,
+                idempotency_key,
+                result_ref=artifact_refs.get("review_append_report_json"),
+            )
+        runbook_state.save_state(state, state_path)
+        return state
+
+    if command.command_key == "review_append" and idempotency_key:
+        state = runbook_state.mark_idempotency_failed(
+            state,
+            idempotency_key,
+            f"review_append_{runner_result.lower()}",
+        )
+    if runner_result == "BLOCKED":
+        state = runbook_state.block_stage(
+            state,
+            STAGE_D_ID,
+            f"stage_d_step_blocked:{command.command_key}",
+            {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+        )
+    else:
+        state = runbook_state.fail_stage(
+            state,
+            STAGE_D_ID,
+            f"stage_d_step_failed:{command.command_key}",
+            {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+        )
+    runbook_state.save_state(state, state_path)
+    return state
+
+
+def _run_stage_d_append_command(
+    state: RunbookState,
+    workspace: Path,
+    repo_root: Path,
+    command: RunbookCommand,
+    dry_run: bool,
+    timeout_sec: int,
+) -> tuple[dict[str, Any], str, list[str]]:
+    artifact_refs = _stage_b_render_artifacts(state.artifacts, workspace)
+    artifact_refs["workspace"] = str(workspace)
+    rendered_argv = render_argv_template(command, state.frozen_context, artifact_refs)
+    argv = normalize_python_script_argv(rendered_argv, repo_root)
+    if dry_run:
+        process = {"executed": False, "exit_code": None, "duration_ms": None}
+        artifacts = _dry_run_stage_d_append_artifacts(command)
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "PASS",
+            "Dry-run only; command not executed.",
+            artifact_refs=artifacts,
+            raw_payload={},
+            process=process,
+            workspace=workspace,
+        )
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, "", ""), rendered_argv
+
+    execution = run_allowlisted_command(argv, repo_root, timeout_sec)
+    stdout = str(execution.get("stdout") or "")
+    stderr = str(execution.get("stderr") or "")
+    raw_payload = _parse_stdout_json(stdout)
+    exit_code = execution.get("exit_code")
+    process = {
+        "executed": True,
+        "exit_code": exit_code,
+        "duration_ms": execution.get("duration_ms"),
+    }
+    if exit_code != 0:
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "FAILED",
+            "Command failed.",
+            raw_payload=raw_payload,
+            blockers=[stderr.strip() or f"exit_code={exit_code}"],
+            process=process,
+            workspace=workspace,
+        )
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
+
+    validation = _validate_stage_d_append_payload(command.command_key, raw_payload, state)
+    if validation["artifact_refs"]:
+        validation["artifact_refs"] = _pin_artifact_refs(
+            workspace,
+            state.runbook_day_id,
+            validation["artifact_refs"],
+            "stage_d",
+        )
+    result = runbook_result.create_command_result(
+        state,
+        command,
+        validation["runner_result"],
+        validation["message"],
+        artifact_refs=validation["artifact_refs"],
+        raw_payload=raw_payload,
+        warnings=validation["warnings"],
+        blockers=validation["blockers"],
+        process=process,
+        workspace=workspace,
+    )
+    return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
+
+
 def _stage_b_render_artifacts(artifacts: dict[str, str], workspace: Path) -> dict[str, str]:
     rendered: dict[str, str] = {}
     for key, value in artifacts.items():
@@ -1464,6 +1965,8 @@ def _stage_b_render_artifacts(artifacts: dict[str, str], workspace: Path) -> dic
         rendered[key] = str(path if path.is_absolute() else workspace / path)
     if "execution_commit_report_json" in rendered:
         rendered["execution_commit_report"] = rendered["execution_commit_report_json"]
+    if "review_append_report_json" in rendered:
+        rendered["review_commit_report"] = rendered["review_append_report_json"]
     return rendered
 
 
@@ -1552,6 +2055,21 @@ def _dry_run_stage_d_preview_artifacts(command: RunbookCommand) -> dict[str, str
     return {}
 
 
+def _dry_run_stage_d_append_artifacts(command: RunbookCommand) -> dict[str, str]:
+    if command.command_key == "review_append":
+        return {
+            "review_append_report_json": "dry_run/manual_review_import_commit.json",
+            "review_append_report_md": "dry_run/manual_review_import_commit.md",
+            "review_commit_report": "dry_run/manual_review_import_commit.json",
+        }
+    if command.command_key == "sync_review_status":
+        return {
+            "review_status_sync_report_json": "dry_run/manual_review_status_sync.json",
+            "review_status_sync_report_md": "dry_run/manual_review_status_sync.md",
+        }
+    return {}
+
+
 def _validate_stage_b_payload(command_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     if command_key == "execution_preview":
         return _validate_execution_preview_payload(payload)
@@ -1579,6 +2097,18 @@ def _validate_stage_d_preview_payload(
 ) -> dict[str, Any]:
     if command_key == "review_preview":
         return _validate_review_preview_payload(payload, state)
+    return _payload_validation("PASS", "Command completed successfully.", {}, [])
+
+
+def _validate_stage_d_append_payload(
+    command_key: str,
+    payload: dict[str, Any],
+    state: RunbookState,
+) -> dict[str, Any]:
+    if command_key == "review_append":
+        return _validate_review_append_payload(payload, state)
+    if command_key == "sync_review_status":
+        return _validate_review_sync_payload(payload, state)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
@@ -1633,6 +2163,75 @@ def _validate_review_preview_payload(payload: dict[str, Any], state: RunbookStat
         artifacts if runner_result in {"PASS", "WARNING"} else {},
         blockers,
         warnings,
+    )
+
+
+def _validate_review_append_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+    blockers = []
+    status = str(payload.get("status") or payload.get("runner_result") or "").upper()
+    if status not in {"COMMITTED", "PASS"}:
+        blockers.append("status must be COMMITTED/PASS")
+    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+        blockers.append("account_id must match frozen context")
+    if str(payload.get("review_date") or "").strip() != state.frozen_context.trade_date:
+        blockers.append("review_date must match trade_date")
+    if _int_payload(payload, "appended_count") <= 0:
+        blockers.append("appended_count must be greater than 0")
+    if _int_payload(payload, "failed_count") != 0:
+        blockers.append("failed_count must be 0")
+    commit_json = str(payload.get("commit_json_path") or payload.get("json_path") or "").strip()
+    commit_md = str(payload.get("commit_markdown_path") or payload.get("markdown_path") or "").strip()
+    if not commit_json or not Path(commit_json).exists():
+        blockers.append("commit_json_path must exist")
+    if commit_md and not Path(commit_md).exists():
+        blockers.append("commit_markdown_path must exist")
+    elif not commit_md:
+        blockers.append("commit_markdown_path must exist")
+    artifacts = {
+        "review_append_report_json": commit_json,
+        "review_append_report_md": commit_md,
+        "review_commit_report": commit_json,
+    }
+    return _payload_validation(
+        "FAILED" if any("must exist" in blocker for blocker in blockers) else "BLOCKED" if blockers else "PASS",
+        "Manual review append report is pinned." if not blockers else "Manual review append failed validation.",
+        artifacts if not blockers else {},
+        blockers,
+    )
+
+
+def _validate_review_sync_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+    blockers = []
+    if str(payload.get("overall_status") or "").upper() != "SUCCESS":
+        blockers.append("overall_status must be SUCCESS")
+    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+        blockers.append("account_id must match frozen context")
+    if str(payload.get("review_date") or "").strip() != state.frozen_context.trade_date:
+        blockers.append("review_date must match trade_date")
+    candidate_count = _int_payload(payload, "candidate_count")
+    if candidate_count <= 0:
+        blockers.append("candidate_count must be greater than 0")
+    if _int_payload(payload, "updated_count") != candidate_count:
+        blockers.append("updated_count must equal candidate_count")
+    if _int_payload(payload, "failed_count") != 0:
+        blockers.append("failed_count must be 0")
+    sync_json = str(payload.get("sync_json_path") or "").strip()
+    sync_md = str(payload.get("sync_markdown_path") or "").strip()
+    if not sync_json or not Path(sync_json).exists():
+        blockers.append("sync_json_path must exist")
+    if sync_md and not Path(sync_md).exists():
+        blockers.append("sync_markdown_path must exist")
+    elif not sync_md:
+        blockers.append("sync_markdown_path must exist")
+    artifacts = {
+        "review_status_sync_report_json": sync_json,
+        "review_status_sync_report_md": sync_md,
+    }
+    return _payload_validation(
+        "FAILED" if any("must exist" in blocker for blocker in blockers) else "BLOCKED" if blockers else "PASS",
+        "Notion review status sync completed." if not blockers else "Notion review status sync failed validation.",
+        artifacts if not blockers else {},
+        blockers,
     )
 
 
@@ -1845,6 +2444,47 @@ def _blocked_command_result(
     )
 
 
+def _skipped_stage_d_append_result(
+    state: RunbookState,
+    workspace: Path,
+    command: RunbookCommand,
+    message: str,
+) -> dict[str, Any]:
+    artifacts: dict[str, str] = {}
+    report_ref = state.artifacts.get("review_append_report_json")
+    report_md = state.artifacts.get("review_append_report_md")
+    if report_ref:
+        artifacts["review_append_report_json"] = report_ref
+        artifacts["review_commit_report"] = report_ref
+    if report_md:
+        artifacts["review_append_report_md"] = report_md
+    return runbook_result.create_command_result(
+        state,
+        command,
+        "SKIPPED",
+        message,
+        artifact_refs=artifacts,
+        raw_payload={"reason_code": "review_append_already_committed"},
+        process={"executed": False, "exit_code": None, "duration_ms": None},
+        workspace=workspace,
+    )
+
+
+def _review_append_idempotency_key(state: RunbookState, workspace: Path) -> str | None:
+    preview_ref = state.artifacts.get("review_preview_json")
+    if not preview_ref:
+        return None
+    try:
+        return runbook_state.build_idempotency_key(
+            state,
+            "review_append",
+            {"review_preview_json": preview_ref},
+            workspace,
+        )
+    except ValueError:
+        return None
+
+
 def _write_command_result_and_log(
     workspace: Path,
     state: RunbookState,
@@ -2054,6 +2694,16 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_d_preview.add_argument("--dry-run", action="store_true")
     stage_d_preview.add_argument("--confirm-paper-test", action="store_true")
     stage_d_preview.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
+
+    stage_d_append = subparsers.add_parser("stage-d-append", help="Run Stage D Step 14-15 review append and sync")
+    stage_d_append.add_argument("--workspace", type=Path, required=True)
+    stage_d_append.add_argument("--account-id", required=True)
+    stage_d_append.add_argument("--data-date", required=True)
+    stage_d_append.add_argument("--trade-date", required=True)
+    stage_d_append.add_argument("--timezone", default="Asia/Seoul")
+    stage_d_append.add_argument("--dry-run", action="store_true")
+    stage_d_append.add_argument("--confirm-paper-test", action="store_true")
+    stage_d_append.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
     return parser
 
 
@@ -2136,6 +2786,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("runner_result") in {"PASS", "WARNING"} else 1
+    if args.command == "stage-d-append":
+        result = run_stage_d_append(
+            workspace=args.workspace,
+            account_id=args.account_id,
+            data_date=args.data_date,
+            trade_date=args.trade_date,
+            timezone=args.timezone,
+            dry_run=args.dry_run,
+            confirm_paper_test=args.confirm_paper_test,
+            timeout_sec=args.timeout_sec,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("runner_result") == "PASS" else 1
     parser.error(f"unknown command: {args.command}")
     return 2
 
