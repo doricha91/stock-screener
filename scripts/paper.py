@@ -634,12 +634,56 @@ def handle_eod(args: argparse.Namespace) -> int:
     if summary["result"] == "PASS_WITH_WARNINGS":
         print("Paper EOD continues with preflight warnings.")
 
+    dryrun_json = getattr(args, "dryrun_json", None)
+    if commit and dryrun_json:
+        dryrun_json_path = Path(dryrun_json)
+        if not dryrun_json_path.exists():
+            payload = {
+                "runner_result": "FAILED",
+                "reason_code": "eod_dryrun_report_missing",
+                "message": f"EOD dry-run report does not exist: {dryrun_json_path}",
+            }
+            if getattr(args, "json", False):
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(payload["message"])
+            return 1
+        try:
+            dryrun_payload = json.loads(dryrun_json_path.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError as exc:
+            payload = {
+                "runner_result": "FAILED",
+                "reason_code": "eod_dryrun_report_invalid_json",
+                "message": str(exc),
+            }
+            if getattr(args, "json", False):
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"EOD dry-run report is invalid JSON: {exc}")
+            return 1
+        if str(dryrun_payload.get("runner_result") or dryrun_payload.get("status") or "").upper() != "PASS":
+            payload = {
+                "runner_result": "BLOCKED",
+                "reason_code": "eod_dryrun_not_pass",
+                "message": "EOD commit requires a PASS dry-run report.",
+            }
+            if getattr(args, "json", False):
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(payload["message"])
+            return 1
+
+    eod_kwargs = {
+        "allow_empty_journal": True,
+        "commit": commit,
+        "plan_path": None,
+    }
+    if "json_output" in inspect.signature(run_paper_eod_dry_run).parameters:
+        eod_kwargs["json_output"] = bool(getattr(args, "json", False))
     return _call_with_optional_account_paths(
         run_paper_eod_dry_run,
         args.date,
-        allow_empty_journal=True,
-        commit=commit,
-        plan_path=None,
+        **eod_kwargs,
         account_paths=account_paths,
     )
 
@@ -924,6 +968,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run EOD accounting close; writes paper state/snapshots without appending execution rows",
     )
+    eod_parser.add_argument("--dryrun-json", help="Pinned EOD dry-run report required before commit")
+    eod_parser.add_argument("--json", action="store_true", help="Print machine-readable EOD report after human output")
     eod_parser.set_defaults(handler=handle_eod)
 
     reports_parser = subparsers.add_parser(

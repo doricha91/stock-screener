@@ -433,6 +433,12 @@ Stage D/E:
   after append PASS, retry Step 15 with that pinned report rather than appending
   again
 - Stage D PASS is recorded only after Step 15 status sync succeeds
+- Stage E starts only after Stage D PASS and closes the runbook day with
+  Step 16 `eod_dryrun`, Step 17 `eod_commit`, and Step 18 `final_status`
+- Step 17 consumes only the pinned `eod_dryrun_report_json`; the runner blocks
+  automatic EOD commit reruns after a PASS idempotency record
+- Step 18 must PASS before Stage E is marked PASS; WARNING requires explicit
+  operator review and does not close the runbook day automatically
 - should distinguish "execution accepted with review reason" from "unexpected
   mismatch"
 

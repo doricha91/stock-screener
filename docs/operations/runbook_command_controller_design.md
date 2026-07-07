@@ -511,8 +511,8 @@ This table maps Paper Daily Cycle steps 0-18 to controller command keys. It is a
 | 13 | `review_preview` | `scripts\\import_notion_reviews.py --date {trade_date} --account-id {account_id} --preview --json` | `READ_ONLY_PREVIEW` | Yes | No | `fail_count=0`, append allowed/reviewable | Fix Notion review rows |
 | 14 | `review_append` | `scripts\\import_notion_reviews.py --date {trade_date} --account-id {account_id} --commit --preview-json {review_preview_json} --json` | `LEDGER_WRITE` | No | Yes | appended count expected, failed count 0 | Stop; do not sync |
 | 15 | `sync_review_status` | `scripts\\sync_notion_review_status.py --date {trade_date} --account-id {account_id} --commit-report {review_commit_report} --json` | `NOTION_WRITE` | No | Yes | failed count 0 | Retry same report after Notion fix |
-| 16 | `eod_dryrun` | `scripts\\paper.py eod --date {trade_date} --account-id {account_id} --dry-run` | `READ_ONLY_PREVIEW` | Yes | No | write intent safe, required dry-run fields match | Review before commit |
-| 17 | `eod_commit` | `scripts\\paper.py eod --date {trade_date} --account-id {account_id} --commit` | `STATE_SNAPSHOT_WRITE` | No | Yes | state/snapshot writes performed as expected | Stop and inspect preflight/guard |
+| 16 | `eod_dryrun` | `scripts\\paper.py eod --date {trade_date} --account-id {account_id} --dry-run --json` | `READ_ONLY_PREVIEW` | Yes | No | write intent safe, required dry-run fields match | Review before commit |
+| 17 | `eod_commit` | `scripts\\paper.py eod --date {trade_date} --account-id {account_id} --commit --dryrun-json {eod_dryrun_report_json} --json` | `STATE_SNAPSHOT_WRITE` | No | Yes | state/snapshot writes performed as expected | Stop and inspect preflight/guard |
 | 18 | `final_status` | `scripts\\paper_daily_ops.py status --account-id {account_id} --data-date {data_date} --trade-date {trade_date} --json --include-notion-read` | `READ_ONLY` | Yes | No | `overall_status=PASS`, terminal true | Resolve blockers/conflicts |
 
 Additional controller keys:
@@ -1040,16 +1040,23 @@ Notes:
 - Pin `review_append_report_json`, `review_append_report_md`, `review_status_sync_report_json`, and `review_status_sync_report_md` in `runbook_state.json`.
 - On success, set `next_stage=E` and direct the operator to Stage E EOD dry-run/commit/final status.
 
-### 6-3H-3. Stage E eod dry-run/eod commit/final status
+### 6-3I. Stage E eod dry-run, commit, and final status
 
 Goal: run Step 16-18 using pinned Stage D artifacts, EOD dry-run gating, and fail-stop behavior.
 Out of scope: inbound Telegram control.
 
 Notes:
 
-- Step 17 `eod_commit` must not run without Step 16 `eod_dryrun` PASS.
-- Step 17 same-date commit re-execution must return `BLOCKED`.
-- If Step 18 `final_status` returns `WARNING`, the operator action must be explicit.
+- The runner exposes `python scripts\\runbook_stage_runner.py stage-e ... --confirm-paper-test`.
+- Stage E requires Stage A, Gate 1, Stage B, Stage B Verify, Stage C, Gate 2, and Stage D to be `PASS`.
+- Step 16 `eod_dryrun` writes a machine-readable report and pins `eod_dryrun_report_json` / `eod_dryrun_report_md` under `workspace/artifacts/{runbook_day_id}/stage_e/`.
+- Step 17 `eod_commit` must not run without the pinned Step 16 dry-run report.
+- Step 17 consumes the pinned `eod_dryrun_report_json`; same-date commit re-execution must return `BLOCKED` once Stage E is complete.
+- If Step 17 passes but Step 18 fails, retries must reuse the pinned `eod_commit_report_json` and must not run Step 17 again.
+- Step 18 `final_status` pins its command result as `final_status_report_json` / `final_status_report_md`.
+- If Step 18 returns `WARNING`, Stage E is not closed automatically and the operator action must be explicit.
+- Stage E `PASS` is recorded only after Step 18 final status is `PASS`.
+- Write the Stage E summary as `stage_runs/{runbook_day_id}/latest_E.json/txt`; do not overwrite Stage D summaries.
 
 ### 6-4A. Windows wrapper for runbook controller
 

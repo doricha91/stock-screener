@@ -28,11 +28,13 @@ STAGE_B_ID = "B"
 STAGE_C_ID = "C"
 STAGE_D_ID = "D"
 STAGE_D_PREVIEW_ID = "D_PREVIEW"
+STAGE_E_ID = "E"
 STAGE_A_STEP_IDS = tuple(range(0, 6))
 STAGE_B_STEP_IDS = (7, 8, 9)
 STAGE_C_STEP_IDS = (10, 11)
 STAGE_D_PREVIEW_STEP_IDS = (13,)
 STAGE_D_APPEND_STEP_IDS = (14, 15)
+STAGE_E_STEP_IDS = (16, 17, 18)
 DEFAULT_TIMEOUT_SEC = 1800
 
 
@@ -158,6 +160,17 @@ def get_stage_d_append_commands(commands: Sequence[RunbookCommand] | None = None
     return selected
 
 
+def get_stage_e_commands(commands: Sequence[RunbookCommand] | None = None) -> list[RunbookCommand]:
+    selected = [
+        command
+        for command in (commands or registry.list_commands())
+        if command.step_id in STAGE_E_STEP_IDS
+    ]
+    selected.sort(key=lambda command: command.step_id)
+    validate_stage_e_commands(selected)
+    return selected
+
+
 def validate_stage_a_commands(commands: Sequence[RunbookCommand]) -> None:
     step_ids = [command.step_id for command in commands]
     if step_ids != list(STAGE_A_STEP_IDS):
@@ -231,6 +244,21 @@ def validate_stage_d_append_commands(commands: Sequence[RunbookCommand]) -> None
             raise ValueError(f"Stage D append command cannot be a manual gate: {command.command_key}")
         if not command.argv_template:
             raise ValueError(f"Stage D append command argv_template is required: {command.command_key}")
+
+
+def validate_stage_e_commands(commands: Sequence[RunbookCommand]) -> None:
+    step_ids = [command.step_id for command in commands]
+    if step_ids != list(STAGE_E_STEP_IDS):
+        raise ValueError(f"Stage E commands must cover Step 16-18 only, found {step_ids}")
+    for command in commands:
+        if command.stage_id != STAGE_E_ID:
+            raise ValueError(f"Stage E command has invalid stage_id: {command.command_key}")
+        if not command.phase1_auto_execute:
+            raise ValueError(f"Stage E command is not phase1 auto executable: {command.command_key}")
+        if command.manual_gate:
+            raise ValueError(f"Stage E command cannot be a manual gate: {command.command_key}")
+        if not command.argv_template:
+            raise ValueError(f"Stage E command argv_template is required: {command.command_key}")
 
 
 def run_stage_a(
@@ -1289,6 +1317,280 @@ def run_stage_d_append(
     }
 
 
+def run_stage_e(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    timezone: str = "Asia/Seoul",
+    dry_run: bool = False,
+    confirm_paper_test: bool = False,
+    repo_root: Path | None = None,
+    timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+    commands: Sequence[RunbookCommand] | None = None,
+) -> dict[str, Any]:
+    workspace = Path(workspace)
+    repo_root = repo_root or Path(__file__).resolve().parents[1]
+    guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
+    if guard_error:
+        return _blocked_stage_e_payload(guard_error, dry_run, confirm_paper_test)
+
+    try:
+        _, state_path, state = runbook_state.init_state_file_for_context(
+            workspace,
+            account_id,
+            data_date,
+            trade_date,
+            timezone,
+        )
+    except ValueError as exc:
+        return _blocked_stage_e_payload(str(exc), dry_run, confirm_paper_test)
+
+    precondition_error = _stage_e_precondition_error(state, workspace)
+    if precondition_error:
+        return {
+            **_blocked_stage_e_payload(precondition_error, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+            "next_required_action": (
+                "Run Stage D append/sync first."
+                if precondition_error == "stage_d_required"
+                else "Fix runbook state before retrying Stage E."
+            ),
+        }
+
+    stage_e_commands = get_stage_e_commands(commands)
+    command_by_key = {command.command_key: command for command in stage_e_commands}
+    dryrun_command = command_by_key["eod_dryrun"]
+    commit_command = command_by_key["eod_commit"]
+    final_status_command = command_by_key["final_status"]
+    command_results: list[dict[str, Any]] = []
+    rendered_commands: list[dict[str, Any]] = []
+    stage_result = "PASS"
+    eod_idempotency_key: str | None = _eod_commit_idempotency_key(state, workspace)
+    eod_record = state.idempotency_records.get(eod_idempotency_key) if eod_idempotency_key else None
+    eod_already_pass = bool(eod_record and eod_record.get("status") == "PASS")
+
+    if not eod_already_pass:
+        state = runbook_state.start_stage(state, STAGE_E_ID)
+        runbook_state.save_state(state, state_path)
+
+        state, command_result, rendered_argv, log_text, stage_result = _execute_stage_e_step(
+            state,
+            workspace,
+            state_path,
+            repo_root,
+            dryrun_command,
+            dry_run,
+            timeout_sec,
+            None,
+        )
+        rendered_commands.append({"command_key": dryrun_command.command_key, "argv": rendered_argv})
+        command_json_path, command_txt_path = _write_command_result_and_log(
+            workspace,
+            state,
+            dryrun_command,
+            command_result,
+            log_text,
+        )
+        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+        command_results.append(command_result)
+        state = _apply_stage_e_step_result(
+            state,
+            state_path,
+            workspace,
+            dryrun_command,
+            command_result,
+            command_json_path,
+            command_txt_path,
+            None,
+        )
+        if command_result["runner_result"] != "PASS":
+            stage_result = "BLOCKED" if command_result["runner_result"] == "BLOCKED" else "FAILED"
+
+    if stage_result == "PASS" and not eod_already_pass:
+        eod_idempotency_key = _eod_commit_idempotency_key(state, workspace)
+        try:
+            if not dry_run:
+                state, eod_idempotency_key = runbook_state.reserve_idempotency(
+                    state,
+                    commit_command.command_key,
+                    commit_command.step_id,
+                    STAGE_E_ID,
+                    {"eod_dryrun_report_json": state.artifacts.get("eod_dryrun_report_json", "")},
+                    workspace,
+                )
+                state = runbook_state.mark_idempotency_running(state, eod_idempotency_key)
+                runbook_state.save_state(state, state_path)
+        except ValueError as exc:
+            command_result = _blocked_command_result(
+                state,
+                workspace,
+                commit_command,
+                f"eod_commit idempotency blocked: {exc}",
+            )
+            command_json_path, command_txt_path = _write_command_result_and_log(
+                workspace,
+                state,
+                commit_command,
+                command_result,
+                "",
+            )
+            command_results.append(json.loads(command_json_path.read_text(encoding="utf-8")))
+            state = runbook_state.block_stage(
+                state,
+                STAGE_E_ID,
+                str(exc),
+                {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+            )
+            runbook_state.save_state(state, state_path)
+            stage_result = "BLOCKED"
+
+        if stage_result == "PASS":
+            state, command_result, rendered_argv, log_text, stage_result = _execute_stage_e_step(
+                state,
+                workspace,
+                state_path,
+                repo_root,
+                commit_command,
+                dry_run,
+                timeout_sec,
+                eod_idempotency_key,
+            )
+            rendered_commands.append({"command_key": commit_command.command_key, "argv": rendered_argv})
+            command_json_path, command_txt_path = _write_command_result_and_log(
+                workspace,
+                state,
+                commit_command,
+                command_result,
+                log_text,
+            )
+            command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+            command_results.append(command_result)
+            state = _apply_stage_e_step_result(
+                state,
+                state_path,
+                workspace,
+                commit_command,
+                command_result,
+                command_json_path,
+                command_txt_path,
+                eod_idempotency_key,
+            )
+            if command_result["runner_result"] != "PASS":
+                stage_result = "BLOCKED" if command_result["runner_result"] == "BLOCKED" else "FAILED"
+    elif stage_result == "PASS" and eod_already_pass:
+        if state.stage_status.get(STAGE_E_ID) == "PASS":
+            return {
+                **_blocked_stage_e_payload("eod_commit_already_committed", dry_run, confirm_paper_test),
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+                "next_required_action": "Stage E is already complete.",
+            }
+        if not _artifact_ref_exists(workspace, state.artifacts.get("eod_commit_report_json", "")):
+            return {
+                **_blocked_stage_e_payload("eod_commit_already_committed_missing_report", dry_run, confirm_paper_test),
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+                "next_required_action": "Recover the pinned EOD commit report before final status.",
+            }
+        skipped = _skipped_stage_e_commit_result(
+            state,
+            workspace,
+            commit_command,
+            "EOD commit already completed; reusing pinned report for final status.",
+        )
+        command_json_path, _ = _write_command_result_and_log(workspace, state, commit_command, skipped, "")
+        command_results.append(json.loads(command_json_path.read_text(encoding="utf-8")))
+        rendered_commands.append({"command_key": commit_command.command_key, "argv": []})
+
+    if stage_result == "PASS":
+        state, command_result, rendered_argv, log_text, stage_result = _execute_stage_e_step(
+            state,
+            workspace,
+            state_path,
+            repo_root,
+            final_status_command,
+            dry_run,
+            timeout_sec,
+            None,
+        )
+        rendered_commands.append({"command_key": final_status_command.command_key, "argv": rendered_argv})
+        command_json_path, command_txt_path = _write_command_result_and_log(
+            workspace,
+            state,
+            final_status_command,
+            command_result,
+            log_text,
+        )
+        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+        command_results.append(command_result)
+        state = _apply_stage_e_step_result(
+            state,
+            state_path,
+            workspace,
+            final_status_command,
+            command_result,
+            command_json_path,
+            command_txt_path,
+            None,
+        )
+        if command_result["runner_result"] != "PASS":
+            stage_result = "BLOCKED" if command_result["runner_result"] in {"BLOCKED", "WARNING"} else "FAILED"
+
+    if stage_result == "PASS":
+        state = runbook_state.complete_stage(state, STAGE_E_ID)
+        runbook_state.save_state(state, state_path)
+
+    stage_summary = runbook_result.create_stage_summary(
+        state,
+        STAGE_E_ID,
+        command_results,
+        next_required_action=(
+            "Runbook day complete."
+            if stage_result == "PASS"
+            else "Inspect Stage E command result before retry."
+        ),
+        next_stage=None,
+    )
+    stage_summary["raw_payload"] = {
+        "eod_dryrun_report_json": state.artifacts.get("eod_dryrun_report_json"),
+        "eod_commit_report_json": state.artifacts.get("eod_commit_report_json"),
+        "final_status_report_json": state.artifacts.get("final_status_report_json"),
+        "next_required_action": stage_summary["summary"].get("next_required_action"),
+    }
+    stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
+    stage_summary_paths = runbook_result.get_stage_summary_paths(
+        workspace,
+        state.runbook_day_id,
+        STAGE_E_ID,
+        timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
+    )
+    return {
+        "runner_result": stage_summary["runner_result"],
+        "stage_id": STAGE_E_ID,
+        "canonical_stage_id": STAGE_E_ID,
+        "runbook_day_id": state.runbook_day_id,
+        "state_path": str(state_path),
+        "stage_summary_json": str(stage_summary_json),
+        "stage_summary_txt": str(stage_summary_txt),
+        "latest_stage_summary_json": str(stage_summary_paths["latest_json"]),
+        "latest_stage_summary_txt": str(stage_summary_paths["latest_txt"]),
+        "command_results": [
+            step["result_json_ref"]
+            for step in stage_summary["steps"]
+            if step.get("result_json_ref")
+        ],
+        "rendered_commands": rendered_commands,
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
+        "eod_dryrun_report_json": state.artifacts.get("eod_dryrun_report_json"),
+        "eod_commit_report_json": state.artifacts.get("eod_commit_report_json"),
+        "final_status_report_json": state.artifacts.get("final_status_report_json"),
+        "next_required_action": stage_summary["summary"].get("next_required_action"),
+    }
+
+
 def _paper_smoke_guard(account_id: str, dry_run: bool, confirm_paper_test: bool) -> str | None:
     if dry_run:
         return None
@@ -1337,6 +1639,17 @@ def _blocked_stage_d_append_payload(reason: str, dry_run: bool, confirm_paper_te
         "runner_result": "BLOCKED",
         "stage_id": STAGE_D_ID,
         "canonical_stage_id": STAGE_D_ID,
+        "reason": reason,
+        "dry_run": dry_run,
+        "paper_test_confirmed": confirm_paper_test,
+    }
+
+
+def _blocked_stage_e_payload(reason: str, dry_run: bool, confirm_paper_test: bool) -> dict[str, Any]:
+    return {
+        "runner_result": "BLOCKED",
+        "stage_id": STAGE_E_ID,
+        "canonical_stage_id": STAGE_E_ID,
         "reason": reason,
         "dry_run": dry_run,
         "paper_test_confirmed": confirm_paper_test,
@@ -1443,6 +1756,48 @@ def _stage_d_append_precondition_error(state: RunbookState, workspace: Path) -> 
     if preview_error:
         return preview_error
     return None
+
+
+def _stage_e_precondition_error(state: RunbookState, workspace: Path) -> str | None:
+    if state.stage_status.get(STAGE_A_ID) != "PASS":
+        return "stage_a_not_pass"
+    if state.stage_status.get("GATE1") != "PASS":
+        return "gate1_not_pass"
+    if state.stage_status.get(STAGE_B_ID) != "PASS":
+        return "stage_b_not_pass"
+    if _stage_b_verification_error(state, workspace):
+        return "stage_b_verification_required"
+    if state.stage_status.get(STAGE_C_ID) != "PASS":
+        return "stage_c_required"
+    if state.stage_status.get("GATE2") != "PASS":
+        return "gate2_required"
+    if state.stage_status.get(STAGE_D_ID) != "PASS":
+        return "stage_d_required"
+    if state.stage_status.get(STAGE_E_ID) == "PASS":
+        return "stage_e_already_pass"
+    if state.last_error and not _stage_e_final_status_retry_allowed(state, workspace):
+        return "active_last_error"
+    for artifact_name in ("review_append_report_json", "review_status_sync_report_json"):
+        artifact_ref = state.artifacts.get(artifact_name)
+        if not artifact_ref or not _artifact_ref_exists(workspace, artifact_ref):
+            return f"{artifact_name}_required"
+    return None
+
+
+def _stage_e_final_status_retry_allowed(state: RunbookState, workspace: Path) -> bool:
+    reason = ""
+    if isinstance(state.last_error, dict):
+        reason = str(state.last_error.get("reason") or "")
+    if "final_status" not in reason:
+        return False
+    key = _eod_commit_idempotency_key(state, workspace)
+    if not key:
+        return False
+    record = state.idempotency_records.get(key)
+    if not record or record.get("status") != "PASS":
+        return False
+    report_ref = state.artifacts.get("eod_commit_report_json")
+    return bool(report_ref and _artifact_ref_exists(workspace, report_ref))
 
 
 def _stage_d_sync_retry_allowed(state: RunbookState, workspace: Path) -> bool:
@@ -1881,6 +2236,106 @@ def _apply_stage_d_append_step_result(
     return state
 
 
+def _execute_stage_e_step(
+    state: RunbookState,
+    workspace: Path,
+    state_path: Path,
+    repo_root: Path,
+    command: RunbookCommand,
+    dry_run: bool,
+    timeout_sec: int,
+    idempotency_key: str | None,
+) -> tuple[RunbookState, dict[str, Any], list[str], str, str]:
+    try:
+        command_result, log_text, rendered_argv = _run_stage_e_command(
+            state,
+            workspace,
+            repo_root,
+            command,
+            dry_run,
+            timeout_sec,
+        )
+        return state, command_result, rendered_argv, log_text, "PASS"
+    except Exception as exc:
+        if command.command_key == "eod_commit" and idempotency_key:
+            state = runbook_state.mark_idempotency_failed(
+                state,
+                idempotency_key,
+                f"eod_commit_exception:{type(exc).__name__}",
+            )
+            runbook_state.save_state(state, state_path)
+        command_result = runbook_result.create_command_result(
+            state,
+            command,
+            "FAILED",
+            f"Stage E command raised {type(exc).__name__}.",
+            raw_payload={},
+            blockers=[str(exc)],
+            process={"executed": False, "exit_code": None, "duration_ms": None},
+            workspace=workspace,
+        )
+        return state, command_result, [], f"exception: {type(exc).__name__}: {exc}\n", "FAILED"
+
+
+def _apply_stage_e_step_result(
+    state: RunbookState,
+    state_path: Path,
+    workspace: Path,
+    command: RunbookCommand,
+    command_result: dict[str, Any],
+    command_json_path: Path,
+    command_txt_path: Path,
+    idempotency_key: str | None,
+) -> RunbookState:
+    runner_result = command_result["runner_result"]
+    if runner_result == "PASS":
+        artifact_refs = command_result.get("outputs", {}).get("artifact_refs", {})
+        if command.command_key == "final_status":
+            artifact_refs = {
+                **artifact_refs,
+                "final_status_report_json": runbook_state.canonicalize_artifact_ref(str(command_json_path), workspace),
+                "final_status_report_md": runbook_state.canonicalize_artifact_ref(str(command_txt_path), workspace),
+            }
+        state = runbook_state.complete_step(
+            state,
+            command.step_id,
+            STAGE_E_ID,
+            artifact_refs,
+            workspace,
+        )
+        if command.command_key == "eod_commit" and idempotency_key:
+            state = runbook_state.mark_idempotency_pass(
+                state,
+                idempotency_key,
+                result_ref=artifact_refs.get("eod_commit_report_json"),
+            )
+        runbook_state.save_state(state, state_path)
+        return state
+
+    if command.command_key == "eod_commit" and idempotency_key:
+        state = runbook_state.mark_idempotency_failed(
+            state,
+            idempotency_key,
+            f"eod_commit_{runner_result.lower()}",
+        )
+    if runner_result in {"BLOCKED", "WARNING"}:
+        state = runbook_state.block_stage(
+            state,
+            STAGE_E_ID,
+            f"stage_e_step_blocked:{command.command_key}",
+            {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+        )
+    else:
+        state = runbook_state.fail_stage(
+            state,
+            STAGE_E_ID,
+            f"stage_e_step_failed:{command.command_key}",
+            {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+        )
+    runbook_state.save_state(state, state_path)
+    return state
+
+
 def _run_stage_d_append_command(
     state: RunbookState,
     workspace: Path,
@@ -1954,6 +2409,79 @@ def _run_stage_d_append_command(
     return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
 
+def _run_stage_e_command(
+    state: RunbookState,
+    workspace: Path,
+    repo_root: Path,
+    command: RunbookCommand,
+    dry_run: bool,
+    timeout_sec: int,
+) -> tuple[dict[str, Any], str, list[str]]:
+    artifact_refs = _stage_b_render_artifacts(state.artifacts, workspace)
+    artifact_refs["workspace"] = str(workspace)
+    rendered_argv = render_argv_template(command, state.frozen_context, artifact_refs)
+    argv = normalize_python_script_argv(rendered_argv, repo_root)
+    if dry_run:
+        process = {"executed": False, "exit_code": None, "duration_ms": None}
+        artifacts = _dry_run_stage_e_artifacts(command)
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "PASS",
+            "Dry-run only; command not executed.",
+            artifact_refs=artifacts,
+            raw_payload={},
+            process=process,
+            workspace=workspace,
+        )
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, "", ""), rendered_argv
+
+    execution = run_allowlisted_command(argv, repo_root, timeout_sec)
+    stdout = str(execution.get("stdout") or "")
+    stderr = str(execution.get("stderr") or "")
+    raw_payload = _parse_stdout_json(stdout)
+    exit_code = execution.get("exit_code")
+    process = {
+        "executed": True,
+        "exit_code": exit_code,
+        "duration_ms": execution.get("duration_ms"),
+    }
+    if exit_code != 0:
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "FAILED",
+            "Command failed.",
+            raw_payload=raw_payload,
+            blockers=[stderr.strip() or f"exit_code={exit_code}"],
+            process=process,
+            workspace=workspace,
+        )
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
+
+    validation = _validate_stage_e_payload(command.command_key, raw_payload, state)
+    if validation["artifact_refs"]:
+        validation["artifact_refs"] = _pin_artifact_refs(
+            workspace,
+            state.runbook_day_id,
+            validation["artifact_refs"],
+            "stage_e",
+        )
+    result = runbook_result.create_command_result(
+        state,
+        command,
+        validation["runner_result"],
+        validation["message"],
+        artifact_refs=validation["artifact_refs"],
+        raw_payload=raw_payload,
+        warnings=validation["warnings"],
+        blockers=validation["blockers"],
+        process=process,
+        workspace=workspace,
+    )
+    return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
+
+
 def _stage_b_render_artifacts(artifacts: dict[str, str], workspace: Path) -> dict[str, str]:
     rendered: dict[str, str] = {}
     for key, value in artifacts.items():
@@ -1967,6 +2495,10 @@ def _stage_b_render_artifacts(artifacts: dict[str, str], workspace: Path) -> dic
         rendered["execution_commit_report"] = rendered["execution_commit_report_json"]
     if "review_append_report_json" in rendered:
         rendered["review_commit_report"] = rendered["review_append_report_json"]
+    if "eod_dryrun_report_json" in rendered:
+        rendered["eod_dryrun_result"] = rendered["eod_dryrun_report_json"]
+    if "eod_commit_report_json" in rendered:
+        rendered["eod_commit_report"] = rendered["eod_commit_report_json"]
     return rendered
 
 
@@ -2070,6 +2602,27 @@ def _dry_run_stage_d_append_artifacts(command: RunbookCommand) -> dict[str, str]
     return {}
 
 
+def _dry_run_stage_e_artifacts(command: RunbookCommand) -> dict[str, str]:
+    if command.command_key == "eod_dryrun":
+        return {
+            "eod_dryrun_report_json": "dry_run/eod_dryrun.json",
+            "eod_dryrun_report_md": "dry_run/eod_dryrun.md",
+            "eod_dryrun_result": "dry_run/eod_dryrun.json",
+        }
+    if command.command_key == "eod_commit":
+        return {
+            "eod_commit_report_json": "dry_run/eod_commit.json",
+            "eod_commit_report_md": "dry_run/eod_commit.md",
+            "eod_commit_report": "dry_run/eod_commit.json",
+        }
+    if command.command_key == "final_status":
+        return {
+            "final_status_report_json": "dry_run/final_status.json",
+            "final_status_report_md": "dry_run/final_status.md",
+        }
+    return {}
+
+
 def _validate_stage_b_payload(command_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     if command_key == "execution_preview":
         return _validate_execution_preview_payload(payload)
@@ -2109,6 +2662,20 @@ def _validate_stage_d_append_payload(
         return _validate_review_append_payload(payload, state)
     if command_key == "sync_review_status":
         return _validate_review_sync_payload(payload, state)
+    return _payload_validation("PASS", "Command completed successfully.", {}, [])
+
+
+def _validate_stage_e_payload(
+    command_key: str,
+    payload: dict[str, Any],
+    state: RunbookState,
+) -> dict[str, Any]:
+    if command_key == "eod_dryrun":
+        return _validate_eod_dryrun_payload(payload, state)
+    if command_key == "eod_commit":
+        return _validate_eod_commit_payload(payload, state)
+    if command_key == "final_status":
+        return _validate_final_status_payload(payload, state)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
@@ -2232,6 +2799,110 @@ def _validate_review_sync_payload(payload: dict[str, Any], state: RunbookState) 
         "Notion review status sync completed." if not blockers else "Notion review status sync failed validation.",
         artifacts if not blockers else {},
         blockers,
+    )
+
+
+def _validate_eod_dryrun_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+    blockers = []
+    status = str(payload.get("runner_result") or payload.get("status") or "").upper()
+    if status != "PASS":
+        blockers.append("runner_result/status must be PASS")
+    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+        blockers.append("account_id must match frozen context")
+    date_value = str(payload.get("date") or payload.get("trade_date") or "").strip()
+    if date_value != state.frozen_context.trade_date:
+        blockers.append("date must match trade_date")
+    if _int_payload(payload, "fail_count") != 0:
+        blockers.append("fail_count must be 0")
+    if _int_payload(payload, "blocked_count") != 0:
+        blockers.append("blocked_count must be 0")
+    if str(payload.get("commit_allowed")).lower() != "true":
+        blockers.append("commit_allowed must be true")
+    dryrun_json = str(payload.get("json_path") or payload.get("dryrun_json_path") or "").strip()
+    dryrun_md = str(payload.get("markdown_path") or payload.get("dryrun_markdown_path") or "").strip()
+    if not dryrun_json or not Path(dryrun_json).exists():
+        blockers.append("dryrun json_path must exist")
+    if dryrun_md and not Path(dryrun_md).exists():
+        blockers.append("dryrun markdown_path must exist")
+    elif not dryrun_md:
+        blockers.append("dryrun markdown_path must exist")
+    artifacts = {
+        "eod_dryrun_report_json": dryrun_json,
+        "eod_dryrun_report_md": dryrun_md,
+        "eod_dryrun_result": dryrun_json,
+    }
+    return _payload_validation(
+        "FAILED" if any("must exist" in blocker for blocker in blockers) else "BLOCKED" if blockers else "PASS",
+        "EOD dry-run report is pinned." if not blockers else "EOD dry-run failed validation.",
+        artifacts if not blockers else {},
+        blockers,
+    )
+
+
+def _validate_eod_commit_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+    blockers = []
+    status = str(payload.get("status") or payload.get("runner_result") or "").upper()
+    if status not in {"COMMITTED", "PASS"}:
+        blockers.append("status must be COMMITTED/PASS")
+    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+        blockers.append("account_id must match frozen context")
+    date_value = str(payload.get("date") or payload.get("trade_date") or "").strip()
+    if date_value != state.frozen_context.trade_date:
+        blockers.append("date must match trade_date")
+    if _int_payload(payload, "failed_count") != 0:
+        blockers.append("failed_count must be 0")
+    for field in ("current_state_written", "account_snapshot_written", "position_snapshot_written"):
+        if payload.get(field) is not True:
+            blockers.append(f"{field} must be true")
+    commit_json = str(payload.get("json_path") or payload.get("commit_json_path") or "").strip()
+    commit_md = str(payload.get("markdown_path") or payload.get("commit_markdown_path") or "").strip()
+    if not commit_json or not Path(commit_json).exists():
+        blockers.append("commit json_path must exist")
+    if commit_md and not Path(commit_md).exists():
+        blockers.append("commit markdown_path must exist")
+    elif not commit_md:
+        blockers.append("commit markdown_path must exist")
+    artifacts = {
+        "eod_commit_report_json": commit_json,
+        "eod_commit_report_md": commit_md,
+        "eod_commit_report": commit_json,
+    }
+    return _payload_validation(
+        "FAILED" if any("must exist" in blocker for blocker in blockers) else "BLOCKED" if blockers else "PASS",
+        "EOD commit report is pinned." if not blockers else "EOD commit failed validation.",
+        artifacts if not blockers else {},
+        blockers,
+    )
+
+
+def _validate_final_status_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+    blockers = []
+    warnings = []
+    status = str(
+        payload.get("runner_result")
+        or payload.get("overall_status")
+        or payload.get("workflow_status")
+        or ""
+    ).upper()
+    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+        blockers.append("account_id must match frozen context")
+    date_value = str(payload.get("trade_date") or payload.get("date") or payload.get("target_date") or "").strip()
+    if date_value and date_value != state.frozen_context.trade_date:
+        blockers.append("date must match trade_date")
+    unresolved_count = _int_payload(payload, "unresolved_error_count")
+    if unresolved_count != 0:
+        blockers.append("unresolved_error_count must be 0")
+    if status == "WARNING":
+        warnings.append("final_status returned WARNING")
+    elif status not in {"PASS", "OK", "READY", "DONE"}:
+        blockers.append("final_status must be PASS")
+    runner_result = "BLOCKED" if blockers else "WARNING" if warnings else "PASS"
+    return _payload_validation(
+        runner_result,
+        "Final status is PASS." if runner_result == "PASS" else "Final status requires operator review.",
+        {},
+        blockers,
+        warnings,
     )
 
 
@@ -2470,6 +3141,32 @@ def _skipped_stage_d_append_result(
     )
 
 
+def _skipped_stage_e_commit_result(
+    state: RunbookState,
+    workspace: Path,
+    command: RunbookCommand,
+    message: str,
+) -> dict[str, Any]:
+    artifacts: dict[str, str] = {}
+    report_ref = state.artifacts.get("eod_commit_report_json")
+    report_md = state.artifacts.get("eod_commit_report_md")
+    if report_ref:
+        artifacts["eod_commit_report_json"] = report_ref
+        artifacts["eod_commit_report"] = report_ref
+    if report_md:
+        artifacts["eod_commit_report_md"] = report_md
+    return runbook_result.create_command_result(
+        state,
+        command,
+        "SKIPPED",
+        message,
+        artifact_refs=artifacts,
+        raw_payload={"reason_code": "eod_commit_already_committed"},
+        process={"executed": False, "exit_code": None, "duration_ms": None},
+        workspace=workspace,
+    )
+
+
 def _review_append_idempotency_key(state: RunbookState, workspace: Path) -> str | None:
     preview_ref = state.artifacts.get("review_preview_json")
     if not preview_ref:
@@ -2479,6 +3176,21 @@ def _review_append_idempotency_key(state: RunbookState, workspace: Path) -> str 
             state,
             "review_append",
             {"review_preview_json": preview_ref},
+            workspace,
+        )
+    except ValueError:
+        return None
+
+
+def _eod_commit_idempotency_key(state: RunbookState, workspace: Path) -> str | None:
+    dryrun_ref = state.artifacts.get("eod_dryrun_report_json") or state.artifacts.get("eod_dryrun_result")
+    if not dryrun_ref:
+        return None
+    try:
+        return runbook_state.build_idempotency_key(
+            state,
+            "eod_commit",
+            {"eod_dryrun_report_json": dryrun_ref},
             workspace,
         )
     except ValueError:
@@ -2704,6 +3416,16 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_d_append.add_argument("--dry-run", action="store_true")
     stage_d_append.add_argument("--confirm-paper-test", action="store_true")
     stage_d_append.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
+
+    stage_e = subparsers.add_parser("stage-e", help="Run Stage E Step 16-18 EOD close")
+    stage_e.add_argument("--workspace", type=Path, required=True)
+    stage_e.add_argument("--account-id", required=True)
+    stage_e.add_argument("--data-date", required=True)
+    stage_e.add_argument("--trade-date", required=True)
+    stage_e.add_argument("--timezone", default="Asia/Seoul")
+    stage_e.add_argument("--dry-run", action="store_true")
+    stage_e.add_argument("--confirm-paper-test", action="store_true")
+    stage_e.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
     return parser
 
 
@@ -2788,6 +3510,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if result.get("runner_result") in {"PASS", "WARNING"} else 1
     if args.command == "stage-d-append":
         result = run_stage_d_append(
+            workspace=args.workspace,
+            account_id=args.account_id,
+            data_date=args.data_date,
+            trade_date=args.trade_date,
+            timezone=args.timezone,
+            dry_run=args.dry_run,
+            confirm_paper_test=args.confirm_paper_test,
+            timeout_sec=args.timeout_sec,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("runner_result") == "PASS" else 1
+    if args.command == "stage-e":
+        result = run_stage_e(
             workspace=args.workspace,
             account_id=args.account_id,
             data_date=args.data_date,

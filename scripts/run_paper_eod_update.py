@@ -220,6 +220,49 @@ def _manual_execution_commit_report_path(paths: dict[str, Path], clean_date: str
     return paths["paper_execution_log"].parent / "reports" / f"manual_execution_import_commit_{clean_date}.json"
 
 
+def _eod_report_paths(paths: dict[str, Path], clean_date: str, commit: bool) -> tuple[Path, Path]:
+    reports_dir = paths["paper_execution_log"].parent / "reports"
+    stem = f"paper_eod_{'commit' if commit else 'dryrun'}_{clean_date}"
+    return reports_dir / f"{stem}.json", reports_dir / f"{stem}.md"
+
+
+def _format_eod_report_markdown(payload: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"# Paper EOD {'Commit' if payload.get('mode') == 'commit' else 'Dry-run'}",
+            "",
+            f"- Status: {payload.get('runner_result')}",
+            f"- Account: {payload.get('account_id')}",
+            f"- Date: {payload.get('date')}",
+            f"- Commit allowed: {payload.get('commit_allowed')}",
+            f"- Current state written: {payload.get('current_state_written')}",
+            f"- Account snapshot written: {payload.get('account_snapshot_written')}",
+            f"- Position snapshot written: {payload.get('position_snapshot_written')}",
+            f"- Failed count: {payload.get('failed_count')}",
+            f"- Blocked count: {payload.get('blocked_count')}",
+            "",
+        ]
+    )
+
+
+def _write_eod_report(
+    payload: dict[str, Any],
+    paths: dict[str, Path],
+    clean_date: str,
+    commit: bool,
+) -> dict[str, Any]:
+    json_path, markdown_path = _eod_report_paths(paths, clean_date, commit)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        **payload,
+        "json_path": str(json_path),
+        "markdown_path": str(markdown_path),
+    }
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    markdown_path.write_text(_format_eod_report_markdown(payload), encoding="utf-8")
+    return payload
+
+
 def build_paper_account_preview_from_log(
     log_path: Path,
     initial_cash: float = 100000.0,
@@ -240,6 +283,7 @@ def run_paper_eod_dry_run(
     commit: bool = False,
     plan_path: str | Path | None = None,
     account_paths: PaperAccountPaths | None = None,
+    json_output: bool = False,
 ) -> int:
     clean_date = _normalize_date(date_str)
     if account_paths is not None and account_paths.account_id != "paper_default":
@@ -747,6 +791,36 @@ def run_paper_eod_dry_run(
     if snapshot_row is not None and snapshot_row["market_valuation_status"] == "failed":
         print("  WARNING: market valuation failed, but cost-basis snapshot was preserved")
         print("  WARNING: paper_position_snapshot was skipped")
+    if json_output:
+        account_id = account_paths.account_id if account_paths is not None else "paper_default"
+        payload = {
+            "schema_version": "paper_eod_update.v1",
+            "runner_result": "PASS",
+            "status": "COMMITTED" if commit else "PASS",
+            "mode": "commit" if commit else "dry_run",
+            "account_id": account_id,
+            "date": target_snapshot_date,
+            "trade_date": target_snapshot_date,
+            "eod_mode": "accounting_close",
+            "commit_allowed": True,
+            "fail_count": 0,
+            "failed_count": 0,
+            "blocked_count": 0,
+            "execution_candidate_count": execution_candidate_count,
+            "execution_log_rows_for_date": len(pre_existing_execution_rows_for_date),
+            "would_write_current_state": would_write_current_state,
+            "would_write_account_snapshot": would_write_account_snapshot,
+            "would_write_position_snapshot": would_write_position_snapshot,
+            "current_state_written": bool(commit and paper_state_save_result is not None),
+            "account_snapshot_written": bool(commit and snapshot_save_result is not None),
+            "position_snapshot_written": bool(commit and position_snapshot_save_result is not None),
+            "paper_state_path": str(paths["paper_state"]),
+            "account_snapshot_path": str(paths["paper_account_snapshot"]),
+            "position_snapshot_path": str(paths["paper_position_snapshot"]),
+            "market_valuation_status": snapshot_row.get("market_valuation_status") if snapshot_row else None,
+        }
+        payload = _write_eod_report(payload, paths, clean_date, commit)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
