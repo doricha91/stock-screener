@@ -13,6 +13,10 @@ ROOT = project_root()
 OUTPUTS = ROOT / "outputs"
 OUTPUTS.mkdir(parents=True, exist_ok=True)
 
+
+def market_holidays_us_path() -> Path:
+    return ROOT / "config" / "market_holidays_us.json"
+
 # 프론트테스트 전용 디렉토리
 FRONT_TEST_DIR = OUTPUTS / "front_test"
 FRONT_TEST_DIR.mkdir(parents=True, exist_ok=True)
