@@ -2459,7 +2459,7 @@ def _run_stage_e_command(
         )
         return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
-    validation = _validate_stage_e_payload(command.command_key, raw_payload, state)
+    validation = _validate_stage_e_payload(command.command_key, raw_payload, state, workspace)
     if validation["artifact_refs"]:
         validation["artifact_refs"] = _pin_artifact_refs(
             workspace,
@@ -2669,13 +2669,14 @@ def _validate_stage_e_payload(
     command_key: str,
     payload: dict[str, Any],
     state: RunbookState,
+    workspace: Path,
 ) -> dict[str, Any]:
     if command_key == "eod_dryrun":
         return _validate_eod_dryrun_payload(payload, state)
     if command_key == "eod_commit":
         return _validate_eod_commit_payload(payload, state)
     if command_key == "final_status":
-        return _validate_final_status_payload(payload, state)
+        return _validate_final_status_payload(payload, state, workspace)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
@@ -2875,7 +2876,7 @@ def _validate_eod_commit_payload(payload: dict[str, Any], state: RunbookState) -
     )
 
 
-def _validate_final_status_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+def _validate_final_status_payload(payload: dict[str, Any], state: RunbookState, workspace: Path) -> dict[str, Any]:
     blockers = []
     warnings = []
     status = str(
@@ -2892,6 +2893,7 @@ def _validate_final_status_payload(payload: dict[str, Any], state: RunbookState)
     unresolved_count = _int_payload(payload, "unresolved_error_count")
     if unresolved_count != 0:
         blockers.append("unresolved_error_count must be 0")
+    blockers.extend(_validate_stage_e_pinned_eod_reports(state, workspace))
     if status == "WARNING":
         warnings.append("final_status returned WARNING")
     elif status not in {"PASS", "OK", "READY", "DONE"}:
@@ -2904,6 +2906,81 @@ def _validate_final_status_payload(payload: dict[str, Any], state: RunbookState)
         blockers,
         warnings,
     )
+
+
+def _validate_stage_e_pinned_eod_reports(state: RunbookState, workspace: Path) -> list[str]:
+    blockers: list[str] = []
+    dryrun_ref = state.artifacts.get("eod_dryrun_report_json")
+    commit_ref = state.artifacts.get("eod_commit_report_json")
+    if not dryrun_ref:
+        blockers.append("eod_dryrun_report_json is required")
+    else:
+        dryrun_path = _artifact_ref_path(workspace, dryrun_ref)
+        try:
+            dryrun = json.loads(dryrun_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            blockers.append(f"eod_dryrun_report_json could not be read: {exc}")
+        else:
+            blockers.extend(_validate_eod_dryrun_report_payload(dryrun, state))
+    if not commit_ref:
+        blockers.append("eod_commit_report_json is required")
+    else:
+        commit_path = _artifact_ref_path(workspace, commit_ref)
+        try:
+            commit = json.loads(commit_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            blockers.append(f"eod_commit_report_json could not be read: {exc}")
+        else:
+            blockers.extend(_validate_eod_commit_report_payload(commit, state))
+    return blockers
+
+
+def _validate_eod_dryrun_report_payload(payload: dict[str, Any], state: RunbookState) -> list[str]:
+    blockers: list[str] = []
+    if str(payload.get("runner_result") or "").upper() != "PASS":
+        blockers.append("EOD dry-run runner_result must be PASS.")
+    if str(payload.get("status") or "").upper() != "PASS":
+        blockers.append("EOD dry-run status must be PASS.")
+    if str(payload.get("mode") or "").lower() != "dry_run":
+        blockers.append("EOD dry-run mode must be dry_run.")
+    blockers.extend(_validate_eod_report_common(payload, state))
+    if payload.get("commit_allowed") is not True:
+        blockers.append("EOD dry-run commit_allowed must be true.")
+    for field in ("would_write_current_state", "would_write_account_snapshot", "would_write_position_snapshot"):
+        if payload.get(field) is not True:
+            blockers.append(f"EOD dry-run {field} must be true.")
+    return blockers
+
+
+def _validate_eod_commit_report_payload(payload: dict[str, Any], state: RunbookState) -> list[str]:
+    blockers: list[str] = []
+    if str(payload.get("runner_result") or "").upper() != "PASS":
+        blockers.append("EOD commit runner_result must be PASS.")
+    if str(payload.get("status") or "").upper() != "COMMITTED":
+        blockers.append("EOD commit status must be COMMITTED.")
+    if str(payload.get("mode") or "").lower() != "commit":
+        blockers.append("EOD commit mode must be commit.")
+    blockers.extend(_validate_eod_report_common(payload, state))
+    for field in ("current_state_written", "account_snapshot_written", "position_snapshot_written"):
+        if payload.get(field) is not True:
+            blockers.append(f"EOD commit {field} must be true.")
+    if str(payload.get("market_valuation_status") or "").lower() != "success":
+        blockers.append("EOD commit market_valuation_status must be success.")
+    return blockers
+
+
+def _validate_eod_report_common(payload: dict[str, Any], state: RunbookState) -> list[str]:
+    blockers: list[str] = []
+    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+        blockers.append("EOD report account_id must match frozen context.")
+    for field in ("date", "trade_date"):
+        if str(payload.get(field) or "").strip() != state.frozen_context.trade_date:
+            blockers.append(f"EOD report {field} must match trade_date.")
+    if _int_payload(payload, "failed_count") != 0:
+        blockers.append("EOD report failed_count must be 0.")
+    if _int_payload(payload, "blocked_count") != 0:
+        blockers.append("EOD report blocked_count must be 0.")
+    return blockers
 
 
 def _validate_daily_review_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -206,6 +206,49 @@ def _write_notion_evidence(
     return path
 
 
+def _write_existing_status_sync_report(
+    root: Path,
+    evidence_type: str,
+    *,
+    account_id: str = "paper_ops",
+    trade_date: str = "2026-06-08",
+    overall_status: str = "SUCCESS",
+    candidate_count: int = 1,
+    updated_count: int = 1,
+    failed_count: int = 0,
+    row_status: str = "UPDATED",
+    commit_report_path: Path | None = None,
+) -> Path:
+    path = notion_evidence_path(root, evidence_type, trade_date)
+    if evidence_type == EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC:
+        date_key = "execution_date"
+        default_commit_name = "manual_execution_import_commit_20260608.json"
+    else:
+        date_key = "review_date"
+        default_commit_name = "manual_review_import_commit_20260608.json"
+    if commit_report_path is None:
+        commit_report_path = root / "reports" / default_commit_name
+    _write_json(
+        path,
+        {
+            "account_id": account_id,
+            date_key: trade_date,
+            "commit_report_path": str(commit_report_path),
+            "dry_run": False,
+            "overall_status": overall_status,
+            "candidate_count": candidate_count,
+            "updated_count": updated_count,
+            "skipped_count": 0,
+            "failed_count": failed_count,
+            "rows": [{"status": row_status}],
+            "sync_json_path": str(path),
+            "sync_markdown_path": str(path.with_suffix(".md")),
+            "written_at": "2026-06-08T09:00:00+09:00",
+        },
+    )
+    return path
+
+
 def _notion_stage_report(
     status: str,
     *,
@@ -1595,6 +1638,123 @@ def test_pass_evidence_marks_target_notion_stage_done(tmp_path: Path, evidence_t
     assert stage["status"] == "DONE"
     assert stage["evidence_checked"] is True
     assert stage["evidence_status"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    ("evidence_type", "stage_name"),
+    [
+        (EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC, "MANUAL_EXECUTION_STATUS_SYNC"),
+        (EVIDENCE_MANUAL_REVIEW_STATUS_SYNC, "MANUAL_REVIEW_STATUS_SYNC"),
+    ],
+)
+def test_existing_status_sync_report_marks_target_notion_stage_done(
+    tmp_path: Path,
+    evidence_type: str,
+    stage_name: str,
+):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    if evidence_type == EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC:
+        _write_execution_preview(root)
+        _write_execution_commit(root)
+    else:
+        _write_review_ready(root)
+        _write_review_preview(root)
+        _write_review_commit(root)
+    path = _write_existing_status_sync_report(root, evidence_type)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert "schema_version" not in payload
+    assert "evidence_type" not in payload
+    assert "target_system" not in payload
+    assert "trade_date" not in payload
+    assert "status" not in payload
+
+    status = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(status, stage_name)
+
+    assert stage["status"] == "DONE"
+    assert stage["evidence_checked"] is True
+    assert stage["evidence_status"] == "SUCCESS"
+
+
+@pytest.mark.parametrize(
+    ("evidence_type", "stage_name", "mutation", "expected_error"),
+    [
+        (
+            EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC,
+            "MANUAL_EXECUTION_STATUS_SYNC",
+            {"execution_date": "2026-06-09"},
+            "execution_date",
+        ),
+        (
+            EVIDENCE_MANUAL_REVIEW_STATUS_SYNC,
+            "MANUAL_REVIEW_STATUS_SYNC",
+            {"review_date": "2026-06-09"},
+            "review_date",
+        ),
+        (
+            EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC,
+            "MANUAL_EXECUTION_STATUS_SYNC",
+            {"failed_count": 1},
+            "failed_count",
+        ),
+        (
+            EVIDENCE_MANUAL_REVIEW_STATUS_SYNC,
+            "MANUAL_REVIEW_STATUS_SYNC",
+            {"updated_count": 0},
+            "updated_count",
+        ),
+        (
+            EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC,
+            "MANUAL_EXECUTION_STATUS_SYNC",
+            {"rows": [{"status": "FAILED"}]},
+            "rows[].status",
+        ),
+        (
+            EVIDENCE_MANUAL_REVIEW_STATUS_SYNC,
+            "MANUAL_REVIEW_STATUS_SYNC",
+            {"commit_report_path": ""},
+            "commit_report_path",
+        ),
+        (
+            EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC,
+            "MANUAL_EXECUTION_STATUS_SYNC",
+            {"commit_report_path": "missing.json"},
+            "commit_report_path",
+        ),
+    ],
+)
+def test_existing_status_sync_report_validation_blocks_unsafe_payload(
+    tmp_path: Path,
+    evidence_type: str,
+    stage_name: str,
+    mutation: dict,
+    expected_error: str,
+):
+    root = _root(tmp_path)
+    legacy = _legacy_root(tmp_path)
+    _write_plan(root)
+    if evidence_type == EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC:
+        _write_execution_preview(root)
+        _write_execution_commit(root)
+    else:
+        _write_review_ready(root)
+        _write_review_preview(root)
+        _write_review_commit(root)
+    path = _write_existing_status_sync_report(root, evidence_type)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.update(mutation)
+    _write_json(path, payload)
+
+    status = build_daily_ops_status(**_base_kwargs(root, legacy))
+    stage = _stage(status, stage_name)
+
+    assert stage["status"] == "BLOCKED"
+    assert stage["evidence_checked"] is True
+    assert stage["evidence_status"] in {"SUCCESS", None}
+    assert any(expected_error in error for error in stage["evidence_errors"])
 
 
 def test_compact_filename_with_hyphenated_payload_trade_date_is_valid(tmp_path: Path):

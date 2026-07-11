@@ -94,6 +94,17 @@ def evaluate_notion_evidence(
             warnings=("Evidence JSON root must be an object.",),
         )
 
+    if evidence_type in {EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC, EVIDENCE_MANUAL_REVIEW_STATUS_SYNC}:
+        legacy_evaluation = _evaluate_existing_sync_report(
+            path=path,
+            payload=payload,
+            account_id=account_id,
+            trade_date=trade_date,
+            evidence_type=evidence_type,
+        )
+        if legacy_evaluation is not None:
+            return legacy_evaluation
+
     blockers = _validation_blockers(
         payload,
         account_id=account_id,
@@ -147,6 +158,83 @@ def evaluate_notion_evidence(
         stage_status=UNKNOWN,
         evidence_status=status or None,
         warnings=warnings or (f"Evidence status is UNKNOWN or unsupported: {status or '-'}",),
+    )
+
+
+def _evaluate_existing_sync_report(
+    *,
+    path: Path,
+    payload: dict[str, Any],
+    account_id: str,
+    trade_date: str,
+    evidence_type: str,
+) -> EvidenceEvaluation | None:
+    if evidence_type == EVIDENCE_MANUAL_EXECUTION_STATUS_SYNC:
+        date_key = "execution_date"
+    elif evidence_type == EVIDENCE_MANUAL_REVIEW_STATUS_SYNC:
+        date_key = "review_date"
+    else:
+        return None
+
+    required_markers = {
+        date_key,
+        "overall_status",
+        "candidate_count",
+        "updated_count",
+        "failed_count",
+        "commit_report_path",
+        "rows",
+    }
+    if not required_markers.issubset(payload):
+        return None
+
+    blockers: list[str] = []
+    if str(payload.get("account_id") or "").strip() != account_id:
+        blockers.append("Sync report account_id mismatch.")
+    if str(payload.get(date_key) or "").strip() != trade_date:
+        blockers.append(f"Sync report {date_key} mismatch.")
+    if str(payload.get("overall_status") or "").strip().upper() != "SUCCESS":
+        blockers.append("Sync report overall_status must be SUCCESS.")
+    candidate_count = _safe_int(payload.get("candidate_count"))
+    updated_count = _safe_int(payload.get("updated_count"))
+    failed_count = _safe_int(payload.get("failed_count"))
+    if candidate_count <= 0:
+        blockers.append("Sync report candidate_count must be greater than 0.")
+    if updated_count != candidate_count:
+        blockers.append("Sync report updated_count must equal candidate_count.")
+    if failed_count != 0:
+        blockers.append("Sync report failed_count must be 0.")
+    commit_report_path = str(payload.get("commit_report_path") or "").strip()
+    if not commit_report_path:
+        blockers.append("Sync report commit_report_path is required.")
+    elif not Path(commit_report_path).exists():
+        blockers.append("Sync report commit_report_path does not exist.")
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        blockers.append("Sync report rows must be a list.")
+    else:
+        bad_statuses = [
+            str(row.get("status") or "").strip().upper()
+            for row in rows
+            if isinstance(row, dict) and str(row.get("status") or "").strip().upper() != "UPDATED"
+        ]
+        malformed_count = sum(1 for row in rows if not isinstance(row, dict))
+        if bad_statuses or malformed_count:
+            blockers.append("Sync report rows[].status must all be UPDATED.")
+
+    if blockers:
+        return EvidenceEvaluation(
+            path=path,
+            checked=True,
+            stage_status=BLOCKED,
+            evidence_status=str(payload.get("overall_status") or "").strip().upper() or None,
+            blockers=tuple(blockers),
+        )
+    return EvidenceEvaluation(
+        path=path,
+        checked=True,
+        stage_status=DONE,
+        evidence_status="SUCCESS",
     )
 
 

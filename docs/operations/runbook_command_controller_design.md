@@ -1054,6 +1054,10 @@ Notes:
 - Step 17 consumes the pinned `eod_dryrun_report_json`; same-date commit re-execution must return `BLOCKED` once Stage E is complete.
 - If Step 17 passes but Step 18 fails, retries must reuse the pinned `eod_commit_report_json` and must not run Step 17 again.
 - Step 18 `final_status` pins its command result as `final_status_report_json` / `final_status_report_md`.
+- Step 18 accepts the existing `manual_execution_status_sync_YYYYMMDD.json` and `manual_review_status_sync_YYYYMMDD.json` reports as Notion sync evidence; a separate evidence sidecar schema is not required.
+- Missing `schema_version`, `evidence_type`, `target_system`, `status`, or `trade_date` fields must not block `final_status` when the existing sync report contains `account_id`, `execution_date` or `review_date`, `overall_status`, row counts, `commit_report_path`, and `rows`.
+- Existing sync reports are considered successful only when `overall_status=SUCCESS`, `candidate_count>0`, `updated_count==candidate_count`, `failed_count=0`, the commit report path exists, and all `rows[].status` values are `UPDATED`.
+- Step 18 also verifies the pinned `eod_dryrun_report_json` and `eod_commit_report_json` using their existing `paper_eod_update.v1` fields instead of requiring a new sidecar.
 - If Step 18 returns `WARNING`, Stage E is not closed automatically and the operator action must be explicit.
 - Stage E `PASS` is recorded only after Step 18 final status is `PASS`.
 - Write the Stage E summary as `stage_runs/{runbook_day_id}/latest_E.json/txt`; do not overwrite Stage D summaries.

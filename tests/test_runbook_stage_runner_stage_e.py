@@ -70,39 +70,49 @@ def _fake_stage_e_run(
             dryrun_json = repo_outputs / "reports" / f"paper_eod_dryrun_{compact}.json"
             dryrun_md = repo_outputs / "reports" / f"paper_eod_dryrun_{compact}.md"
             dryrun_json.parent.mkdir(parents=True, exist_ok=True)
-            dryrun_json.write_text("{}", encoding="utf-8")
-            dryrun_md.write_text("# dryrun\n", encoding="utf-8")
             payload = {
                 "runner_result": dryrun_runner_result,
                 "status": dryrun_runner_result,
+                "mode": "dry_run",
                 "account_id": ACCOUNT_ID,
                 "date": TRADE_DATE,
+                "trade_date": TRADE_DATE,
                 "fail_count": 1 if dryrun_runner_result != "PASS" else 0,
+                "failed_count": 1 if dryrun_runner_result != "PASS" else 0,
                 "blocked_count": 0,
                 "commit_allowed": dryrun_runner_result == "PASS",
+                "would_write_current_state": True,
+                "would_write_account_snapshot": True,
+                "would_write_position_snapshot": True,
                 "json_path": str(dryrun_json),
                 "markdown_path": str(dryrun_md),
             }
+            dryrun_json.write_text(json.dumps(payload), encoding="utf-8")
+            dryrun_md.write_text("# dryrun\n", encoding="utf-8")
         elif "paper.py" in joined and "eod" in argv and "--commit" in argv:
             assert "--dryrun-json" in argv
             assert any("workspace" in part and "paper_eod_dryrun_20260702.json" in part for part in argv)
             commit_json = repo_outputs / "reports" / f"paper_eod_commit_{compact}.json"
             commit_md = repo_outputs / "reports" / f"paper_eod_commit_{compact}.md"
             commit_json.parent.mkdir(parents=True, exist_ok=True)
-            commit_json.write_text("{}", encoding="utf-8")
-            commit_md.write_text("# commit\n", encoding="utf-8")
             payload = {
                 "status": "FAILED" if commit_failed else "COMMITTED",
                 "runner_result": "FAILED" if commit_failed else "PASS",
+                "mode": "commit",
                 "account_id": ACCOUNT_ID,
                 "date": TRADE_DATE,
+                "trade_date": TRADE_DATE,
                 "failed_count": 1 if commit_failed else 0,
+                "blocked_count": 0,
                 "current_state_written": not commit_failed,
                 "account_snapshot_written": not commit_failed,
                 "position_snapshot_written": not commit_failed,
+                "market_valuation_status": "success",
                 "json_path": str(commit_json),
                 "markdown_path": str(commit_md),
             }
+            commit_json.write_text(json.dumps(payload), encoding="utf-8")
+            commit_md.write_text("# commit\n", encoding="utf-8")
         elif "paper_daily_ops.py" in joined and "status" in argv:
             payload = {
                 "overall_status": final_status,
@@ -209,6 +219,9 @@ def test_stage_e_dryrun_missing_artifact_stops_before_commit(tmp_path: Path, mon
             "fail_count": 0,
             "blocked_count": 0,
             "commit_allowed": True,
+            "would_write_current_state": True,
+            "would_write_account_snapshot": True,
+            "would_write_position_snapshot": True,
             "json_path": str(tmp_path / "missing.json"),
             "markdown_path": str(tmp_path / "missing.md"),
         }

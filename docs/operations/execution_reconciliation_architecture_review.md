@@ -437,6 +437,17 @@ Stage D/E:
   Step 16 `eod_dryrun`, Step 17 `eod_commit`, and Step 18 `final_status`
 - Step 17 consumes only the pinned `eod_dryrun_report_json`; the runner blocks
   automatic EOD commit reruns after a PASS idempotency record
+- Step 18 accepts the existing manual execution/review status sync report
+  structures as valid evidence. A separate evidence sidecar is not required,
+  and missing `schema_version`, `evidence_type`, `target_system`, `status`, or
+  `trade_date` fields alone must not block final status.
+- Existing sync reports are evaluated from their native fields:
+  `account_id`, `execution_date` or `review_date`, `overall_status`, row
+  counts, `commit_report_path`, and `rows[].status`. They PASS only when the
+  report is `SUCCESS`, every candidate is updated, failed count is zero, the
+  commit report exists, and every row status is `UPDATED`.
+- Step 18 also validates the pinned EOD dry-run/commit reports by their
+  existing `paper_eod_update.v1` fields.
 - Step 18 must PASS before Stage E is marked PASS; WARNING requires explicit
   operator review and does not close the runbook day automatically
 - should distinguish "execution accepted with review reason" from "unexpected
