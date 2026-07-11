@@ -2,37 +2,36 @@
 
 ## Purpose
 
-`scripts\runbook_day_prep.py` reuses the 6-4B rollover preview and writes only the machine-local wrapper environment file. It does not run a stage or gate, create runbook state, write Notion data, connect to a broker, or execute an order.
+scripts\runbook_day_prep.py reuses the 6-4B rollover preview and updates only the machine-local runbook-day file. It does not modify machine or account settings, run a stage or gate, create runbook state, access Notion, connect to a broker, or execute an order.
+
+## Environment Files
+
+- _machine.local.cmd: PC paths, Conda environment, pause, and Python encoding settings.
+- _account.local.cmd: paper account identity and ACCOUNT_MODE=PAPER.
+- _runbook_day.local.cmd: data date, trade date, and runbook-day ID.
+
+The matching template files are tracked examples. _env.cmd never falls back to a template. All actual local files are ignored by Git and must be reviewed by the operator before use.
+
+An old _env.local.cmd requires manual migration. The prep command reports BLOCKED and does not migrate it automatically.
 
 ## Command
 
-```bat
-python scripts\runbook_day_prep.py ^
-  --workspace D:\n8n\workspace\stock_screener_ops ^
-  --account-id paper_pilot_202606 ^
-  --env-local ops\runbook_wrappers\_env.local.cmd ^
-  --write-env-local ^
-  --confirm-paper-test
-```
+    python scripts\runbook_day_prep.py ^
+      --workspace D:\n8n\workspace\stock_screener_ops ^
+      --account-id paper_pilot_202606 ^
+      --account-local ops\runbook_wrappers\_account.local.cmd ^
+      --runbook-day-local ops\runbook_wrappers\_runbook_day.local.cmd ^
+      --write-env-local ^
+      --confirm-paper-test
 
-The command writes only after rollover returns `PASS`, `safe_to_prepare=true`, and `already_exists=false`. It validates that account, dates, and `runbook_day_id` agree before and after writing.
-
-## Files
-
-- `_env.cmd`: tracked loader with repository/workspace paths, Conda activation, and validation.
-- `_env.template.cmd`: tracked example only; it is never loaded automatically.
-- `_env.local.cmd`: ignored machine-local account and runbook dates.
-
-The local file, its `.tmp`, and its `.bak` are ignored by Git. Review the generated local file before proceeding.
+The account local file must exist, use ACCOUNT_MODE=PAPER, and match --account-id. The command writes only after rollover returns PASS, safe_to_prepare=true, and already_exists=false.
 
 ## Write Policy
 
-The new content is written to `_env.local.cmd.tmp` and read back for validation. If a previous local file exists, it is copied to `_env.local.cmd.bak`, then the validated temporary file atomically replaces the local file. A previous backup is overwritten, so only the most recent pre-update version is retained.
+Only _runbook_day.local.cmd is written. New content is written to _runbook_day.local.cmd.tmp and read back for validation. If a prior day file exists, it is copied to _runbook_day.local.cmd.bak, then the validated temporary file atomically replaces it.
 
-If the existing local values already match, the command returns `PASS` with `file_changed=false` and does not rewrite or back up the file. A blocked rollover or validation failure leaves the existing local file unchanged.
+Only the most recent backup is retained. Identical values return PASS with file_changed=false and do not rewrite the file. A blocked rollover or validation failure preserves the existing day file. PASS returns exit code 0; BLOCKED returns 2.
 
-The process exit code is `0` for `PASS` and `2` for `BLOCKED`.
+## Operational Boundary
 
-## Next Step
-
-6-4C prepares configuration only. Do not treat a successful write as authorization to run a wrapper. Review `_env.local.cmd`; 6-4D remains responsible for the next operational verification.
+6-4C-1 changes the environment structure only. Before operating, review all three local files. The full July 6 wrapper cycle is a separate 6-4D procedure; this prep result does not authorize wrapper execution.

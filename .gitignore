@@ -27,3 +27,8 @@ outputs/dev_backups/
 ops/runbook_wrappers/_env.local.cmd
 ops/runbook_wrappers/_env.local.cmd.tmp
 ops/runbook_wrappers/_env.local.cmd.bak
+ops/runbook_wrappers/_machine.local.cmd
+ops/runbook_wrappers/_account.local.cmd
+ops/runbook_wrappers/_runbook_day.local.cmd
+ops/runbook_wrappers/_runbook_day.local.cmd.tmp
+ops/runbook_wrappers/_runbook_day.local.cmd.bak

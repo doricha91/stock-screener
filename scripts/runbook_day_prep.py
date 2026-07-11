@@ -10,14 +10,15 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.runbook_calendar import load_market_calendar
-from core.runbook_day_prep import prepare_env_local
+from core.runbook_day_prep import prepare_runbook_day_local
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Prepare the next paper/test runbook local environment.")
+    parser = argparse.ArgumentParser(description="Prepare the next paper/test runbook day environment.")
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--account-id", required=True)
-    parser.add_argument("--env-local", required=True)
+    parser.add_argument("--account-local", required=True)
+    parser.add_argument("--runbook-day-local", required=True)
     parser.add_argument("--write-env-local", action="store_true")
     parser.add_argument("--confirm-paper-test", action="store_true")
     return parser
@@ -26,10 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        result = prepare_env_local(
+        result = prepare_runbook_day_local(
             args.workspace,
             args.account_id,
-            args.env_local,
+            args.account_local,
+            args.runbook_day_local,
             load_market_calendar(),
             write_env_local=args.write_env_local,
             confirm_paper_test=args.confirm_paper_test,
@@ -37,7 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         result = {
             "runner_result": "BLOCKED",
-            "mode": "WRITE_ENV_LOCAL",
+            "mode": "WRITE_RUNBOOK_DAY_LOCAL",
             "reason": "prep_configuration_invalid",
             "blockers": [f"{type(exc).__name__}:{exc}"],
             "safe_to_prepare": False,

@@ -11,24 +11,31 @@ They are not live trading, broker, API order, or order placement automation. The
 ## Location
 
 - Shared loader: `ops\runbook_wrappers\_env.cmd`
-- Tracked example: `ops\runbook_wrappers\_env.template.cmd`
-- Machine-local account and dates: `ops\runbook_wrappers\_env.local.cmd`
+- Machine example/local: `_machine.template.cmd` / `_machine.local.cmd`
+- Account example/local: `_account.template.cmd` / `_account.local.cmd`
+- Runbook-day example/local: `_runbook_day.template.cmd` / `_runbook_day.local.cmd`
 - Stage wrappers: `ops\runbook_wrappers\01_*.cmd` through `ops\runbook_wrappers\09_*.cmd`
 
 ## Configure Dates And Account
 
-Run the 6-4C prep command and review `ops\runbook_wrappers\_env.local.cmd` before a new runbook day. The local file contains:
+Create and review all three local files before a new runbook day. The account local contains:
 
 ```bat
 set ACCOUNT_ID=paper_pilot_202606
+set ACCOUNT_MODE=PAPER
+```
+
+The 6-4C prep command updates only the runbook-day local:
+
+```bat
 set DATA_DATE=2026-07-02
 set TRADE_DATE=2026-07-06
 set RUNBOOK_DAY_ID=paper_pilot_202606_2026-07-02_2026-07-06
 ```
 
-`_env.local.cmd` is ignored by Git. Do not copy the template over it without running rollover validation. If the local file is missing or invalid, `_env.cmd` stops before Conda or a stage command is run. The wrappers continue to call only `_env.cmd`; the template is never executed automatically.
+All local files are ignored by Git. Templates are examples only and are never loaded as fallbacks. If any local file is missing, fails, or contains inconsistent values, `_env.cmd` stops before Conda or a stage command is run. The wrappers continue to call only `_env.cmd`.
 
-`_env.cmd` retains `REPO_ROOT`, `WORKSPACE`, `PAUSE_ON_EXIT`, and `CONDA_BAT`. It uses `C:\Users\inocha\anaconda3\condabin\conda.bat` to activate `HANTU311_64` and stops with a non-zero exit code if local loading or activation fails, the active environment name is different, or `%CONDA_PREFIX%\python.exe` does not exist. The wrappers use only that environment's `python.exe`; they do not fall back to another Python on `PATH`.
+`_env.cmd` loads machine, account, and runbook-day locals in that order. It requires `ACCOUNT_MODE=PAPER`, validates the runbook ID, checks repository/workspace/Conda paths, activates `CONDA_ENV_NAME`, verifies the active environment, and sets `PYTHON_EXE` from `%CONDA_PREFIX%\python.exe`. It does not fall back to another Python on `PATH`.
 
 The wrappers can be started by double-clicking them in Windows Explorer. Running them from CMD or Anaconda Prompt is recommended so the JSON result remains visible. Set `PAUSE_ON_EXIT=1` to pause before a double-clicked window closes; the default `0` closes automatically.
 
@@ -63,3 +70,5 @@ Always inspect the command JSON output. Check `runner_result`, `warnings`, `bloc
 `WAIT` and `WARNING` must be reviewed directly in the JSON output. The wrappers do not approve warnings and must not be modified to add `--allow-warnings` automatically.
 
 If Stage E has already returned `PASS` for the same `ACCOUNT_ID`, `DATA_DATE`, and `TRADE_DATE`, do not rerun Stage E for that runbook day unless a separate recovery procedure explicitly authorizes it.
+
+Review all three local files before operational use. The full July 6 wrapper cycle belongs to the separate 6-4D procedure.
