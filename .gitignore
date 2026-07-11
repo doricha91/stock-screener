@@ -22,3 +22,8 @@ outputs/
 config/notion_settings.json
 config/notion_property_mapping.json
 outputs/dev_backups/
+
+# Machine-local runbook wrapper environment
+ops/runbook_wrappers/_env.local.cmd
+ops/runbook_wrappers/_env.local.cmd.tmp
+ops/runbook_wrappers/_env.local.cmd.bak

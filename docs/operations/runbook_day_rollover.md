@@ -39,4 +39,4 @@ The preview checks for the calculated ID in `runbook_states` and the controller 
 
 Always inspect `runner_result`, `already_exists`, `safe_to_prepare`, `blockers`, and `next_required_action` before proceeding. This preview does not execute a returned action or raw `operator_summary.next_command`.
 
-Until 6-4C exists, the preview does not prepare the next local runbook environment. Calendar holidays and coverage must be reviewed and extended before the configured coverage end.
+6-4C can consume a safe preview to prepare the ignored `_env.local.cmd`. The rollover preview itself remains read-only. Calendar holidays and coverage must be reviewed and extended before the configured coverage end.

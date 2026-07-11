@@ -10,25 +10,25 @@ They are not live trading, broker, API order, or order placement automation. The
 
 ## Location
 
-- Shared settings: `ops\runbook_wrappers\_env.cmd`
+- Shared loader: `ops\runbook_wrappers\_env.cmd`
+- Tracked example: `ops\runbook_wrappers\_env.template.cmd`
+- Machine-local account and dates: `ops\runbook_wrappers\_env.local.cmd`
 - Stage wrappers: `ops\runbook_wrappers\01_*.cmd` through `ops\runbook_wrappers\09_*.cmd`
 
 ## Configure Dates And Account
 
-Edit `ops\runbook_wrappers\_env.cmd` before running a new runbook day:
+Run the 6-4C prep command and review `ops\runbook_wrappers\_env.local.cmd` before a new runbook day. The local file contains:
 
 ```bat
-set REPO_ROOT=D:\python\StockScreener
-set WORKSPACE=D:\n8n\workspace\stock_screener_ops
 set ACCOUNT_ID=paper_pilot_202606
-set DATA_DATE=2026-07-01
-set TRADE_DATE=2026-07-02
-set PAUSE_ON_EXIT=0
+set DATA_DATE=2026-07-02
+set TRADE_DATE=2026-07-06
+set RUNBOOK_DAY_ID=paper_pilot_202606_2026-07-02_2026-07-06
 ```
 
-Until date rollover automation is added, `DATA_DATE` and `TRADE_DATE` are managed manually in `_env.cmd`.
+`_env.local.cmd` is ignored by Git. Do not copy the template over it without running rollover validation. If the local file is missing or invalid, `_env.cmd` stops before Conda or a stage command is run. The wrappers continue to call only `_env.cmd`; the template is never executed automatically.
 
-`_env.cmd` uses `C:\Users\inocha\anaconda3\condabin\conda.bat` to activate `HANTU311_64`. It stops with a non-zero exit code if activation fails, the active environment name is different, or `%CONDA_PREFIX%\python.exe` does not exist. The wrappers use only that environment's `python.exe`; they do not fall back to another Python on `PATH`.
+`_env.cmd` retains `REPO_ROOT`, `WORKSPACE`, `PAUSE_ON_EXIT`, and `CONDA_BAT`. It uses `C:\Users\inocha\anaconda3\condabin\conda.bat` to activate `HANTU311_64` and stops with a non-zero exit code if local loading or activation fails, the active environment name is different, or `%CONDA_PREFIX%\python.exe` does not exist. The wrappers use only that environment's `python.exe`; they do not fall back to another Python on `PATH`.
 
 The wrappers can be started by double-clicking them in Windows Explorer. Running them from CMD or Anaconda Prompt is recommended so the JSON result remains visible. Set `PAUSE_ON_EXIT=1` to pause before a double-clicked window closes; the default `0` closes automatically.
 

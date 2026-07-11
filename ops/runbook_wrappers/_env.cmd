@@ -1,11 +1,33 @@
 @echo off
 set "REPO_ROOT=D:\python\StockScreener"
 set "WORKSPACE=D:\n8n\workspace\stock_screener_ops"
-set "ACCOUNT_ID=paper_pilot_202606"
-set "DATA_DATE=2026-07-01"
-set "TRADE_DATE=2026-07-02"
 set "PAUSE_ON_EXIT=0"
 set "CONDA_BAT=C:\Users\inocha\anaconda3\condabin\conda.bat"
+
+if not exist "%~dp0_env.local.cmd" (
+  echo Required local environment file not found: "%~dp0_env.local.cmd".
+  exit /b 1
+)
+
+call "%~dp0_env.local.cmd"
+set "LOCAL_ENV_EXIT_CODE=%ERRORLEVEL%"
+if not "%LOCAL_ENV_EXIT_CODE%"=="0" (
+  echo Failed to load local runbook environment. Exit code: %LOCAL_ENV_EXIT_CODE%
+  exit /b %LOCAL_ENV_EXIT_CODE%
+)
+
+for %%V in (ACCOUNT_ID DATA_DATE TRADE_DATE RUNBOOK_DAY_ID) do (
+  if not defined %%V (
+    echo Required local variable %%V is not defined.
+    exit /b 1
+  )
+)
+
+set "EXPECTED_RUNBOOK_DAY_ID=%ACCOUNT_ID%_%DATA_DATE%_%TRADE_DATE%"
+if not "%RUNBOOK_DAY_ID%"=="%EXPECTED_RUNBOOK_DAY_ID%" (
+  echo RUNBOOK_DAY_ID does not match ACCOUNT_ID, DATA_DATE, and TRADE_DATE.
+  exit /b 1
+)
 
 if not exist "%CONDA_BAT%" (
   echo Conda activation script not found: "%CONDA_BAT%".
