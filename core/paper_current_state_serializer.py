@@ -24,14 +24,15 @@ def paper_account_state_to_current_state_dict(
     highest_prices = {
         symbol: position.highest_price for symbol, position in state.positions.items()
     }
-    highest_price_meta = {
-        symbol: {
-            "updated_at": normalized_date,
-            "source": "paper_execution_log",
-            "basis": "trade_price",
+    highest_price_meta = {}
+    for symbol in current_symbols:
+        meta = dict(state.highest_price_meta.get(symbol, {}))
+        highest_price_meta[symbol] = {
+            "updated_at": meta.get("updated_at") or normalized_date,
+            "source": meta.get("source") or "paper_execution_log",
+            "basis": meta.get("basis") or "trade_price",
+            **meta,
         }
-        for symbol in current_symbols
-    }
 
     total_position_value = sum(
         position.shares * position.avg_price for position in state.positions.values()

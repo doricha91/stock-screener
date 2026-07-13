@@ -6,8 +6,12 @@ from pathlib import Path
 
 from core.paper_account_state import build_paper_state_from_trades
 from core.paper_current_state_serializer import paper_account_state_to_current_state_dict
+from core.paper_high_watermark import (
+    calculate_paper_high_watermarks,
+    filter_execution_rows_on_or_before,
+)
 from core.paper_safety import assert_paper_path
-from core.paths import PAPER_TEST_DIR, paper_execution_log_path
+from core.paths import PAPER_TEST_DIR, market_db_path, paper_execution_log_path
 from core.target_portfolio_state import CurrentPortfolioState
 
 
@@ -47,15 +51,23 @@ def load_official_paper_state_for_daily_plan(
     log_path: Path | None = None,
     initial_cash: float = 100000.0,
     currency: str = "USD",
+    db_path: Path | None = None,
 ) -> CurrentPortfolioState:
     normalized_plan_date = normalize_paper_trade_date(date_str)
     trade_rows = load_paper_execution_rows_for_state(log_path=log_path)
-    filtered_trade_rows = filter_trade_rows_before_plan_date(trade_rows, normalized_plan_date)
+    filtered_trade_rows = filter_execution_rows_on_or_before(trade_rows, normalized_plan_date)
     paper_state = build_paper_state_from_trades(
         filtered_trade_rows,
         initial_cash=initial_cash,
         currency=currency,
     )
+    high_watermarks = calculate_paper_high_watermarks(
+        paper_state,
+        filtered_trade_rows,
+        normalized_plan_date,
+        db_path or Path(market_db_path()),
+    )
+    paper_state = high_watermarks.decision_state
     serialized = paper_account_state_to_current_state_dict(paper_state, normalized_plan_date)
     return CurrentPortfolioState(
         current_symbols=serialized["current_symbols"],

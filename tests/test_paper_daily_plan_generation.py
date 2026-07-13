@@ -325,7 +325,7 @@ def test_run_paper_daily_plan_explicit_dates_use_trade_date_artifacts_and_data_d
     )
 
     assert report_path == str(account_paths.daily_action_plan_path("20260608"))
-    assert provider_calls["date_str"] == "2026-06-08"
+    assert provider_calls["date_str"] == "2026-06-05"
     assert captured["date_str"] == "2026-06-08"
     assert captured["data_date"] == "2026-06-05"
     assert captured["output_path"] == account_paths.daily_action_plan_path("20260608")

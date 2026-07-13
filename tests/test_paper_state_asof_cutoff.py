@@ -93,25 +93,25 @@ def test_filter_trade_rows_before_plan_date_includes_prior_day_and_excludes_same
     assert [row["trade_id"] for row in filtered_rows] == ["t1", "t2", "t3"]
 
 
-def test_load_official_paper_state_for_daily_plan_uses_trade_date_lt_plan_date(tmp_path: Path):
+def test_load_official_paper_state_for_daily_plan_uses_execution_date_lte_data_date(tmp_path: Path):
     log_path = tmp_path / "paper_execution_log.csv"
     _write_execution_log(log_path, _sample_rows())
 
     state = load_official_paper_state_for_daily_plan("2026-05-12", log_path=log_path)
 
-    assert state.current_symbols == ["CPAY"]
-    assert state.shares == {"CPAY": 10}
+    assert state.current_symbols == ["CF"]
+    assert state.shares == {"CF": 5}
 
 
-def test_load_official_paper_state_for_daily_plan_includes_prior_day_commit_only(tmp_path: Path):
+def test_load_official_paper_state_for_daily_plan_includes_data_date_commit(tmp_path: Path):
     log_path = tmp_path / "paper_execution_log.csv"
     _write_execution_log(log_path, _sample_rows())
 
     state = load_official_paper_state_for_daily_plan("2026-05-13", log_path=log_path)
 
-    assert state.current_symbols == ["CF"]
-    assert state.shares == {"CF": 5}
-    assert state.avg_price == {"CF": 120.0}
+    assert state.current_symbols == ["F"]
+    assert state.shares == {"F": 20}
+    assert state.avg_price == {"F": 15.0}
 
 
 def test_load_official_paper_state_for_daily_plan_accepts_compact_and_dashed_dates(tmp_path: Path):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 from pathlib import Path
 
 from core.paper_account_paths import PaperAccountPaths
@@ -378,3 +379,49 @@ def test_eod_dry_run_and_commit_both_report_no_execution_log_append(tmp_path, mo
     assert "would_append_execution_log: false" in commit_output
     assert "rows_appended: 0" in commit_output
     assert _read_csv(paths.execution_log_path) == before_rows
+
+
+def test_eod_market_db_error_fail_stops_without_writing_snapshots(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    paths = _account_paths(tmp_path / "paper_accounts" / "paper_eod_market_db_fail")
+    _seed_account(
+        paths,
+        plan_items=[],
+        trades=[
+            _trade_row(
+                trade_id="previous-aapl",
+                date="2026-06-14",
+                symbol="AAPL",
+                side="BUY",
+                shares=10,
+                price=100,
+                source="fixture",
+            )
+        ],
+    )
+    broken_db = tmp_path / "broken_market.db"
+    sqlite3.connect(broken_db).close()
+    monkeypatch.setattr(run_paper_eod_update, "market_db_path", lambda: broken_db)
+
+    before_execution = paths.execution_log_path.read_bytes()
+    before_account = paths.account_snapshot_path.read_bytes()
+    before_position = paths.position_snapshot_path.read_bytes()
+
+    for commit in (False, True):
+        exit_code = run_paper_eod_update.run_paper_eod_dry_run(
+            "2026-06-15",
+            allow_empty_journal=True,
+            commit=commit,
+            account_paths=paths,
+        )
+        output = capsys.readouterr().out
+
+        assert exit_code == 1
+        assert "paper_high_watermark_market_db_error" in output
+        assert not paths.current_state_snapshot_path("2026-06-15").exists()
+        assert paths.execution_log_path.read_bytes() == before_execution
+        assert paths.account_snapshot_path.read_bytes() == before_account
+        assert paths.position_snapshot_path.read_bytes() == before_position

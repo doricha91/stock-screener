@@ -19,6 +19,7 @@ class PaperAccountState:
     applied_trade_ids: set[str]
     realized_pnl: float = 0.0
     realized_pnl_by_symbol: dict[str, float] = field(default_factory=dict)
+    highest_price_meta: dict[str, dict] = field(default_factory=dict)
 
 
 def create_initial_paper_state(
@@ -32,6 +33,7 @@ def create_initial_paper_state(
         applied_trade_ids=set(),
         realized_pnl=0.0,
         realized_pnl_by_symbol={},
+        highest_price_meta={},
     )
 
 
@@ -78,6 +80,11 @@ def apply_paper_trade(
     new_applied_trade_ids = set(state.applied_trade_ids)
     new_realized_pnl = float(state.realized_pnl)
     new_realized_pnl_by_symbol = dict(state.realized_pnl_by_symbol)
+    new_highest_price_meta = {
+        symbol: dict(meta)
+        for symbol, meta in state.highest_price_meta.items()
+    }
+    trade_date = str(trade_row.get("date", "")).strip()
 
     if side == "BUY":
         cost = shares * price
@@ -92,6 +99,12 @@ def apply_paper_trade(
                 avg_price=price,
                 highest_price=price,
             )
+            new_highest_price_meta[symbol] = {
+                "updated_at": trade_date,
+                "source": "paper_execution_log",
+                "basis": "trade_price",
+                "position_open_date": trade_date,
+            }
         else:
             new_total_shares = existing.shares + shares
             new_avg_price = ((existing.shares * existing.avg_price) + (shares * price)) / new_total_shares
@@ -101,6 +114,15 @@ def apply_paper_trade(
                 avg_price=new_avg_price,
                 highest_price=max(existing.highest_price, price),
             )
+            if price >= existing.highest_price:
+                previous_meta = dict(new_highest_price_meta.get(symbol, {}))
+                new_highest_price_meta[symbol] = {
+                    **previous_meta,
+                    "updated_at": trade_date,
+                    "source": "paper_execution_log",
+                    "basis": "trade_price",
+                    "position_open_date": previous_meta.get("position_open_date") or trade_date,
+                }
         new_cash -= cost
     else:
         sell_quantity = abs(shares)
@@ -117,6 +139,7 @@ def apply_paper_trade(
         remaining_shares = existing.shares - sell_quantity
         if remaining_shares == 0:
             new_positions.pop(symbol, None)
+            new_highest_price_meta.pop(symbol, None)
         else:
             new_positions[symbol] = PaperPosition(
                 symbol=symbol,
@@ -133,6 +156,7 @@ def apply_paper_trade(
         applied_trade_ids=new_applied_trade_ids,
         realized_pnl=new_realized_pnl,
         realized_pnl_by_symbol=new_realized_pnl_by_symbol,
+        highest_price_meta=new_highest_price_meta,
     )
 
 

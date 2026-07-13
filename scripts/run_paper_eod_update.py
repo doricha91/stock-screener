@@ -23,6 +23,10 @@ from core.paper_position_snapshot import (
 )
 from core.paper_account_state import PaperAccountState, build_paper_state_from_trades
 from core.paper_current_state_storage import save_paper_current_state
+from core.paper_high_watermark import (
+    calculate_paper_high_watermarks,
+    filter_execution_rows_on_or_before,
+)
 from core.paper_daily_plan_candidates import count_daily_plan_execution_candidates
 from core.paper_safety import assert_paper_path
 from core.paper_trade_preview import build_paper_trade_previews, can_resolve_paper_actual_fill
@@ -268,13 +272,28 @@ def build_paper_account_preview_from_log(
     initial_cash: float = 100000.0,
     currency: str = "USD",
     account_paths: PaperAccountPaths | None = None,
+    as_of_date: str | None = None,
+    db_path: Path | None = None,
 ) -> PaperAccountState:
     trade_rows = load_paper_execution_rows(log_path, account_paths=account_paths)
-    return build_paper_state_from_trades(
-        trade_rows,
+    filtered_rows = (
+        filter_execution_rows_on_or_before(trade_rows, as_of_date)
+        if as_of_date is not None
+        else trade_rows
+    )
+    state = build_paper_state_from_trades(
+        filtered_rows,
         initial_cash=initial_cash,
         currency=currency,
     )
+    if as_of_date is None or db_path is None:
+        return state
+    return calculate_paper_high_watermarks(
+        state,
+        filtered_rows,
+        as_of_date,
+        db_path,
+    ).updated_state
 
 
 def run_paper_eod_dry_run(
@@ -392,6 +411,8 @@ def run_paper_eod_dry_run(
             paper_account_state = build_paper_account_preview_from_log(
                 paths["paper_execution_log"],
                 account_paths=account_paths,
+                as_of_date=target_snapshot_date,
+                db_path=Path(market_db_path()),
             )
         except ValueError as exc:
             account_preview_error = str(exc)

@@ -46,6 +46,7 @@ WARNING_HIGHEST_PRICE_INVALID = "WARNING_HIGHEST_PRICE_INVALID"
 WARNING_HIGHEST_PRICE_META_MISSING = "WARNING_HIGHEST_PRICE_META_MISSING"
 WARNING_HIGHEST_PRICE_STALE = "WARNING_HIGHEST_PRICE_STALE"
 WARNING_HIGHEST_PRICE_INCONSISTENT = "WARNING_HIGHEST_PRICE_INCONSISTENT"
+WARNING_HIGHEST_PRICE_MARKET_DATA_UNAVAILABLE = "WARNING_HIGHEST_PRICE_MARKET_DATA_UNAVAILABLE"
 
 SEVERITY_LOW = "LOW"
 SEVERITY_MEDIUM = "MEDIUM"
@@ -213,6 +214,23 @@ def diagnose_highest_price_state(
         })
         notes.append("highest_price_meta missing")
     else:
+        fallback_reason = meta.get("fallback_reason")
+        if fallback_reason in {
+            "market_high_unavailable",
+            "as_of_high_invalid",
+            "as_of_market_row_missing",
+        }:
+            warning_entries.append({
+                "symbol": symbol,
+                "reason": WARNING_HIGHEST_PRICE_MARKET_DATA_UNAVAILABLE,
+                "fallback_reason": fallback_reason,
+                "severity": SEVERITY_HIGH,
+                "note": (
+                    "daily high를 사용할 수 없어 기존 최고가를 유지합니다. "
+                    f"fallback_reason={fallback_reason}"
+                ),
+            })
+            notes.append("market high unavailable; existing highest retained")
         updated_at = _parse_state_date(meta.get("updated_at"))
         if updated_at is None:
             warning_entries.append({
@@ -239,10 +257,17 @@ def diagnose_highest_price_state(
     elif close is not None:
         observed_reference = float(close)
 
+    expected_updated_highest = None
+    if isinstance(meta, dict):
+        try:
+            expected_updated_highest = float(meta.get("updated_highest"))
+        except (TypeError, ValueError):
+            expected_updated_highest = None
     if (
         snapshot_highest is not None
         and observed_reference is not None
         and snapshot_highest < observed_reference
+        and (expected_updated_highest is None or expected_updated_highest < observed_reference)
     ):
         warning_entries.append({
             "symbol": symbol,
@@ -255,7 +280,10 @@ def diagnose_highest_price_state(
         })
         notes.append("highest_price below latest observed value")
 
-    if close is not None:
+    if snapshot_highest is not None and expected_updated_highest is not None:
+        highest_price = float(snapshot_highest)
+        highest_source = "decision_highest"
+    elif close is not None:
         if snapshot_highest is None:
             highest_price = float(close)
             highest_source = "current_only"
@@ -556,11 +584,9 @@ def check_trailing_stop_manual(
     - 반환값: (is_triggered, stop_price)
     """
     # 최고가 갱신
-    new_highest = max(highest_price_so_far, current_price)
-    
     # ATR이 유효하지 않으면 보수적으로 현재가의 2% 사용
     safe_atr = atr if atr > 0 else (current_price * 0.02)
-    stop_price = new_highest - (safe_atr * multiplier)
+    stop_price = highest_price_so_far - (safe_atr * multiplier)
     
     is_triggered = current_price < stop_price
     return is_triggered, stop_price

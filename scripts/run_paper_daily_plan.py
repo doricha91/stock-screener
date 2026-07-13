@@ -16,6 +16,7 @@ from core.paths import (
     paper_config_snapshot_path,
     paper_current_state_snapshot_path,
     paper_daily_action_plan_path,
+    market_db_path,
 )
 
 
@@ -139,11 +140,12 @@ def run_paper_daily_plan(
         if initial_snapshot is not None:
             initial_cash, currency = initial_snapshot
 
+    state_cutoff_date = normalized_data_date or normalized_db_date
     if state_log_path is None:
-        paper_state = load_official_paper_state_for_daily_plan(normalized_db_date)
+        paper_state = load_official_paper_state_for_daily_plan(state_cutoff_date)
     else:
         paper_state = load_official_paper_state_for_daily_plan(
-            normalized_db_date,
+            state_cutoff_date,
             log_path=state_log_path,
             initial_cash=initial_cash,
             currency=currency,
