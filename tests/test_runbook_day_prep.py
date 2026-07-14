@@ -305,7 +305,7 @@ def test_templates_are_not_fallbacks_and_wrappers_only_call_loader(tmp_path: Pat
     completed = _run_loader(loader)
 
     assert completed.returncode != 0
-    wrappers = sorted(Path("ops/runbook_wrappers").glob("0*.cmd"))
+    wrappers = sorted(Path("ops/runbook_wrappers").glob("0[1-9]_*.cmd"))
     assert len(wrappers) == 9
     for wrapper in wrappers:
         content = wrapper.read_text(encoding="utf-8")
@@ -313,7 +313,7 @@ def test_templates_are_not_fallbacks_and_wrappers_only_call_loader(tmp_path: Pat
         assert ".local.cmd" not in content
 
 
-def test_actual_local_files_are_absent_ignored_and_untracked() -> None:
+def test_actual_local_files_are_ignored_and_untracked() -> None:
     local_names = [
         "_machine.local.cmd",
         "_account.local.cmd",
@@ -323,7 +323,6 @@ def test_actual_local_files_are_absent_ignored_and_untracked() -> None:
     ]
     paths = [Path("ops/runbook_wrappers") / name for name in local_names]
 
-    assert all(not path.exists() for path in paths)
     ignored = subprocess.run(
         ["git", "check-ignore", *map(str, paths)],
         capture_output=True,

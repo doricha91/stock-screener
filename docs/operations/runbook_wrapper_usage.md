@@ -14,18 +14,19 @@ They are not live trading, broker, API order, or order placement automation. The
 - Machine example/local: `_machine.template.cmd` / `_machine.local.cmd`
 - Account example/local: `_account.template.cmd` / `_account.local.cmd`
 - Runbook-day example/local: `_runbook_day.template.cmd` / `_runbook_day.local.cmd`
+- Environment preparation wrapper: `ops\runbook_wrappers\00_prepare_next_runbook_day.cmd`
 - Stage wrappers: `ops\runbook_wrappers\01_*.cmd` through `ops\runbook_wrappers\09_*.cmd`
 
 ## Configure Dates And Account
 
-Create and review all three local files before a new runbook day. The account local contains:
+Create and review the machine and account local files before preparing a new runbook day. The account local contains:
 
 ```bat
 set ACCOUNT_ID=paper_pilot_202606
 set ACCOUNT_MODE=PAPER
 ```
 
-The 6-4C prep command updates only the runbook-day local:
+`00_prepare_next_runbook_day.cmd` calls the existing 6-4C prep command and updates only the runbook-day local:
 
 ```bat
 set DATA_DATE=2026-07-02
@@ -33,7 +34,7 @@ set TRADE_DATE=2026-07-06
 set RUNBOOK_DAY_ID=paper_pilot_202606_2026-07-02_2026-07-06
 ```
 
-All local files are ignored by Git. Templates are examples only and are never loaded as fallbacks. If any local file is missing, fails, or contains inconsistent values, `_env.cmd` stops before Conda or a stage command is run. The wrappers continue to call only `_env.cmd`.
+All local files are ignored by Git. Templates are examples only and are never loaded as fallbacks. Wrapper 00 loads only the machine and account locals because it prepares the runbook-day local. Wrappers 01 through 09 continue to call only `_env.cmd`, which requires all three local files.
 
 `_env.cmd` loads machine, account, and runbook-day locals in that order. It requires `ACCOUNT_MODE=PAPER`, validates the runbook ID, checks repository/workspace/Conda paths, activates `CONDA_ENV_NAME`, verifies the active environment, and sets `PYTHON_EXE` from `%CONDA_PREFIX%\python.exe`. It does not fall back to another Python on `PATH`.
 
@@ -41,10 +42,11 @@ The wrappers can be started by double-clicking them in Windows Explorer. Running
 
 ## Execution Order
 
-Run wrappers from `ops\runbook_wrappers\` in numeric order:
+Run wrappers from `ops\runbook_wrappers\` in numeric order. Wrapper 00 is environment preparation, not a Stage:
 
 | Order | Wrapper | Calls |
 | :--- | :--- | :--- |
+| 00 | `00_prepare_next_runbook_day.cmd` | `%PYTHON_EXE% scripts\runbook_day_prep.py` to safely prepare `_runbook_day.local.cmd` from the latest completed runbook day |
 | 01 | `01_stage_a_plan_prep.cmd` | `%PYTHON_EXE% scripts\runbook_stage_runner.py stage-a` |
 | 02 | `02_gate1_execution_input.cmd` | `%PYTHON_EXE% scripts\runbook_gate_checker.py gate1` |
 | 03 | `03_stage_b_execution_commit_sync.cmd` | `%PYTHON_EXE% scripts\runbook_stage_runner.py stage-b` |
@@ -56,6 +58,12 @@ Run wrappers from `ops\runbook_wrappers\` in numeric order:
 | 09 | `09_stage_e_eod_close.cmd` | `%PYTHON_EXE% scripts\runbook_stage_runner.py stage-e` |
 
 `02_gate1_execution_input.cmd` uses `scripts\runbook_gate_checker.py` because Gate 1 is exposed by the existing gate checker CLI. `04_stage_b_verify.cmd` omits `--confirm-paper-test` because the verifier CLI does not accept that argument.
+
+## Starting A New Runbook Day
+
+Run `00_prepare_next_runbook_day.cmd` once when starting a new runbook day. A `PASS` prints the generated `ACCOUNT_ID`, `DATA_DATE`, `TRADE_DATE`, and `RUNBOOK_DAY_ID`; review all four values before separately running `01_stage_a_plan_prep.cmd`. Wrapper 00 never runs wrapper 01 automatically.
+
+If the current runbook day is incomplete or rollover is unsafe, wrapper 00 returns `BLOCKED`. Do not run wrapper 01 after a `BLOCKED` or `FAILED` result. An unchanged safe environment may return `PASS` with `file_changed=false`; this is idempotent and is not an error.
 
 ## Result Meanings
 
