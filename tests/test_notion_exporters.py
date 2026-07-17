@@ -1064,6 +1064,83 @@ def test_manual_review_template_export_dry_run_does_not_write(tmp_path):
     assert client.update_calls == []
 
 
+def test_empty_manual_review_template_export_is_successful_no_op(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_manual_review_template(root, date="2026-06-15", count=0)
+    client = FakeManualReviewTemplateClient()
+
+    summary = export_manual_review_template_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_default",
+        paper_root=root,
+        review_date="2026-06-15",
+        dry_run=True,
+    )
+
+    assert summary["candidate_count"] == 0
+    assert summary["failed_count"] == 0
+    assert summary["would_write"] is False
+    assert client.query_calls == []
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
+def test_manual_review_template_with_only_other_dates_is_not_empty_no_op(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_manual_review_template(root, date="2026-06-12", count=1)
+
+    with pytest.raises(NotionExportError, match="No manual review template rows found for 2026-06-15"):
+        export_manual_review_template_to_notion(
+            client=FakeManualReviewTemplateClient(),
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_default",
+            paper_root=root,
+            review_date="2026-06-15",
+            dry_run=True,
+        )
+
+
+def test_empty_manual_review_template_still_validates_review_date(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_manual_review_template(root, date="2026-06-15", count=0)
+
+    with pytest.raises(NotionExportError, match="Invalid date"):
+        export_manual_review_template_to_notion(
+            client=FakeManualReviewTemplateClient(),
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_default",
+            paper_root=root,
+            review_date="invalid",
+            dry_run=True,
+        )
+
+
+def test_header_only_manual_review_template_with_missing_columns_is_blocked(tmp_path):
+    root = tmp_path / "paper_test"
+    template = root / "reviews" / "paper_manual_review_log_template.csv"
+    _write(template, "review_date,symbol\n")
+    client = FakeManualReviewTemplateClient()
+
+    with pytest.raises(NotionExportError, match="Missing paper manual review log columns"):
+        export_manual_review_template_to_notion(
+            client=client,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_default",
+            paper_root=root,
+            review_date="2026-06-15",
+            dry_run=True,
+        )
+
+    assert client.query_calls == []
+    assert client.create_calls == []
+    assert client.update_calls == []
+
+
 def test_manual_review_template_export_marks_existing_external_key_as_update(tmp_path):
     root = tmp_path / "paper_test"
     _seed_manual_review_template(root, date="2026-06-05")

@@ -39,6 +39,7 @@ from core.notion_mapping import get_mapping_section, resolve_notion_property_nam
 from core.notion_settings import NotionSettings, get_notion_data_source_id
 from core.paper_account_paths import build_paper_account_paths
 from core.paper_daily_plan_candidates import is_daily_plan_execution_candidate
+from core.paper_manual_review_log_validator import validate_manual_review_log_columns
 from core.paths import (
     paper_account_snapshot_path,
     paper_daily_action_plan_path,
@@ -730,8 +731,17 @@ def load_manual_review_template_rows(
     template_path: Path,
     review_date: str,
 ) -> list[dict[str, str]]:
+    try:
+        with template_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            validate_manual_review_log_columns(csv.DictReader(handle).fieldnames)
+    except FileNotFoundError as exc:
+        raise NotionExportError(f"Missing source file: {template_path}") from exc
+    except ValueError as exc:
+        raise NotionExportError(str(exc)) from exc
     rows = _read_csv_rows(template_path)
     normalized_review_date = _normalize_export_date(review_date)
+    if not rows:
+        return []
     filtered = []
     for row in rows:
         row_review_date = str(row.get("review_date") or "").strip()

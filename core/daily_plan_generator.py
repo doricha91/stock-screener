@@ -27,6 +27,7 @@ from core.config_factory import make_config, get_regime_config
 from core.decision_core import compute_candidate_score
 from core.paper_config_snapshot import save_paper_config_snapshot
 from core.paper_config_hash import PAPER_CONFIG_HASH_POLICY, compute_paper_config_hash_from_file
+from core.paper_execution_intent import build_execution_intent
 from core.position_sizing import calculate_entry_shares
 from core.universe_manager import load_universe_snapshot_as_of_quarter
 
@@ -659,6 +660,7 @@ def build_daily_plan_json_payload(
         config_snapshot_path=config_snapshot_path,
         state_snapshot_path=state_snapshot_path,
     )
+    normalized_items = [normalize_daily_plan_item(item) for item in action_items]
     return {
         "schema_version": DAILY_PLAN_JSON_SCHEMA_VERSION,
         "account_id": account_id,
@@ -668,7 +670,8 @@ def build_daily_plan_json_payload(
         "run_mode": run_mode,
         "official_run": bool(official_run),
         "generated_at": generated_at or datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "items": [normalize_daily_plan_item(item) for item in action_items],
+        "items": normalized_items,
+        "execution_intent": build_execution_intent(normalized_items),
         "fingerprints": resolved_fingerprints,
     }
 

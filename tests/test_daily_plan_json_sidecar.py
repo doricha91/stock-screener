@@ -191,6 +191,36 @@ def test_daily_plan_json_sidecar_is_written_from_structured_action_items(monkeyp
             "note": "fixture note",
         }
     ]
+    assert payload["execution_intent"] == {
+        "schema_version": "paper_execution_intent.v1",
+        "action_mode": "EXECUTION",
+        "execution_required": True,
+        "candidate_execution_count": 1,
+        "no_action_reason": None,
+    }
+
+
+def test_daily_plan_json_sidecar_records_no_action_from_final_action_items(monkeypatch, tmp_path: Path):
+    _patch_minimal_daily_plan_dependencies(monkeypatch)
+    monkeypatch.setattr(daily_plan_generator, "build_strategy_entry_action_items", lambda *args, **kwargs: [])
+    output_path = tmp_path / "daily_action_plan_20260520.md"
+
+    daily_plan_generator.generate_daily_plan(
+        date_str="2026-05-20",
+        current_state=_empty_state(),
+        output_path=output_path,
+        account_id="paper_sandbox",
+    )
+
+    payload = json.loads(output_path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert payload["items"] == []
+    assert payload["execution_intent"] == {
+        "schema_version": "paper_execution_intent.v1",
+        "action_mode": "NO_ACTION",
+        "execution_required": False,
+        "candidate_execution_count": 0,
+        "no_action_reason": "no_executable_orders",
+    }
 
 
 def test_daily_plan_json_sidecar_records_explicit_data_and_trade_dates(monkeypatch, tmp_path: Path):

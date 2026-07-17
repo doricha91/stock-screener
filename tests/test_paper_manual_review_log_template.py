@@ -147,6 +147,22 @@ def test_worksheet_question_rows_are_converted_to_template_rows():
     assert summary_data["account_question_count"] == 3
 
 
+def test_no_action_empty_symbol_inputs_create_empty_review_template() -> None:
+    output_rows, summary_data, warnings = build_paper_manual_review_log_template(
+        [],
+        [],
+        source_worksheet_path=Path("outputs/paper_test/reports/paper_symbol_review_worksheet.csv"),
+        review_date="2026-06-15",
+        created_at="2026-06-15T09:00:00",
+    )
+
+    assert output_rows == []
+    assert summary_data["review_template_row_count"] == 0
+    assert summary_data["symbol_count"] == 0
+    assert summary_data["account_question_count"] == 0
+    assert warnings == []
+
+
 def test_review_log_template_limits_questions_to_one_per_symbol_plus_account_rows():
     symbols = [f"SYM{i}" for i in range(1, 9)]
     output_rows, summary_data, _ = build_paper_manual_review_log_template(

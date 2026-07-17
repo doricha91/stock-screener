@@ -26,7 +26,16 @@ from core.notion_settings import (
     get_notion_token,
     load_notion_settings,
 )
+from core.paper_manual_review_log_validator import load_paper_manual_review_log_rows
 from scripts import runbook_state
+from scripts.runbook_no_action import (
+    EvidenceError,
+    load_daily_plan_evidence,
+    load_stage_b_verification_evidence,
+    load_stage_c_summary_evidence,
+    sha256_file,
+    validate_stage_b_no_action_evidence,
+)
 from scripts.runbook_state import RunbookState
 
 
@@ -85,6 +94,15 @@ def check_gate1_readiness(
         return _cli_payload(result, gate_json, gate_txt)
 
     try:
+        _, execution_intent, daily_plan_path = load_daily_plan_evidence(workspace, state)
+        daily_plan_sha256 = sha256_file(daily_plan_path)
+    except EvidenceError as exc:
+        state = runbook_state.block_stage(state, GATE1_ID, exc.reason, {"error": exc.detail})
+        result = create_gate_result(state, "BLOCKED", [], exc.detail)
+        state, gate_json, gate_txt = _write_gate1_result_and_save(workspace, state_path, state, result)
+        return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
+
+    try:
         raw_rows = row_fetcher(state) if row_fetcher else query_manual_execution_rows(state)
         rows = normalize_gate1_rows(raw_rows, state)
     except Exception as exc:
@@ -94,12 +112,52 @@ def check_gate1_readiness(
             "notion_manual_execution_query_failed",
             {"error": str(exc)},
         )
-        runbook_state.save_state(state, state_path)
-        result = create_gate_result(state, "BLOCKED", [], f"Notion manual execution query failed: {exc}")
-        gate_json, gate_txt = write_gate_result(workspace, state, result)
-        return _cli_payload(result, gate_json, gate_txt)
+        result = create_gate_result(
+            state,
+            "BLOCKED",
+            [],
+            f"Notion manual execution query failed: {exc}",
+            execution_intent=execution_intent,
+            daily_plan_sha256=daily_plan_sha256,
+        )
+        state, gate_json, gate_txt = _write_gate1_result_and_save(workspace, state_path, state, result)
+        return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
 
-    runner_result = "PASS" if rows and all(row["ready"] for row in rows) else "WAIT"
+    if execution_intent["action_mode"] == "NO_ACTION":
+        if rows:
+            state = runbook_state.block_stage(
+                state,
+                GATE1_ID,
+                "unexpected_manual_execution_rows_for_no_action",
+                {"manual_execution_row_count": len(rows)},
+            )
+            result = create_gate_result(
+                state,
+                "BLOCKED",
+                rows,
+                "Unexpected Manual Execution rows exist for a no-action Daily Plan.",
+                execution_intent=execution_intent,
+                daily_plan_sha256=daily_plan_sha256,
+            )
+        else:
+            state = runbook_state.complete_stage(state, GATE1_ID)
+            result = create_gate_result(
+                state,
+                "PASS",
+                [],
+                "No execution input is required for this runbook day.",
+                execution_intent=execution_intent,
+                daily_plan_sha256=daily_plan_sha256,
+            )
+        state, gate_json, gate_txt = _write_gate1_result_and_save(workspace, state_path, state, result)
+        return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
+
+    runner_result = (
+        "PASS"
+        if rows
+        and all(row["ready"] for row in rows)
+        else "WAIT"
+    )
     if runner_result == "PASS":
         state = runbook_state.complete_stage(state, GATE1_ID)
         next_poll_time = None
@@ -120,9 +178,11 @@ def check_gate1_readiness(
         rows,
         message,
         next_poll_time=next_poll_time,
+        execution_intent=execution_intent,
+        daily_plan_sha256=daily_plan_sha256,
     )
-    gate_json, gate_txt = write_gate_result(workspace, state, result)
-    return _cli_payload(result, gate_json, gate_txt)
+    state, gate_json, gate_txt = _write_gate1_result_and_save(workspace, state_path, state, result)
+    return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
 
 
 def check_gate2_readiness(
@@ -154,6 +214,14 @@ def check_gate2_readiness(
         return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
 
     try:
+        evidence_context = _gate2_evidence_context(state, workspace)
+    except EvidenceError as exc:
+        state = runbook_state.block_stage(state, GATE2_ID, exc.reason, {"error": exc.detail})
+        result = create_gate2_result(state, "BLOCKED", [], exc.detail)
+        state, gate_json, gate_txt = _write_gate2_result_and_save(workspace, state_path, state, result)
+        return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
+
+    try:
         raw_rows = row_fetcher(state) if row_fetcher else query_manual_review_rows(state)
         rows = normalize_gate2_rows(raw_rows, state)
     except Exception as exc:
@@ -163,7 +231,41 @@ def check_gate2_readiness(
             "notion_manual_review_query_failed",
             {"error": str(exc)},
         )
-        result = create_gate2_result(state, "BLOCKED", [], f"Notion manual review query failed: {exc}")
+        result = create_gate2_result(
+            state,
+            "BLOCKED",
+            [],
+            f"Notion manual review query failed: {exc}",
+            evidence_context=evidence_context,
+        )
+        state, gate_json, gate_txt = _write_gate2_result_and_save(workspace, state_path, state, result)
+        return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
+
+    if evidence_context["action_mode"] == "NO_ACTION":
+        if rows:
+            state = runbook_state.block_stage(
+                state,
+                GATE2_ID,
+                "unexpected_manual_review_rows_for_no_action",
+                {"manual_review_row_count": len(rows)},
+            )
+            result = create_gate2_result(
+                state,
+                "BLOCKED",
+                rows,
+                "Unexpected Manual Review rows exist for a no-action runbook day.",
+                evidence_context=evidence_context,
+            )
+        else:
+            state = runbook_state.complete_step(state, 12, GATE2_ID)
+            state = runbook_state.complete_stage(state, GATE2_ID)
+            result = create_gate2_result(
+                state,
+                "PASS",
+                [],
+                "No Manual Review input is required.",
+                evidence_context=evidence_context,
+            )
         state, gate_json, gate_txt = _write_gate2_result_and_save(workspace, state_path, state, result)
         return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
 
@@ -207,7 +309,14 @@ def check_gate2_readiness(
         )
         message = "Fill Manual Review in Notion."
 
-    result = create_gate2_result(state, runner_result, rows, message, next_poll_time=next_poll_time)
+    result = create_gate2_result(
+        state,
+        runner_result,
+        rows,
+        message,
+        next_poll_time=next_poll_time,
+        evidence_context=evidence_context,
+    )
     state, gate_json, gate_txt = _write_gate2_result_and_save(workspace, state_path, state, result)
     return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
 
@@ -391,12 +500,15 @@ def create_gate_result(
     rows: list[dict[str, Any]],
     message: str,
     next_poll_time: str | None = None,
+    execution_intent: dict[str, Any] | None = None,
+    daily_plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     if runner_result not in ALLOWED_GATE_RESULTS:
         raise ValueError(f"runner_result is not allowed: {runner_result}")
     ready_count = sum(1 for row in rows if row.get("ready"))
     required_count = len(rows)
     missing_count = required_count - ready_count
+    action_mode = execution_intent.get("action_mode") if execution_intent else None
     return {
         "schema_version": GATE_RESULT_SCHEMA_VERSION,
         "runner_result": runner_result,
@@ -411,12 +523,23 @@ def create_gate_result(
         "required_count": required_count,
         "ready_count": ready_count,
         "missing_count": missing_count,
+        "action_mode": action_mode,
+        "execution_required": execution_intent.get("execution_required") if execution_intent else None,
+        "candidate_execution_count": (
+            execution_intent.get("candidate_execution_count") if execution_intent else None
+        ),
+        "manual_execution_row_count": required_count,
+        "no_action_reason": execution_intent.get("no_action_reason") if execution_intent else None,
+        "daily_plan_sha256": daily_plan_sha256,
+        "message": message,
         "rows": rows,
         "summary": {
             "title": "Gate 1 readiness",
             "message": message,
             "next_required_action": (
-                "Run Stage B execution preview."
+                "Run Stage B no-action verification."
+                if runner_result == "PASS" and action_mode == "NO_ACTION"
+                else "Run Stage B execution preview."
                 if runner_result == "PASS"
                 else "Fill Actual Price and set Status=READY in Notion."
             ),
@@ -431,6 +554,7 @@ def create_gate2_result(
     rows: list[dict[str, Any]],
     message: str,
     next_poll_time: str | None = None,
+    evidence_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if runner_result not in ALLOWED_GATE_RESULTS:
         raise ValueError(f"runner_result is not allowed: {runner_result}")
@@ -438,6 +562,16 @@ def create_gate2_result(
     candidate_count = len(rows)
     not_ready_count = sum(1 for row in rows if not row.get("ready") and not row.get("blocked"))
     blocked_count = sum(1 for row in rows if row.get("blocked"))
+    action_mode = (evidence_context or {}).get("action_mode")
+    next_required_action = (
+        "Run Stage D preview."
+        if runner_result == "PASS" and action_mode == "NO_ACTION"
+        else "Run Stage D review import."
+        if runner_result == "PASS"
+        else "Fill Manual Review in Notion."
+        if runner_result == "WAIT"
+        else "Fix Manual Review row or Notion mapping before retry."
+    )
     return {
         "schema_version": GATE2_RESULT_SCHEMA_VERSION,
         "runner_result": runner_result,
@@ -458,30 +592,21 @@ def create_gate2_result(
         "missing_count": candidate_count - ready_count,
         "not_ready_count": not_ready_count,
         "blocked_count": blocked_count,
+        "action_mode": action_mode,
+        "review_required": action_mode != "NO_ACTION" if action_mode else None,
+        "manual_review_row_count": candidate_count,
         "ready_review_page_ids": [row.get("page_id") for row in rows if row.get("ready")],
         "rows": rows,
         "checks": _gate2_checks(rows),
         "summary": {
             "title": "Gate 2 review readiness",
             "message": message,
-            "next_required_action": (
-                "Run Stage D review import."
-                if runner_result == "PASS"
-                else (
-                    "Fill Manual Review in Notion."
-                    if runner_result == "WAIT"
-                    else "Fix Manual Review row or Notion mapping before retry."
-                )
-            ),
+            "next_required_action": next_required_action,
             "next_stage": "D" if runner_result == "PASS" else None,
             "next_poll_time": next_poll_time,
         },
         "next_stage": "D" if runner_result == "PASS" else None,
-        "next_required_action": (
-            "Run Stage D review import."
-            if runner_result == "PASS"
-            else ("Fill Manual Review in Notion." if runner_result == "WAIT" else "Fix Manual Review row or Notion mapping before retry.")
-        ),
+        "next_required_action": next_required_action,
     }
 
 
@@ -522,6 +647,9 @@ def format_gate_result_text(result: dict[str, Any]) -> str:
             f"Account: {context.get('account_id')}",
             f"Data date: {context.get('data_date')}",
             f"Trade date: {context.get('trade_date')}",
+            f"Action mode: {result.get('action_mode') or '-'}",
+            f"Review required: {result.get('review_required') if result.get('review_required') is not None else '-'}",
+            f"Manual review rows: {result.get('manual_review_row_count', result.get('required_count', 0))}",
             (
                 "Rows: "
                 f"{result.get('required_count', 0)} required / "
@@ -563,6 +691,19 @@ def _write_gate2_result_and_save(
     return state, gate_json, gate_txt
 
 
+def _write_gate1_result_and_save(
+    workspace: Path,
+    state_path: Path,
+    state: RunbookState,
+    result: dict[str, Any],
+) -> tuple[RunbookState, Path, Path]:
+    gate_json, gate_txt = write_gate_result(workspace, state, result)
+    state = runbook_state.record_artifact(state, "gate1_readiness_json", str(gate_json), workspace)
+    state = runbook_state.record_artifact(state, "gate1_readiness_md", str(gate_txt), workspace)
+    runbook_state.save_state(state, state_path)
+    return state, gate_json, gate_txt
+
+
 def _cli_payload(result: dict[str, Any], gate_json: Path, gate_txt: Path, state_path: Path | None = None) -> dict[str, Any]:
     paths = get_gate_result_paths(gate_json.parents[2], result["runbook_day_id"], result["gate_id"])
     payload = {
@@ -577,7 +718,20 @@ def _cli_payload(result: dict[str, Any], gate_json: Path, gate_txt: Path, state_
         "latest_gate_result_json": str(paths["latest_json"]),
         "latest_gate_result_txt": str(paths["latest_txt"]),
         "next_required_action": result["summary"]["next_required_action"],
+        "message": result["summary"]["message"],
     }
+    for field_name in (
+        "action_mode",
+        "execution_required",
+        "candidate_execution_count",
+        "manual_execution_row_count",
+        "review_required",
+        "manual_review_row_count",
+        "no_action_reason",
+        "daily_plan_sha256",
+    ):
+        if field_name in result:
+            payload[field_name] = result[field_name]
     if state_path is not None:
         payload["state_path"] = str(state_path)
     if "candidate_count" in result:
@@ -648,6 +802,63 @@ def _gate2_precondition_error(
     if state.last_error and state.last_error.get("stage_id") != GATE2_ID:
         return "active_last_error"
     return None
+
+
+def _gate2_evidence_context(state: RunbookState, workspace: Path) -> dict[str, Any]:
+    _, intent, daily_plan_path = load_daily_plan_evidence(workspace, state)
+    verification, _ = load_stage_b_verification_evidence(workspace, state)
+    stage_c_summary, _ = load_stage_c_summary_evidence(workspace, state)
+    action_mode = intent["action_mode"]
+    stage_c_raw = stage_c_summary.get("raw_payload")
+    if not isinstance(stage_c_raw, dict):
+        raise EvidenceError("stage_c_summary_invalid", "Stage C raw_payload must be an object")
+    if verification.get("action_mode") != action_mode or stage_c_raw.get("action_mode") != action_mode:
+        raise EvidenceError("action_mode_mismatch", "Daily Plan, Stage B, and Stage C action modes differ")
+
+    if action_mode == "EXECUTION":
+        if verification.get("verified_no_action") is not False:
+            raise EvidenceError("stage_b_verification_required", "Execution verification is inconsistent")
+        return {
+            "action_mode": "EXECUTION",
+            "execution_required": True,
+            "candidate_execution_count": intent["candidate_execution_count"],
+            "verified_no_action": False,
+        }
+
+    if (
+        verification.get("verified_no_action") is not True
+        or int(verification.get("committed_row_count") or 0) != 0
+        or int(verification.get("updated_count") or 0) != 0
+        or int(verification.get("failed_count") or 0) != 0
+    ):
+        raise EvidenceError("stage_b_no_action_verification_required", "Stage B no-action verification mismatch")
+    validate_stage_b_no_action_evidence(workspace, state, daily_plan_path=daily_plan_path)
+    if (
+        stage_c_raw.get("verified_no_action") is not True
+        or stage_c_raw.get("candidate_execution_count") != 0
+        or stage_c_raw.get("execution_commit_report_json") is not None
+    ):
+        raise EvidenceError("stage_c_no_action_evidence_required", "Stage C no-action evidence mismatch")
+    template_ref = state.artifacts.get("manual_review_template_csv")
+    if not template_ref:
+        raise EvidenceError("manual_review_template_required", "manual_review_template_csv is not pinned")
+    template_path = _artifact_ref_path(workspace, str(template_ref))
+    try:
+        template_rows = load_paper_manual_review_log_rows(template_path, allowed_root=workspace)
+    except (FileNotFoundError, ValueError) as exc:
+        raise EvidenceError("manual_review_template_invalid", str(exc)) from exc
+    if template_rows:
+        raise EvidenceError(
+            "unexpected_manual_review_template_rows_for_no_action",
+            f"Manual Review template contains {len(template_rows)} data rows",
+        )
+    return {
+        "action_mode": "NO_ACTION",
+        "execution_required": False,
+        "candidate_execution_count": 0,
+        "verified_no_action": True,
+        "daily_plan_sha256": sha256_file(daily_plan_path),
+    }
 
 
 def _gate2_row_missing_reasons(row: dict[str, Any], account_id: str, review_date: str) -> list[str]:

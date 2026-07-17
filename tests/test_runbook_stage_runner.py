@@ -10,11 +10,45 @@ from scripts import runbook_command_registry as registry
 from scripts import runbook_result
 from scripts import runbook_stage_runner
 from scripts import runbook_state
+from core.paper_execution_intent import build_execution_intent
 
 
 ACCOUNT_ID = "paper_A"
 DATA_DATE = "2026-06-12"
 TRADE_DATE = "2026-06-15"
+
+
+def _daily_plan_payload(
+    *,
+    account_id: str = ACCOUNT_ID,
+    items: list[dict] | None = None,
+) -> dict:
+    resolved_items = items if items is not None else [{"symbol": "AAPL", "action": "BUY", "quantity": 2}]
+    return {
+        "schema_version": "paper_daily_plan.v1",
+        "account_id": account_id,
+        "data_date": DATA_DATE,
+        "trade_date": TRADE_DATE,
+        "plan_date": TRADE_DATE,
+        "run_mode": "official",
+        "official_run": True,
+        "generated_at": "2026-06-12T12:00:00Z",
+        "items": resolved_items,
+        "execution_intent": build_execution_intent(resolved_items),
+        "fingerprints": {"generator_version": "paper_daily_plan.v1"},
+    }
+
+
+def _write_daily_plan_for_fake_run(tmp_path: Path, payload: dict) -> str:
+    markdown_path = tmp_path / "generated" / f"daily_action_plan_{TRADE_DATE.replace('-', '')}.md"
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.write_text("# test plan\n", encoding="utf-8")
+    markdown_path.with_suffix(".json").write_text(json.dumps(payload), encoding="utf-8")
+    return f"Official paper daily plan is ready at:\n{markdown_path}\n"
+
+
+def _is_daily_plan_command(argv: list[str]) -> bool:
+    return "plan" in argv and any(str(part).endswith("paper.py") for part in argv)
 
 
 def test_dry_run_stage_a_creates_step_0_to_5_command_results(tmp_path: Path) -> None:
@@ -125,7 +159,11 @@ def test_fake_subprocess_success_marks_results_pass(tmp_path: Path, monkeypatch)
             "executed": True,
             "exit_code": 0,
             "duration_ms": 12,
-            "stdout": '{"ok": true}',
+            "stdout": (
+                _write_daily_plan_for_fake_run(tmp_path, _daily_plan_payload())
+                if _is_daily_plan_command(argv)
+                else '{"ok": true}'
+            ),
             "stderr": "",
         }
 
@@ -194,7 +232,11 @@ def test_command_result_log_is_written(tmp_path: Path, monkeypatch) -> None:
             "executed": True,
             "exit_code": 0,
             "duration_ms": 9,
-            "stdout": "plain stdout",
+            "stdout": (
+                _write_daily_plan_for_fake_run(tmp_path, _daily_plan_payload())
+                if _is_daily_plan_command(argv)
+                else "plain stdout"
+            ),
             "stderr": "plain stderr",
         }
 
@@ -330,7 +372,11 @@ def test_stage_a_preserves_mixed_stdout_json_in_raw_payload(tmp_path: Path, monk
             "executed": True,
             "exit_code": 0,
             "duration_ms": 1,
-            "stdout": 'PAPER NOTION EXPORT\n{"target": "manual_execution_template", "created_count": 4}',
+            "stdout": (
+                _write_daily_plan_for_fake_run(tmp_path, _daily_plan_payload())
+                if _is_daily_plan_command(argv)
+                else 'PAPER NOTION EXPORT\n{"target": "manual_execution_template", "created_count": 4}'
+            ),
             "stderr": "",
         }
 
@@ -363,7 +409,14 @@ def test_real_stage_a_without_confirm_is_blocked(tmp_path: Path, monkeypatch) ->
             "executed": True,
             "exit_code": 0,
             "duration_ms": 1,
-            "stdout": "",
+            "stdout": (
+                _write_daily_plan_for_fake_run(
+                    tmp_path,
+                    _daily_plan_payload(account_id="paper_smoke"),
+                )
+                if _is_daily_plan_command(argv)
+                else ""
+            ),
             "stderr": "",
         }
 
@@ -387,7 +440,14 @@ def test_real_stage_a_with_confirm_and_paper_account_is_allowed(tmp_path: Path, 
             "executed": True,
             "exit_code": 0,
             "duration_ms": 1,
-            "stdout": "",
+            "stdout": (
+                _write_daily_plan_for_fake_run(
+                    tmp_path,
+                    _daily_plan_payload(account_id="paper_smoke"),
+                )
+                if _is_daily_plan_command(argv)
+                else ""
+            ),
             "stderr": "",
         }
 
@@ -434,6 +494,133 @@ def test_real_stage_a_with_confirm_and_non_paper_account_is_blocked(tmp_path: Pa
     assert result["reason"] == "paper_account_required"
     assert result["paper_test_confirmed"] is True
     assert calls == []
+
+
+def test_stage_a_valid_execution_plan_exposes_pinned_intent(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    workspace = tmp_path / "workspace"
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        stdout = (
+            _write_daily_plan_for_fake_run(tmp_path, _daily_plan_payload())
+            if _is_daily_plan_command(argv)
+            else ""
+        )
+        return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+    result = runbook_stage_runner.run_stage_a(
+        workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["action_mode"] == "EXECUTION"
+    assert result["execution_required"] is True
+    assert result["candidate_execution_count"] == 1
+    assert result["no_action_reason"] is None
+    assert result["daily_plan_json"]
+    assert result["daily_plan_json"].startswith(f"artifacts/{result['runbook_day_id']}/stage_a/")
+    assert (workspace / result["daily_plan_json"]).is_file()
+    summary = json.loads(Path(result["stage_summary_json"]).read_text(encoding="utf-8"))
+    assert summary["summary"]["next_required_action"] == (
+        "Fill Manual Execution in Notion, then run Gate 1."
+    )
+    assert len(calls) == 6
+    state = runbook_state.load_state(Path(result["state_path"]))
+    assert state.artifacts["daily_plan_json"] == result["daily_plan_json"]
+
+
+def test_stage_a_valid_no_action_plan_runs_exports_and_exposes_summary(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        stdout = (
+            _write_daily_plan_for_fake_run(tmp_path, _daily_plan_payload(items=[]))
+            if _is_daily_plan_command(argv)
+            else ""
+        )
+        return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+    summary = json.loads(Path(result["stage_summary_json"]).read_text(encoding="utf-8"))
+
+    assert result["runner_result"] == "PASS"
+    assert result["action_mode"] == "NO_ACTION"
+    assert result["execution_required"] is False
+    assert result["candidate_execution_count"] == 0
+    assert result["no_action_reason"] == "no_executable_orders"
+    assert summary["raw_payload"]["action_mode"] == "NO_ACTION"
+    assert summary["raw_payload"]["daily_plan_json"] == result["daily_plan_json"]
+    assert summary["summary"]["next_required_action"] == (
+        "No Manual Execution input is required. "
+        "Run Gate 1 to validate the pinned no-action Daily Plan."
+    )
+    assert len(calls) == 6
+    assert any("--daily-plan" in argv for argv in calls)
+    assert any("--manual-execution-template" in argv for argv in calls)
+
+
+def test_stage_a_malformed_intent_blocks_before_exports(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    payload = _daily_plan_payload(items=[])
+    payload["execution_intent"]["action_mode"] = "EXECUTION"
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        stdout = _write_daily_plan_for_fake_run(tmp_path, payload) if _is_daily_plan_command(argv) else ""
+        return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "daily_plan_execution_intent_invalid"
+    assert len(calls) == 4
+    assert not any("--daily-plan" in argv for argv in calls)
+    assert not any("--manual-execution-template" in argv for argv in calls)
+
+
+def test_stage_a_context_mismatch_blocks_before_exports(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    payload = _daily_plan_payload(account_id="paper_other")
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        stdout = _write_daily_plan_for_fake_run(tmp_path, payload) if _is_daily_plan_command(argv) else ""
+        return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "daily_plan_context_mismatch"
+    assert len(calls) == 4
+
+
+def test_stage_a_missing_daily_plan_evidence_blocks_before_exports(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "daily_plan_json_missing"
+    assert len(calls) == 4
 
 
 def test_cli_real_stage_a_without_confirm_returns_blocked_json(tmp_path: Path) -> None:

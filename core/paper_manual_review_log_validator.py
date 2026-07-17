@@ -53,6 +53,13 @@ ISSUE_COLUMNS = [
 ]
 
 
+def validate_manual_review_log_columns(fieldnames: list[str] | None) -> None:
+    normalized = [str(column or "").replace("\ufeff", "").strip() for column in (fieldnames or [])]
+    missing = [column for column in REQUIRED_MANUAL_REVIEW_LOG_COLUMNS if column not in normalized]
+    if missing:
+        raise ValueError("Missing paper manual review log columns: " + ", ".join(missing))
+
+
 def load_paper_manual_review_log_rows(path: Path, allowed_root: Path | None = None) -> list[dict[str, str]]:
     if allowed_root is None:
         assert_paper_path(path, PAPER_TEST_DIR)
@@ -62,10 +69,7 @@ def load_paper_manual_review_log_rows(path: Path, allowed_root: Path | None = No
         raise FileNotFoundError(f"paper manual review log not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        fieldnames = reader.fieldnames or []
-        missing = [column for column in REQUIRED_MANUAL_REVIEW_LOG_COLUMNS if column not in fieldnames]
-        if missing:
-            raise ValueError("Missing paper manual review log columns: " + ", ".join(missing))
+        validate_manual_review_log_columns(reader.fieldnames)
         return list(reader)
 
 

@@ -203,6 +203,33 @@ def test_side_by_side_summary_values_and_high_priority_symbols_are_shown(tmp_pat
             _cleanup(path)
 
 
+def test_no_action_daily_review_supports_empty_symbol_reports(tmp_path: Path):
+    performance_path = _paper_test_path("paper_performance_summary_empty", tmp_path, ".md")
+    side_path = _paper_test_path("paper_symbol_side_by_side_empty", tmp_path, ".csv")
+    bucket_path = _paper_test_path("paper_symbol_review_buckets_empty", tmp_path, ".csv")
+    worksheet_path = _paper_test_path("paper_symbol_review_worksheet_empty", tmp_path, ".md")
+    try:
+        _write_text(performance_path, _performance_summary_text())
+        _write_csv(side_path, REQUIRED_SIDE_BY_SIDE_COLUMNS, [])
+        _write_csv(bucket_path, REQUIRED_REVIEW_BUCKET_COLUMNS, [])
+        _write_text(worksheet_path, "# Empty worksheet\n")
+        side_rows = load_csv_rows(side_path, REQUIRED_SIDE_BY_SIDE_COLUMNS, "paper_symbol_side_by_side_performance.csv")
+        bucket_rows = load_csv_rows(bucket_path, REQUIRED_REVIEW_BUCKET_COLUMNS, "paper_symbol_review_buckets.csv")
+
+        summary_data, warnings, _ = build_paper_daily_review_summary_data(
+            performance_path, side_rows, bucket_rows, worksheet_path
+        )
+        markdown = render_paper_daily_review_summary(
+            summarize_paper_daily_review_summary(summary_data, warnings)
+        )
+
+        assert "- Symbol count: 0" in markdown
+        assert "## Account Summary" in markdown
+    finally:
+        for path in [performance_path, side_path, bucket_path, worksheet_path]:
+            _cleanup(path)
+
+
 def test_non_actionable_and_limitations_are_included(tmp_path: Path):
     performance_path = _paper_test_path("paper_performance_summary_test", tmp_path, ".md")
     side_path = _paper_test_path("paper_symbol_side_by_side_performance_test", tmp_path, ".csv")

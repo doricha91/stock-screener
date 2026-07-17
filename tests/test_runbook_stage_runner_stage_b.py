@@ -7,6 +7,8 @@ from pathlib import Path
 
 from scripts import runbook_stage_runner
 from scripts import runbook_state
+from scripts.runbook_no_action import sha256_file
+from core.paper_execution_intent import build_execution_intent
 
 
 ACCOUNT_ID = "paper_A"
@@ -18,7 +20,67 @@ def _seed_gate1_pass_state(workspace: Path, account_id: str = ACCOUNT_ID) -> Pat
     state = runbook_state.create_initial_state(account_id, DATA_DATE, TRADE_DATE)
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
+    items = [{"symbol": "AAPL", "action": "BUY", "quantity": 1}]
+    plan_path = workspace / "daily_plan_execution.json"
+    _write_plan(plan_path, account_id, items)
+    state = runbook_state.record_artifact(state, "daily_plan_json", str(plan_path), workspace)
     state_path = runbook_state.get_state_path_for_context(workspace, account_id, DATA_DATE, TRADE_DATE)
+    runbook_state.save_state(state, state_path)
+    return state_path
+
+
+def _write_plan(path: Path, account_id: str, items: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "paper_daily_plan.v1",
+                "account_id": account_id,
+                "data_date": DATA_DATE,
+                "trade_date": TRADE_DATE,
+                "plan_date": TRADE_DATE,
+                "run_mode": "official",
+                "official_run": True,
+                "generated_at": "2026-06-12T12:00:00Z",
+                "items": items,
+                "execution_intent": build_execution_intent(items),
+                "fingerprints": {"generator_version": "paper_daily_plan.v1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _seed_no_action_gate1_pass_state(workspace: Path, *, gate_action_mode: str = "NO_ACTION") -> Path:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.complete_stage(state, "A")
+    state = runbook_state.complete_stage(state, "GATE1")
+    plan_path = workspace / "daily_plan_no_action.json"
+    _write_plan(plan_path, ACCOUNT_ID, [])
+    gate_path = workspace / "gate1_no_action.json"
+    gate_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "runbook_gate_result.v1",
+                "runner_result": "PASS",
+                "gate_id": "GATE1",
+                "frozen_context": {
+                    "account_id": ACCOUNT_ID,
+                    "data_date": DATA_DATE,
+                    "trade_date": TRADE_DATE,
+                },
+                "action_mode": gate_action_mode,
+                "execution_required": gate_action_mode != "NO_ACTION",
+                "candidate_execution_count": 0,
+                "manual_execution_row_count": 0,
+                "daily_plan_sha256": sha256_file(plan_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = runbook_state.record_artifact(state, "daily_plan_json", str(plan_path), workspace)
+    state = runbook_state.record_artifact(state, "gate1_readiness_json", str(gate_path), workspace)
+    state_path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     runbook_state.save_state(state, state_path)
     return state_path
 
@@ -249,6 +311,107 @@ def test_stage_b_success_pins_artifacts_and_completes(tmp_path: Path, monkeypatc
         record.get("command_key") == "execution_commit" and record.get("status") == "PASS"
         for record in state.idempotency_records.values()
     )
+
+
+def test_stage_b_no_action_skips_all_commands_and_completes(tmp_path: Path, monkeypatch) -> None:
+    state_path = _seed_no_action_gate1_pass_state(tmp_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        lambda argv, cwd, timeout_sec=1800: calls.append(argv),
+    )
+
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["action_mode"] == "NO_ACTION"
+    assert result["ledger_write_performed"] is False
+    assert result["notion_write_performed"] is False
+    assert result["execution_commit_report_json"] is None
+    assert result["execution_status_sync_report_json"] is None
+    assert calls == []
+    command_payloads = [json.loads((tmp_path / ref).read_text(encoding="utf-8")) for ref in result["command_results"]]
+    assert [payload["runner_result"] for payload in command_payloads] == ["SKIPPED"] * 4
+    assert all(payload["process"]["executed"] is False for payload in command_payloads)
+    summary = json.loads(Path(result["stage_summary_json"]).read_text(encoding="utf-8"))
+    assert summary["runner_result"] == "PASS"
+    assert summary["counts"]["skipped"] == 4
+
+    state = runbook_state.load_state(state_path)
+    assert state.last_completed_step == 9
+    assert state.last_completed_stage == "B"
+    assert state.stage_status["B"] == "PASS"
+    assert state.current_status == "PASS"
+    assert state.last_error is None
+    assert not state.idempotency_records
+    assert "execution_commit_report_json" not in state.artifacts
+    assert "execution_status_sync_report_json" not in state.artifacts
+    assert "stage_b_no_action_json" in state.artifacts
+    step7_events = [
+        event
+        for event in state.history
+        if event.get("event_type") == "step_completed" and event.get("step_id") == 7
+    ]
+    assert len(step7_events) == 1
+    evidence = json.loads((tmp_path / state.artifacts["stage_b_no_action_json"]).read_text(encoding="utf-8"))
+    assert len(evidence["daily_plan_sha256"]) == 64
+    assert evidence["idempotency_record_created"] is False
+
+
+def test_stage_b_no_action_blocks_gate1_action_mode_mismatch(tmp_path: Path, monkeypatch) -> None:
+    _seed_no_action_gate1_pass_state(tmp_path, gate_action_mode="EXECUTION")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        lambda argv, cwd, timeout_sec=1800: calls.append(argv),
+    )
+
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "no_action_evidence_context_mismatch"
+    assert calls == []
+
+
+def test_stage_b_no_action_blocks_daily_plan_changed_after_gate1(tmp_path: Path, monkeypatch) -> None:
+    state_path = _seed_no_action_gate1_pass_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    plan_path = tmp_path / state.artifacts["daily_plan_json"]
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["generated_at"] = "2026-06-12T13:00:00Z"
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        lambda argv, cwd, timeout_sec=1800: calls.append(argv),
+    )
+
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "no_action_evidence_context_mismatch"
+    assert calls == []
 
 
 def test_stage_b_copies_repo_output_artifacts_into_workspace(tmp_path: Path, monkeypatch) -> None:

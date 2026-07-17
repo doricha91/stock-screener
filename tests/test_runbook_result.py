@@ -173,6 +173,17 @@ def test_stage_summary_runner_result_priority() -> None:
         assert summary["runner_result"] == expected_result
 
 
+def test_all_skipped_stage_summary_is_pass_with_skipped_count() -> None:
+    state = _state()
+    command_results = [_command_result(state, "status", "SKIPPED") for _ in range(4)]
+
+    summary = runbook_result.create_stage_summary(state, "B", command_results)
+
+    assert summary["runner_result"] == "PASS"
+    assert summary["counts"]["skipped"] == 4
+    assert summary["counts"]["pass"] == 0
+
+
 def test_write_stage_summary_writes_timestamped_and_latest_files(tmp_path: Path) -> None:
     state = _state()
     command_results = [_command_result(state, "status", "PASS")]

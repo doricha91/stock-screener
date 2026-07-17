@@ -8,6 +8,7 @@ from pathlib import Path
 
 from scripts import runbook_gate_checker
 from scripts import runbook_state
+from core.paper_execution_intent import build_execution_intent
 
 
 ACCOUNT_ID = "paper_pilot_202606"
@@ -16,6 +17,36 @@ TRADE_DATE = "2026-07-01"
 
 
 def _save_state(tmp_path: Path, state: runbook_state.RunbookState) -> Path:
+    if state.stage_status.get("A") == "PASS" and not state.artifacts.get("daily_plan_json"):
+        items = [
+            {"symbol": symbol, "action": action, "quantity": quantity}
+            for symbol, action, quantity in (
+                ("CCI", "SELL", 84),
+                ("TDY", "BUY", 9),
+                ("PLD", "SELL", 52),
+                ("CMG", "BUY", 207),
+            )
+        ]
+        plan_path = tmp_path / "daily_plan.json"
+        plan_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "paper_daily_plan.v1",
+                    "account_id": state.frozen_context.account_id,
+                    "data_date": state.frozen_context.data_date,
+                    "trade_date": state.frozen_context.trade_date,
+                    "plan_date": state.frozen_context.trade_date,
+                    "run_mode": "official",
+                    "official_run": True,
+                    "generated_at": "2026-06-30T12:00:00Z",
+                    "items": items,
+                    "execution_intent": build_execution_intent(items),
+                    "fingerprints": {"generator_version": "paper_daily_plan.v1"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = runbook_state.record_artifact(state, "daily_plan_json", str(plan_path), tmp_path)
     path = runbook_state.get_state_path_for_context(
         tmp_path,
         ACCOUNT_ID,
@@ -24,6 +55,31 @@ def _save_state(tmp_path: Path, state: runbook_state.RunbookState) -> Path:
     )
     runbook_state.save_state(state, path)
     return path
+
+
+def _save_no_action_state(tmp_path: Path) -> Path:
+    state = _stage_a_pass_state()
+    plan_path = tmp_path / "daily_plan_no_action.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "paper_daily_plan.v1",
+                "account_id": ACCOUNT_ID,
+                "data_date": DATA_DATE,
+                "trade_date": TRADE_DATE,
+                "plan_date": TRADE_DATE,
+                "run_mode": "official",
+                "official_run": True,
+                "generated_at": "2026-06-30T12:00:00Z",
+                "items": [],
+                "execution_intent": build_execution_intent([]),
+                "fingerprints": {"generator_version": "paper_daily_plan.v1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = runbook_state.record_artifact(state, "daily_plan_json", str(plan_path), tmp_path)
+    return _save_state(tmp_path, state)
 
 
 def _stage_a_pass_state() -> runbook_state.RunbookState:
@@ -144,6 +200,17 @@ def test_gate1_waits_when_actual_price_missing(tmp_path: Path) -> None:
     assert payload["rows"][0]["missing"] == ["actual_price"]
 
 
+def test_gate1_execution_waits_when_rows_are_missing(tmp_path: Path) -> None:
+    _save_state(tmp_path, _stage_a_pass_state())
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: []
+    )
+
+    assert result["runner_result"] == "WAIT"
+    assert result["action_mode"] == "EXECUTION"
+
+
 def test_gate1_waits_when_status_is_draft(tmp_path: Path) -> None:
     state = _stage_a_pass_state()
     _save_state(tmp_path, state)
@@ -201,6 +268,110 @@ def test_gate1_blocks_when_notion_query_fails(tmp_path: Path) -> None:
     assert result["runner_result"] == "BLOCKED"
     payload = json.loads(Path(result["gate_result_json"]).read_text(encoding="utf-8"))
     assert "Notion manual execution query failed" in payload["summary"]["message"]
+
+
+def test_gate1_no_action_passes_without_manual_execution_rows(tmp_path: Path) -> None:
+    state_path = _save_no_action_state(tmp_path)
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: [],
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["action_mode"] == "NO_ACTION"
+    assert result["execution_required"] is False
+    assert result["candidate_execution_count"] == 0
+    assert result["manual_execution_row_count"] == 0
+    assert result["message"] == "No execution input is required for this runbook day."
+    loaded = runbook_state.load_state(state_path)
+    assert loaded.stage_status["GATE1"] == "PASS"
+    assert "gate1_readiness_json" in loaded.artifacts
+
+
+def test_gate1_no_action_blocks_unexpected_manual_execution_rows(tmp_path: Path) -> None:
+    _save_no_action_state(tmp_path)
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: [_row("AAPL", "BUY", 1, 100.0)],
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    state = runbook_state.load_state(
+        runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    )
+    assert state.last_error["reason"] == "unexpected_manual_execution_rows_for_no_action"
+
+
+def test_gate1_no_action_blocks_when_notion_query_fails(tmp_path: Path) -> None:
+    _save_no_action_state(tmp_path)
+
+    def fail_query(state: runbook_state.RunbookState) -> list[dict]:
+        raise RuntimeError("query unavailable")
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=fail_query
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    state = runbook_state.load_state(
+        runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    )
+    assert state.last_error["reason"] == "notion_manual_execution_query_failed"
+
+
+def test_gate1_blocks_missing_daily_plan_json(tmp_path: Path) -> None:
+    state = _stage_a_pass_state()
+    path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    runbook_state.save_state(state, path)
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: []
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["message"] == "daily_plan_json is not pinned in runbook state"
+
+
+def test_gate1_blocks_malformed_execution_intent(tmp_path: Path) -> None:
+    state_path = _save_no_action_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    plan_path = tmp_path / state.artifacts["daily_plan_json"]
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["execution_intent"]["action_mode"] = "EXECUTION"
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: []
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    loaded = runbook_state.load_state(state_path)
+    assert loaded.last_error["reason"] == "daily_plan_execution_intent_invalid"
+
+
+def test_gate1_blocks_daily_plan_context_mismatch(tmp_path: Path) -> None:
+    state_path = _save_no_action_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    plan_path = tmp_path / state.artifacts["daily_plan_json"]
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["account_id"] = "paper_other"
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: []
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    loaded = runbook_state.load_state(state_path)
+    assert loaded.last_error["reason"] == "daily_plan_context_mismatch"
 
 
 def test_gate1_query_uses_env_compatible_notion_settings(monkeypatch) -> None:

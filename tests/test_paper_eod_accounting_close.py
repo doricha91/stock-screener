@@ -381,6 +381,77 @@ def test_eod_dry_run_and_commit_both_report_no_execution_log_append(tmp_path, mo
     assert _read_csv(paths.execution_log_path) == before_rows
 
 
+def test_eod_empty_no_action_account_writes_cash_only_snapshots(tmp_path, monkeypatch, capsys):
+    paths = _account_paths(tmp_path / "paper_accounts" / "paper_eod_empty_no_action")
+    _seed_account(paths, plan_items=[], trades=[])
+    monkeypatch.setattr(run_paper_eod_update, "value_paper_account_state", _fake_valuation)
+
+    assert run_paper_eod_update.run_paper_eod_dry_run(
+        "2026-06-15",
+        allow_empty_journal=True,
+        commit=False,
+        account_paths=paths,
+    ) == 0
+    dry_run_output = capsys.readouterr().out
+    assert "execution_candidate_count: 0" in dry_run_output
+    assert "would_write_position_snapshot: true" in dry_run_output
+
+    assert run_paper_eod_update.run_paper_eod_dry_run(
+        "2026-06-15",
+        allow_empty_journal=True,
+        commit=True,
+        account_paths=paths,
+    ) == 0
+    commit_output = capsys.readouterr().out
+
+    assert "rows_appended: 0" in commit_output
+    assert paths.current_state_snapshot_path("2026-06-15").exists()
+    account_rows = _read_csv(paths.account_snapshot_path)
+    assert any(
+        row["snapshot_date"] == "2026-06-15" and row["position_count"] == "0"
+        for row in account_rows
+    )
+    assert _read_csv(paths.position_snapshot_path) == []
+
+
+def test_eod_no_action_account_values_existing_position(tmp_path, monkeypatch, capsys):
+    paths = _account_paths(tmp_path / "paper_accounts" / "paper_eod_held_no_action")
+    _seed_account(
+        paths,
+        plan_items=[],
+        trades=[
+            _trade_row(
+                trade_id="prior-aapl",
+                date="2026-06-14",
+                symbol="AAPL",
+                side="BUY",
+                shares=10,
+                price=100,
+            )
+        ],
+    )
+    monkeypatch.setattr(run_paper_eod_update, "value_paper_account_state", _fake_valuation)
+
+    assert run_paper_eod_update.run_paper_eod_dry_run(
+        "2026-06-15",
+        allow_empty_journal=True,
+        commit=True,
+        account_paths=paths,
+    ) == 0
+    output = capsys.readouterr().out
+
+    assert "execution_candidate_count: 0" in output
+    assert "execution_log_rows_for_date: 0" in output
+    assert "rows_appended: 0" in output
+    position_rows = _read_csv(paths.position_snapshot_path)
+    assert any(
+        row["snapshot_date"] == "2026-06-15"
+        and row["symbol"] == "AAPL"
+        and row["shares"] == "10"
+        for row in position_rows
+    )
+
+
 def test_eod_market_db_error_fail_stops_without_writing_snapshots(
     tmp_path,
     monkeypatch,

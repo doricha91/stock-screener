@@ -19,8 +19,21 @@ from scripts import runbook_command_registry as registry
 from scripts import runbook_gate_checker
 from scripts import runbook_result
 from scripts import runbook_state
+from scripts.runbook_no_action import (
+    EvidenceError,
+    load_daily_plan_evidence,
+    load_gate1_evidence,
+    load_stage_d_no_action_evidence,
+    load_stage_d_no_action_preview,
+    sha256_file,
+    validate_stage_b_no_action_evidence,
+    validate_no_action_through_gate2,
+    write_stage_d_no_action_evidence,
+    write_stage_b_no_action_evidence,
+)
 from scripts.runbook_command_registry import RunbookCommand
 from scripts.runbook_state import RunbookState
+from core.paper_execution_intent import validate_daily_plan_execution_intent
 
 
 STAGE_A_ID = "A"
@@ -318,6 +331,7 @@ def run_stage_a(
     runbook_state.save_state(state, state_path)
 
     command_results: list[dict[str, Any]] = []
+    execution_intent: dict[str, Any] | None = None
     stage_result = "PASS"
     for command in stage_commands:
         command_result, log_text = _run_stage_a_command(
@@ -328,6 +342,19 @@ def run_stage_a(
             dry_run,
             timeout_sec,
         )
+        if command.command_key == "daily_plan" and command_result["runner_result"] == "PASS" and not dry_run:
+            execution_intent, validation_error = _validate_stage_a_daily_plan(
+                command_result,
+                state,
+                workspace,
+            )
+            if validation_error:
+                command_result = _block_stage_a_daily_plan_result(command_result, validation_error)
+            else:
+                command_result["raw_payload"] = {
+                    **command_result.get("raw_payload", {}),
+                    **execution_intent,
+                }
         command_json_path, command_txt_path = runbook_result.write_command_result(
             workspace,
             state,
@@ -352,10 +379,11 @@ def run_stage_a(
 
         if runner_result == "BLOCKED":
             stage_result = "BLOCKED"
+            reason = str(command_result.get("raw_payload", {}).get("reason") or "")
             state = runbook_state.block_stage(
                 state,
                 STAGE_A_ID,
-                f"stage_a_step_blocked:{command.command_key}",
+                reason or f"stage_a_step_blocked:{command.command_key}",
                 {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
             )
         else:
@@ -373,17 +401,36 @@ def run_stage_a(
         state = runbook_state.complete_stage(state, STAGE_A_ID)
         runbook_state.save_state(state, state_path)
 
+    daily_plan_json_ref = state.artifacts.get("daily_plan_json")
+    stage_payload = {
+        "action_mode": execution_intent.get("action_mode") if execution_intent else None,
+        "execution_required": execution_intent.get("execution_required") if execution_intent else None,
+        "candidate_execution_count": (
+            execution_intent.get("candidate_execution_count") if execution_intent else None
+        ),
+        "no_action_reason": execution_intent.get("no_action_reason") if execution_intent else None,
+        "daily_plan_json": daily_plan_json_ref,
+    }
+    if stage_result == "PASS" and execution_intent:
+        next_required_action = (
+            "No Manual Execution input is required. "
+            "Run Gate 1 to validate the pinned no-action Daily Plan."
+            if execution_intent["action_mode"] == "NO_ACTION"
+            else "Fill Manual Execution in Notion, then run Gate 1."
+        )
+    elif stage_result == "PASS":
+        next_required_action = "Wait for Step 6 manual execution input."
+    else:
+        next_required_action = "Inspect failed Stage A command result before retry."
+
     stage_summary = runbook_result.create_stage_summary(
         state,
         STAGE_A_ID,
         command_results,
-        next_required_action=(
-            "Wait for Step 6 manual execution input."
-            if stage_result == "PASS"
-            else "Inspect failed Stage A command result before retry."
-        ),
+        next_required_action=next_required_action,
         next_stage="GATE1" if stage_result == "PASS" else None,
     )
+    stage_summary["raw_payload"] = stage_payload
     stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(
         workspace,
         state,
@@ -396,7 +443,7 @@ def run_stage_a(
         timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
     )
 
-    return {
+    result_payload = {
         "runner_result": stage_summary["runner_result"],
         "stage_id": STAGE_A_ID,
         "runbook_day_id": state.runbook_day_id,
@@ -412,7 +459,11 @@ def run_stage_a(
         ],
         "paper_test_confirmed": confirm_paper_test,
         "dry_run": dry_run,
+        **stage_payload,
     }
+    if stage_result != "PASS" and state.last_error:
+        result_payload["reason"] = state.last_error.get("reason")
+    return result_payload
 
 
 def run_stage_b(
@@ -462,6 +513,46 @@ def run_stage_b(
             "runbook_day_id": state.runbook_day_id,
             "state_path": str(state_path),
         }
+    try:
+        _, execution_intent, daily_plan_path = load_daily_plan_evidence(workspace, state)
+    except EvidenceError as exc:
+        state = runbook_state.block_stage(state, STAGE_B_ID, exc.reason, {"error": exc.detail})
+        runbook_state.save_state(state, state_path)
+        return {
+            **_blocked_stage_b_payload(exc.reason, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+    if execution_intent["action_mode"] == "NO_ACTION":
+        try:
+            gate1_payload, gate1_path = load_gate1_evidence(workspace, state)
+            _validate_stage_b_no_action_gate(state, gate1_payload, daily_plan_path)
+            if any(
+                record.get("command_key") == "execution_commit"
+                for record in state.idempotency_records.values()
+            ):
+                raise EvidenceError(
+                    "unexpected_execution_idempotency_for_no_action",
+                    "Execution commit idempotency already exists for a no-action day.",
+                )
+        except EvidenceError as exc:
+            state = runbook_state.block_stage(state, STAGE_B_ID, exc.reason, {"error": exc.detail})
+            runbook_state.save_state(state, state_path)
+            return {
+                **_blocked_stage_b_payload(exc.reason, dry_run, confirm_paper_test),
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+            }
+        return _run_stage_b_no_action(
+            workspace=workspace,
+            state_path=state_path,
+            state=state,
+            daily_plan_path=daily_plan_path,
+            gate1_path=gate1_path,
+            dry_run=dry_run,
+            confirm_paper_test=confirm_paper_test,
+            commands=commands,
+        )
     runbook_state.save_state(state, state_path)
 
     command_by_key = {command.command_key: command for command in get_stage_b_commands(commands)}
@@ -634,6 +725,8 @@ def run_stage_b(
         next_stage="GATE2" if stage_result == "PASS" else None,
     )
     stage_summary["raw_payload"] = {
+        "action_mode": "EXECUTION",
+        "execution_required": True,
         "execution_preview_json": state.artifacts.get("execution_preview_json"),
         "execution_reconciliation_preview_json": state.artifacts.get("execution_reconciliation_preview_json"),
         "execution_commit_report_json": state.artifacts.get("execution_commit_report_json"),
@@ -666,6 +759,8 @@ def run_stage_b(
         "rendered_commands": rendered_commands,
         "paper_test_confirmed": confirm_paper_test,
         "dry_run": dry_run,
+        "action_mode": "EXECUTION",
+        "execution_required": True,
     }
 
 
@@ -698,13 +793,19 @@ def run_stage_c(
     except ValueError as exc:
         return _blocked_stage_c_payload(str(exc), dry_run, confirm_paper_test)
 
-    precondition_error = _stage_c_precondition_error(state, workspace)
+    precondition_error, evidence_context = _stage_c_precondition(state, workspace)
     if precondition_error:
         return {
             **_blocked_stage_c_payload(precondition_error, dry_run, confirm_paper_test),
             "runbook_day_id": state.runbook_day_id,
             "state_path": str(state_path),
         }
+    assert evidence_context is not None
+    pass_next_action = (
+        "No Manual Review input is required. Run Gate 2 to validate the pinned no-action review state."
+        if evidence_context["action_mode"] == "NO_ACTION"
+        else "Fill Manual Review in Notion, then run Gate 2."
+    )
 
     review_commands = get_stage_c_commands(commands)
     command_results: list[dict[str, Any]] = []
@@ -802,7 +903,7 @@ def run_stage_c(
         STAGE_C_ID,
         command_results,
         next_required_action=(
-            "Fill Manual Review in Notion, then run Gate 2."
+            pass_next_action
             if stage_result == "PASS"
             else "Inspect Stage C review prep command result before retry."
         ),
@@ -814,6 +915,7 @@ def run_stage_c(
         "manual_review_template_md": state.artifacts.get("manual_review_template_md"),
         "notion_review_template_report_json": state.artifacts.get("notion_review_template_report_json"),
         "notion_review_template_report_md": state.artifacts.get("notion_review_template_report_md"),
+        **evidence_context,
         "next_required_action": stage_summary["summary"].get("next_required_action"),
     }
     if stage_result == "PASS":
@@ -823,7 +925,7 @@ def run_stage_c(
             state,
             STAGE_C_ID,
             command_results,
-            next_required_action="Fill Manual Review in Notion, then run Gate 2.",
+            next_required_action=pass_next_action,
             next_stage="GATE2",
         )
         stage_summary["raw_payload"] = {
@@ -832,9 +934,13 @@ def run_stage_c(
             "manual_review_template_md": state.artifacts.get("manual_review_template_md"),
             "notion_review_template_report_json": state.artifacts.get("notion_review_template_report_json"),
             "notion_review_template_report_md": state.artifacts.get("notion_review_template_report_md"),
+            **evidence_context,
             "next_required_action": stage_summary["summary"].get("next_required_action"),
         }
     stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
+    state = runbook_state.record_artifact(state, "stage_c_summary_json", str(stage_summary_json), workspace)
+    state = runbook_state.record_artifact(state, "stage_c_summary_txt", str(stage_summary_txt), workspace)
+    runbook_state.save_state(state, state_path)
     stage_summary_paths = runbook_result.get_stage_summary_paths(
         workspace,
         state.runbook_day_id,
@@ -859,6 +965,7 @@ def run_stage_c(
         "rendered_commands": rendered_commands,
         "paper_test_confirmed": confirm_paper_test,
         "dry_run": dry_run,
+        **evidence_context,
         "next_required_action": stage_summary["summary"].get("next_required_action"),
     }
 
@@ -938,6 +1045,25 @@ def run_stage_d_preview(
                 else "Fix runbook state before retrying Stage D preview."
             ),
         }
+
+    try:
+        no_action_context = _stage_d_action_context(workspace, state)
+    except EvidenceError as exc:
+        return {
+            **_blocked_stage_d_preview_payload(exc.reason, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+    if no_action_context["action_mode"] == "NO_ACTION":
+        return _run_stage_d_no_action_preview(
+            workspace,
+            state_path,
+            state,
+            confirm_paper_test=confirm_paper_test,
+            dry_run=dry_run,
+            commands=commands,
+            evidence_context=no_action_context,
+        )
 
     preview_commands = get_stage_d_preview_commands(commands)
     command_results: list[dict[str, Any]] = []
@@ -1104,9 +1230,23 @@ def run_stage_d_append(
     except ValueError as exc:
         return _blocked_stage_d_append_payload(str(exc), dry_run, confirm_paper_test)
 
-    precondition_error = _stage_d_append_precondition_error(state, workspace)
+    try:
+        no_action_context = _stage_d_action_context(workspace, state)
+    except EvidenceError as exc:
+        precondition_error = (
+            "no_action_evidence_mismatch"
+            if exc.reason == "daily_plan_hash_mismatch" and state.artifacts.get("stage_b_no_action_json")
+            else exc.reason
+        )
+        no_action_context = None
+    else:
+        precondition_error = (
+            _stage_d_preview_precondition_error(state, workspace)
+            if no_action_context["action_mode"] == "NO_ACTION"
+            else _stage_d_append_precondition_error(state, workspace)
+        )
     if precondition_error:
-        return {
+        blocked_payload = {
             **_blocked_stage_d_append_payload(precondition_error, dry_run, confirm_paper_test),
             "runbook_day_id": state.runbook_day_id,
             "state_path": str(state_path),
@@ -1116,6 +1256,29 @@ def run_stage_d_append(
                 else "Fix runbook state before retrying Stage D append/sync."
             ),
         }
+        if state.artifacts.get("stage_b_no_action_json"):
+            blocked_payload.update({"action_mode": "NO_ACTION", "verified_no_action": False})
+        return blocked_payload
+    if no_action_context and no_action_context["action_mode"] == "NO_ACTION":
+        try:
+            return _run_stage_d_no_action_append(
+                workspace,
+                state_path,
+                state,
+                confirm_paper_test=confirm_paper_test,
+                dry_run=dry_run,
+                commands=commands,
+                evidence_context=no_action_context,
+            )
+        except EvidenceError as exc:
+            return {
+                **_blocked_stage_d_append_payload(exc.reason, dry_run, confirm_paper_test),
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+                "action_mode": "NO_ACTION",
+                "verified_no_action": False,
+                "next_required_action": "Repair or rerun Stage D preview before retrying append/sync.",
+            }
 
     append_commands = get_stage_d_append_commands(commands)
     command_by_key = {command.command_key: command for command in append_commands}
@@ -1317,6 +1480,223 @@ def run_stage_d_append(
     }
 
 
+def _run_stage_d_no_action_preview(
+    workspace: Path,
+    state_path: Path,
+    state: RunbookState,
+    *,
+    confirm_paper_test: bool,
+    dry_run: bool,
+    commands: Sequence[RunbookCommand] | None,
+    evidence_context: dict[str, Any],
+) -> dict[str, Any]:
+    unexpected = _unexpected_no_action_review_state(state)
+    if unexpected:
+        return {
+            **_blocked_stage_d_preview_payload(unexpected, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+    if state.artifacts.get("stage_d_no_action_preview_json"):
+        return {
+            **_blocked_stage_d_preview_payload("stage_d_preview_already_complete", dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+    command = get_stage_d_preview_commands(commands)[0]
+    evidence_payload = {
+        **evidence_context,
+        "candidate_count": 0,
+        "review_preview_executed": False,
+        "review_log_write_performed": False,
+        "notion_write_performed": False,
+    }
+    evidence_json, evidence_md = write_stage_d_no_action_evidence(
+        workspace,
+        state,
+        schema_version="stage_d_no_action_preview.v1",
+        payload=evidence_payload,
+    )
+    artifact_refs = {
+        "stage_d_no_action_preview_json": str(evidence_json),
+        "stage_d_no_action_preview_md": str(evidence_md),
+    }
+    result = runbook_result.create_command_result(
+        state,
+        command,
+        "SKIPPED",
+        "No review preview is required for a verified no-action day.",
+        artifact_refs=artifact_refs,
+        raw_payload={
+            "action_mode": "NO_ACTION",
+            "verified_no_action": True,
+            "candidate_count": 0,
+            "review_preview_executed": False,
+        },
+        process={"executed": False, "exit_code": None, "duration_ms": None},
+        workspace=workspace,
+    )
+    result_json, _ = _write_command_result_and_log(workspace, state, command, result, "")
+    result = json.loads(result_json.read_text(encoding="utf-8"))
+    state = runbook_state.complete_step(state, 13, STAGE_D_ID, artifact_refs, workspace)
+    state = replace(state, current_status="PASS", last_error=None)
+    runbook_state.save_state(state, state_path)
+    next_action = "No review preview is required. Run Stage D append/sync to record the verified no-action completion."
+    summary = runbook_result.create_stage_summary(
+        state, STAGE_D_PREVIEW_ID, [result], next_required_action=next_action, next_stage="D_APPEND"
+    )
+    summary["canonical_stage_id"] = STAGE_D_ID
+    summary["raw_payload"] = {**evidence_payload, **artifact_refs, "next_required_action": next_action}
+    summary_json, summary_txt = runbook_result.write_stage_summary(workspace, state, summary)
+    paths = runbook_result.get_stage_summary_paths(
+        workspace, state.runbook_day_id, STAGE_D_PREVIEW_ID, timestamp=summary_json.name.rsplit("_", 1)[0]
+    )
+    return {
+        "runner_result": "PASS",
+        "stage_id": STAGE_D_PREVIEW_ID,
+        "canonical_stage_id": STAGE_D_ID,
+        "runbook_day_id": state.runbook_day_id,
+        "state_path": str(state_path),
+        "stage_summary_json": str(summary_json),
+        "stage_summary_txt": str(summary_txt),
+        "latest_stage_summary_json": str(paths["latest_json"]),
+        "latest_stage_summary_txt": str(paths["latest_txt"]),
+        "command_results": [result["outputs"]["json_ref"]],
+        "rendered_commands": [{"command_key": command.command_key, "argv": []}],
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
+        **evidence_payload,
+        **artifact_refs,
+        "review_preview_skipped": True,
+        "next_required_action": next_action,
+    }
+
+
+def _run_stage_d_no_action_append(
+    workspace: Path,
+    state_path: Path,
+    state: RunbookState,
+    *,
+    confirm_paper_test: bool,
+    dry_run: bool,
+    commands: Sequence[RunbookCommand] | None,
+    evidence_context: dict[str, Any],
+) -> dict[str, Any]:
+    if state.stage_status.get(STAGE_D_ID) == "PASS":
+        return {
+            **_blocked_stage_d_append_payload("stage_d_already_pass", dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+    unexpected = _unexpected_no_action_review_state(state)
+    if unexpected:
+        return {
+            **_blocked_stage_d_append_payload(unexpected, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+    preview_payload, preview_path = load_stage_d_no_action_preview(workspace, state)
+    if preview_payload.get("daily_plan_sha256") != evidence_context["daily_plan_sha256"]:
+        return {
+            **_blocked_stage_d_append_payload("no_action_evidence_mismatch", dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+        }
+    command_results: list[dict[str, Any]] = []
+    rendered_commands: list[dict[str, Any]] = []
+    for command in get_stage_d_append_commands(commands):
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "SKIPPED",
+            "Review write skipped for a verified no-action day.",
+            raw_payload={
+                "action_mode": "NO_ACTION",
+                "skip_reason": "no_review_candidates",
+                "review_log_write_performed": False,
+                "notion_write_performed": False,
+            },
+            process={"executed": False, "exit_code": None, "duration_ms": None},
+            workspace=workspace,
+        )
+        result_json, _ = _write_command_result_and_log(workspace, state, command, result, "")
+        result = json.loads(result_json.read_text(encoding="utf-8"))
+        command_results.append(result)
+        rendered_commands.append({"command_key": command.command_key, "argv": []})
+        state = runbook_state.complete_step(state, command.step_id, STAGE_D_ID, {}, workspace)
+    final_payload = {
+        **evidence_context,
+        "stage_d_no_action_preview_json": str(state.artifacts.get("stage_d_no_action_preview_json") or preview_path),
+        "candidate_count": 0,
+        "review_preview_executed": False,
+        "review_append_executed": False,
+        "review_sync_executed": False,
+        "appended_count": 0,
+        "updated_count": 0,
+        "failed_count": 0,
+        "review_log_write_performed": False,
+        "notion_write_performed": False,
+        "idempotency_created": False,
+    }
+    evidence_json, evidence_md = write_stage_d_no_action_evidence(
+        workspace, state, schema_version="stage_d_no_action.v1", payload=final_payload
+    )
+    state = runbook_state.record_artifact(state, "stage_d_no_action_json", str(evidence_json), workspace)
+    state = runbook_state.record_artifact(state, "stage_d_no_action_md", str(evidence_md), workspace)
+    state = runbook_state.complete_stage(state, STAGE_D_ID)
+    runbook_state.save_state(state, state_path)
+    next_action = "Run Stage E EOD dry-run/commit/final status."
+    summary = runbook_result.create_stage_summary(
+        state, STAGE_D_ID, command_results, next_required_action=next_action, next_stage="E"
+    )
+    summary["raw_payload"] = {
+        **final_payload,
+        "stage_d_no_action_json": state.artifacts["stage_d_no_action_json"],
+        "stage_d_no_action_md": state.artifacts["stage_d_no_action_md"],
+        "review_preview_skipped": True,
+        "review_append_skipped": True,
+        "review_sync_skipped": True,
+        "next_required_action": next_action,
+    }
+    summary_json, summary_txt = runbook_result.write_stage_summary(workspace, state, summary)
+    paths = runbook_result.get_stage_summary_paths(
+        workspace, state.runbook_day_id, STAGE_D_ID, timestamp=summary_json.name.rsplit("_", 1)[0]
+    )
+    return {
+        "runner_result": "PASS",
+        "stage_id": STAGE_D_ID,
+        "canonical_stage_id": STAGE_D_ID,
+        "runbook_day_id": state.runbook_day_id,
+        "state_path": str(state_path),
+        "stage_summary_json": str(summary_json),
+        "stage_summary_txt": str(summary_txt),
+        "latest_stage_summary_json": str(paths["latest_json"]),
+        "latest_stage_summary_txt": str(paths["latest_txt"]),
+        "command_results": [item["outputs"]["json_ref"] for item in command_results],
+        "rendered_commands": rendered_commands,
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
+        **summary["raw_payload"],
+        "verified_no_action": True,
+    }
+
+
+def _unexpected_no_action_review_state(state: RunbookState) -> str | None:
+    for key in ("review_preview_json", "review_append_report_json", "review_status_sync_report_json"):
+        if state.artifacts.get(key):
+            return "unexpected_review_artifact_for_no_action"
+    for record in state.idempotency_records.values():
+        if record.get("command_key") == "review_append" and record.get("status") in {"RUNNING", "PASS"}:
+            return "unexpected_review_idempotency_for_no_action"
+    return None
+
+
+def _stage_d_action_context(workspace: Path, state: RunbookState) -> dict[str, Any]:
+    if not state.artifacts.get("daily_plan_json"):
+        return {"action_mode": "EXECUTION", "legacy_daily_plan_evidence_missing": True}
+    return validate_no_action_through_gate2(workspace, state)
+
+
 def run_stage_e(
     workspace: Path,
     account_id: str,
@@ -1346,12 +1726,21 @@ def run_stage_e(
     except ValueError as exc:
         return _blocked_stage_e_payload(str(exc), dry_run, confirm_paper_test)
 
-    precondition_error = _stage_e_precondition_error(state, workspace)
+    try:
+        action_context = _stage_d_action_context(workspace, state)
+        precondition_error = _stage_e_precondition_error(state, workspace, action_context)
+    except EvidenceError as exc:
+        action_context = {
+            "action_mode": "NO_ACTION" if state.artifacts.get("stage_b_no_action_json") else "EXECUTION",
+            "verified_no_action": False,
+        }
+        precondition_error = exc.reason
     if precondition_error:
         return {
             **_blocked_stage_e_payload(precondition_error, dry_run, confirm_paper_test),
             "runbook_day_id": state.runbook_day_id,
             "state_path": str(state_path),
+            **action_context,
             "next_required_action": (
                 "Run Stage D append/sync first."
                 if precondition_error == "stage_d_required"
@@ -1558,6 +1947,7 @@ def run_stage_e(
         "eod_commit_report_json": state.artifacts.get("eod_commit_report_json"),
         "final_status_report_json": state.artifacts.get("final_status_report_json"),
         "next_required_action": stage_summary["summary"].get("next_required_action"),
+        **_stage_e_action_payload(action_context, stage_result),
     }
     stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
     stage_summary_paths = runbook_result.get_stage_summary_paths(
@@ -1588,6 +1978,7 @@ def run_stage_e(
         "eod_commit_report_json": state.artifacts.get("eod_commit_report_json"),
         "final_status_report_json": state.artifacts.get("final_status_report_json"),
         "next_required_action": stage_summary["summary"].get("next_required_action"),
+        **_stage_e_action_payload(action_context, stage_result),
     }
 
 
@@ -1656,6 +2047,145 @@ def _blocked_stage_e_payload(reason: str, dry_run: bool, confirm_paper_test: boo
     }
 
 
+def _validate_stage_b_no_action_gate(
+    state: RunbookState,
+    payload: dict[str, Any],
+    daily_plan_path: Path,
+) -> None:
+    expected_context = {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    if payload.get("schema_version") != "runbook_gate_result.v1":
+        raise EvidenceError("no_action_evidence_context_mismatch", "Gate 1 schema is invalid")
+    if payload.get("runner_result") != "PASS" or payload.get("gate_id") != "GATE1":
+        raise EvidenceError("no_action_evidence_context_mismatch", "Gate 1 is not PASS")
+    if payload.get("frozen_context") != expected_context:
+        raise EvidenceError("no_action_evidence_context_mismatch", "Gate 1 frozen context mismatch")
+    expected_fields = {
+        "action_mode": "NO_ACTION",
+        "execution_required": False,
+        "candidate_execution_count": 0,
+        "manual_execution_row_count": 0,
+        "daily_plan_sha256": sha256_file(daily_plan_path),
+    }
+    for field_name, expected_value in expected_fields.items():
+        if payload.get(field_name) != expected_value:
+            raise EvidenceError(
+                "no_action_evidence_context_mismatch",
+                f"Gate 1 {field_name} mismatch",
+            )
+
+
+def _run_stage_b_no_action(
+    *,
+    workspace: Path,
+    state_path: Path,
+    state: RunbookState,
+    daily_plan_path: Path,
+    gate1_path: Path,
+    dry_run: bool,
+    confirm_paper_test: bool,
+    commands: Sequence[RunbookCommand] | None,
+) -> dict[str, Any]:
+    command_by_key = {command.command_key: command for command in get_stage_b_commands(commands)}
+    sequence = [
+        command_by_key["execution_preview"],
+        _execution_reconciliation_preview_command(),
+        command_by_key["execution_commit"],
+        command_by_key["sync_execution_status"],
+    ]
+    state = runbook_state.start_stage(state, STAGE_B_ID)
+    runbook_state.save_state(state, state_path)
+    command_results: list[dict[str, Any]] = []
+    completed_steps: set[int] = set()
+    for command in sequence:
+        command_result = runbook_result.create_command_result(
+            state,
+            command,
+            "SKIPPED",
+            "Canonical no-action evidence requires no execution command.",
+            raw_payload={
+                "action_mode": "NO_ACTION",
+                "skip_reason": "no_executable_orders",
+                "ledger_write_performed": False,
+                "notion_write_performed": False,
+            },
+            process={"executed": False, "exit_code": None, "duration_ms": None},
+            workspace=workspace,
+        )
+        command_json_path, _ = _write_command_result_and_log(
+            workspace,
+            state,
+            command,
+            command_result,
+            "",
+        )
+        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+        command_results.append(command_result)
+        if command.step_id not in completed_steps:
+            state = runbook_state.complete_step(state, command.step_id, STAGE_B_ID)
+            completed_steps.add(command.step_id)
+            runbook_state.save_state(state, state_path)
+
+    _, no_action_json, no_action_md = write_stage_b_no_action_evidence(
+        workspace,
+        state,
+        daily_plan_path=daily_plan_path,
+        gate1_path=gate1_path,
+    )
+    state = runbook_state.record_artifact(state, "stage_b_no_action_json", str(no_action_json), workspace)
+    state = runbook_state.record_artifact(state, "stage_b_no_action_md", str(no_action_md), workspace)
+    state = runbook_state.complete_stage(state, STAGE_B_ID)
+    runbook_state.save_state(state, state_path)
+
+    stage_payload = {
+        "action_mode": "NO_ACTION",
+        "execution_required": False,
+        "candidate_execution_count": 0,
+        "ledger_write_performed": False,
+        "notion_write_performed": False,
+        "stage_b_no_action_json": state.artifacts.get("stage_b_no_action_json"),
+        "execution_commit_report_json": None,
+        "execution_status_sync_report_json": None,
+    }
+    stage_summary = runbook_result.create_stage_summary(
+        state,
+        STAGE_B_ID,
+        command_results,
+        next_required_action="Proceed to Stage B Verify, then Stage C review prep.",
+        next_stage="GATE2",
+    )
+    stage_summary["raw_payload"] = stage_payload
+    stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
+    stage_summary_paths = runbook_result.get_stage_summary_paths(
+        workspace,
+        state.runbook_day_id,
+        STAGE_B_ID,
+        timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
+    )
+    return {
+        "runner_result": stage_summary["runner_result"],
+        "stage_id": STAGE_B_ID,
+        "runbook_day_id": state.runbook_day_id,
+        "state_path": str(state_path),
+        "stage_summary_json": str(stage_summary_json),
+        "stage_summary_txt": str(stage_summary_txt),
+        "latest_stage_summary_json": str(stage_summary_paths["latest_json"]),
+        "latest_stage_summary_txt": str(stage_summary_paths["latest_txt"]),
+        "command_results": [
+            step["result_json_ref"]
+            for step in stage_summary["steps"]
+            if step.get("result_json_ref")
+        ],
+        "rendered_commands": [],
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
+        **stage_payload,
+    }
+
+
 def _stage_b_precondition_error(state: RunbookState) -> str | None:
     if state.stage_status.get(STAGE_A_ID) != "PASS":
         return "stage_a_not_pass"
@@ -1672,36 +2202,139 @@ def _stage_b_precondition_error(state: RunbookState) -> str | None:
 
 
 def _stage_c_precondition_error(state: RunbookState, workspace: Path) -> str | None:
+    error, _ = _stage_c_precondition(state, workspace)
+    return error
+
+
+def _stage_c_precondition(
+    state: RunbookState,
+    workspace: Path,
+) -> tuple[str | None, dict[str, Any] | None]:
     if state.stage_status.get(STAGE_A_ID) != "PASS":
-        return "stage_a_not_pass"
+        return "stage_a_not_pass", None
     if state.stage_status.get("GATE1") != "PASS":
-        return "gate1_not_pass"
+        return "gate1_not_pass", None
     if state.stage_status.get(STAGE_B_ID) != "PASS":
-        return "stage_b_not_pass"
+        return "stage_b_not_pass", None
     if state.last_error:
-        return "active_last_error"
-    commit_ref = state.artifacts.get("execution_commit_report_json")
-    if not commit_ref or not _artifact_ref_exists(workspace, commit_ref):
-        return "execution_commit_report_required"
+        return "active_last_error", None
+    try:
+        evidence_context = _stage_c_evidence_context(state, workspace)
+    except EvidenceError as exc:
+        return exc.reason, None
+    return None, evidence_context
+
+
+def _stage_c_evidence_context(state: RunbookState, workspace: Path) -> dict[str, Any]:
+    _, intent, daily_plan_path = load_daily_plan_evidence(workspace, state)
     verification_ref = state.artifacts.get("stage_b_verification_json")
     if not verification_ref:
-        return "stage_b_verification_required"
+        raise EvidenceError("stage_b_verification_required", "stage_b_verification_json is not pinned")
     verification_path = _artifact_ref_path(workspace, verification_ref)
     if not verification_path.exists():
-        return "stage_b_verification_required"
+        raise EvidenceError("stage_b_verification_required", f"verification file not found: {verification_path}")
     try:
         verification = json.loads(verification_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return "stage_b_verification_required"
-    if verification.get("schema_version") != "stage_b_verification.v1":
-        return "stage_b_verification_required"
-    if str(verification.get("runner_result") or "").upper() != "PASS":
-        return "stage_b_verification_required"
-    if _int_payload(verification, "committed_row_count") <= 0:
-        return "stage_b_verification_required"
-    if _int_payload(verification, "failed_count") != 0:
-        return "stage_b_verification_required"
-    return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise EvidenceError("stage_b_verification_required", str(exc)) from exc
+    if not isinstance(verification, dict):
+        raise EvidenceError("stage_b_verification_required", "verification root must be an object")
+    expected_context = {
+        "runbook_day_id": state.runbook_day_id,
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    if (
+        verification.get("schema_version") != "stage_b_verification.v1"
+        or str(verification.get("runner_result") or "").upper() != "PASS"
+    ):
+        raise EvidenceError("stage_b_verification_required", "Stage B verification is not PASS")
+    if any(verification.get(key) != value for key, value in expected_context.items()):
+        raise EvidenceError("stage_b_verification_context_mismatch", "Stage B verification context mismatch")
+
+    action_mode = intent["action_mode"]
+    if verification.get("action_mode") != action_mode:
+        raise EvidenceError("action_mode_mismatch", "Daily Plan and Stage B verification action modes differ")
+    if action_mode == "EXECUTION":
+        commit_ref = state.artifacts.get("execution_commit_report_json")
+        if not commit_ref or not _artifact_ref_exists(workspace, commit_ref):
+            raise EvidenceError("execution_commit_report_required", "execution commit report is required")
+        if (
+            verification.get("verified_no_action") is not False
+            or _int_payload(verification, "committed_row_count") <= 0
+            or _int_payload(verification, "failed_count") != 0
+        ):
+            raise EvidenceError("stage_b_verification_required", "execution verification is not commit-ready")
+        return {
+            "action_mode": "EXECUTION",
+            "verified_no_action": False,
+            "candidate_execution_count": intent["candidate_execution_count"],
+            "execution_commit_report_json": commit_ref,
+            "stage_b_no_action_json": None,
+            "stage_b_verification_json": verification_ref,
+        }
+
+    gate1, _ = load_gate1_evidence(workspace, state)
+    frozen_context = {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    actual_daily_plan_sha256 = sha256_file(daily_plan_path)
+    if gate1.get("daily_plan_sha256") != actual_daily_plan_sha256:
+        raise EvidenceError("daily_plan_hash_mismatch", "daily plan SHA-256 does not match Gate 1 evidence")
+    gate1_valid = (
+        gate1.get("runner_result") == "PASS"
+        and gate1.get("action_mode") == "NO_ACTION"
+        and gate1.get("execution_required") is False
+        and gate1.get("candidate_execution_count") == 0
+        and gate1.get("manual_execution_row_count") == 0
+        and gate1.get("frozen_context") == frozen_context
+    )
+    if not gate1_valid:
+        raise EvidenceError("no_action_evidence_context_mismatch", "Gate 1 no-action evidence mismatch")
+    _, no_action_path = validate_stage_b_no_action_evidence(
+        workspace,
+        state,
+        daily_plan_path=daily_plan_path,
+    )
+    for artifact_key in (
+        "execution_commit_report_json",
+        "execution_status_sync_report_json",
+        "execution_status_sync_report",
+    ):
+        if state.artifacts.get(artifact_key):
+            raise EvidenceError(
+                "unexpected_execution_artifact_for_no_action",
+                f"unexpected state artifact: {artifact_key}",
+            )
+    if any(
+        record.get("command_key") == "execution_commit" and record.get("status") == "PASS"
+        for record in state.idempotency_records.values()
+    ):
+        raise EvidenceError(
+            "unexpected_execution_idempotency_for_no_action",
+            "PASS execution_commit idempotency record exists",
+        )
+    if (
+        verification.get("verified_no_action") is not True
+        or _int_payload(verification, "committed_row_count") != 0
+        or _int_payload(verification, "updated_count") != 0
+        or _int_payload(verification, "failed_count") != 0
+    ):
+        raise EvidenceError(
+            "stage_b_no_action_verification_required",
+            "Stage B verification does not confirm zero-write no-action completion",
+        )
+    return {
+        "action_mode": "NO_ACTION",
+        "verified_no_action": True,
+        "candidate_execution_count": 0,
+        "execution_commit_report_json": None,
+        "stage_b_no_action_json": state.artifacts.get("stage_b_no_action_json") or str(no_action_path),
+        "stage_b_verification_json": verification_ref,
+    }
 
 
 def _stage_d_preview_precondition_error(state: RunbookState, workspace: Path) -> str | None:
@@ -1758,7 +2391,11 @@ def _stage_d_append_precondition_error(state: RunbookState, workspace: Path) -> 
     return None
 
 
-def _stage_e_precondition_error(state: RunbookState, workspace: Path) -> str | None:
+def _stage_e_precondition_error(
+    state: RunbookState,
+    workspace: Path,
+    action_context: dict[str, Any],
+) -> str | None:
     if state.stage_status.get(STAGE_A_ID) != "PASS":
         return "stage_a_not_pass"
     if state.stage_status.get("GATE1") != "PASS":
@@ -1777,11 +2414,43 @@ def _stage_e_precondition_error(state: RunbookState, workspace: Path) -> str | N
         return "stage_e_already_pass"
     if state.last_error and not _stage_e_final_status_retry_allowed(state, workspace):
         return "active_last_error"
-    for artifact_name in ("review_append_report_json", "review_status_sync_report_json"):
-        artifact_ref = state.artifacts.get(artifact_name)
-        if not artifact_ref or not _artifact_ref_exists(workspace, artifact_ref):
-            return f"{artifact_name}_required"
+    if action_context.get("action_mode") == "NO_ACTION":
+        unexpected = _unexpected_no_action_review_state(state)
+        if unexpected:
+            return unexpected
+        evidence, evidence_path = load_stage_d_no_action_evidence(
+            workspace,
+            state,
+            daily_plan_sha256=str(action_context.get("daily_plan_sha256") or ""),
+        )
+        action_context.update(
+            {
+                "verified_no_action": True,
+                "stage_d_no_action_json": runbook_state.canonicalize_artifact_ref(
+                    str(evidence_path), workspace
+                ),
+                "stage_d_no_action": evidence,
+            }
+        )
+    else:
+        for artifact_name in ("review_append_report_json", "review_status_sync_report_json"):
+            artifact_ref = state.artifacts.get(artifact_name)
+            if not artifact_ref or not _artifact_ref_exists(workspace, artifact_ref):
+                return f"{artifact_name}_required"
     return None
+
+
+def _stage_e_action_payload(action_context: dict[str, Any], stage_result: str) -> dict[str, Any]:
+    if action_context.get("action_mode") != "NO_ACTION":
+        return {"action_mode": "EXECUTION", "verified_no_action": False}
+    return {
+        "action_mode": "NO_ACTION",
+        "verified_no_action": action_context.get("verified_no_action") is True,
+        "execution_count": 0,
+        "review_count": 0,
+        "eod_executed": stage_result == "PASS",
+        "stage_d_no_action_json": action_context.get("stage_d_no_action_json"),
+    }
 
 
 def _stage_e_final_status_retry_allowed(state: RunbookState, workspace: Path) -> bool:
@@ -3306,6 +3975,81 @@ def _last_raw_value(command_results: list[dict[str, Any]], field: str) -> Any:
     return None
 
 
+def _extract_daily_plan_artifact_refs(stdout: str, repo_root: Path) -> dict[str, str]:
+    lines = [line.strip() for line in stdout.splitlines()]
+    try:
+        marker_index = lines.index("Official paper daily plan is ready at:")
+    except ValueError:
+        return {}
+    plan_ref = next((line for line in lines[marker_index + 1 :] if line), "")
+    if not plan_ref:
+        return {}
+    markdown_path = Path(plan_ref)
+    if not markdown_path.is_absolute():
+        markdown_path = repo_root / markdown_path
+    markdown_path = markdown_path.resolve(strict=False)
+    return {
+        "daily_plan_json": str(markdown_path.with_suffix(".json")),
+        "daily_plan_markdown": str(markdown_path),
+    }
+
+
+def _validate_stage_a_daily_plan(
+    command_result: dict[str, Any],
+    state: RunbookState,
+    workspace: Path,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    artifact_refs = command_result.get("outputs", {}).get("artifact_refs", {})
+    daily_plan_ref = artifact_refs.get("daily_plan_json") if isinstance(artifact_refs, dict) else None
+    if not daily_plan_ref:
+        return None, {"reason": "daily_plan_json_missing", "detail": "daily_plan_json is not pinned"}
+    daily_plan_path = Path(str(daily_plan_ref))
+    if not daily_plan_path.is_absolute():
+        daily_plan_path = workspace / daily_plan_path
+    if not daily_plan_path.is_file():
+        return None, {
+            "reason": "daily_plan_json_missing",
+            "detail": f"daily_plan_json not found: {daily_plan_path}",
+        }
+    try:
+        payload = json.loads(daily_plan_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, {"reason": "daily_plan_json_invalid", "detail": str(exc)}
+    try:
+        intent = validate_daily_plan_execution_intent(
+            payload,
+            expected_account_id=state.frozen_context.account_id,
+            expected_data_date=state.frozen_context.data_date,
+            expected_trade_date=state.frozen_context.trade_date,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        reason = (
+            "daily_plan_context_mismatch"
+            if detail in {"account_id_mismatch", "data_date_mismatch", "trade_date_mismatch"}
+            else "daily_plan_execution_intent_invalid"
+        )
+        return None, {"reason": reason, "detail": detail}
+    return intent, None
+
+
+def _block_stage_a_daily_plan_result(
+    command_result: dict[str, Any],
+    validation_error: dict[str, str],
+) -> dict[str, Any]:
+    result = dict(command_result)
+    summary = dict(result.get("summary", {}))
+    summary["message"] = "Daily Plan evidence failed validation."
+    summary["blockers"] = [validation_error["detail"]]
+    result["runner_result"] = "BLOCKED"
+    result["summary"] = summary
+    result["raw_payload"] = {
+        **result.get("raw_payload", {}),
+        **validation_error,
+    }
+    return result
+
+
 def _run_stage_a_command(
     state: RunbookState,
     workspace: Path,
@@ -3338,6 +4082,19 @@ def _run_stage_a_command(
     stderr = str(execution.get("stderr") or "")
     exit_code = execution.get("exit_code")
     runner_result = "PASS" if exit_code == 0 else "FAILED"
+    artifacts: dict[str, str] = {}
+    if runner_result == "PASS" and command.command_key == "daily_plan":
+        discovered = _extract_daily_plan_artifact_refs(stdout, repo_root)
+        if discovered:
+            try:
+                artifacts = _pin_artifact_refs(
+                    workspace,
+                    state.runbook_day_id,
+                    discovered,
+                    "stage_a",
+                )
+            except (OSError, ValueError):
+                artifacts = {}
     process = {
         "executed": True,
         "exit_code": exit_code,
@@ -3348,6 +4105,7 @@ def _run_stage_a_command(
         command,
         runner_result,
         "Command completed successfully." if runner_result == "PASS" else "Command failed.",
+        artifact_refs=artifacts,
         raw_payload=_parse_stdout_json(stdout),
         blockers=[] if runner_result == "PASS" else [stderr.strip() or f"exit_code={exit_code}"],
         process=process,

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from core.paper_execution_intent import build_execution_intent
 from scripts import runbook_stage_runner
 from scripts import runbook_state
+from scripts.runbook_no_action import sha256_file
 
 
 ACCOUNT_ID = "paper_A"
@@ -23,6 +25,12 @@ def _seed_stage_b_verified_state(
     *,
     verification_runner_result: str = "PASS",
     stage_b_pass: bool = True,
+    action_mode: str = "EXECUTION",
+    verified_no_action: bool | None = None,
+    committed_row_count: int | None = None,
+    updated_count: int = 2,
+    failed_count: int = 0,
+    include_commit_report: bool | None = None,
 ) -> Path:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     state = runbook_state.complete_stage(state, "A")
@@ -31,20 +39,100 @@ def _seed_stage_b_verified_state(
         state = runbook_state.complete_stage(state, "B")
         latest_b = workspace / "stage_runs" / state.runbook_day_id / "latest_B.json"
         _write_json(latest_b, {"stage_id": "B", "marker": "original-stage-b-summary"})
-    commit_report = _write_json(
-        workspace / "artifacts" / state.runbook_day_id / "stage_b" / "commit.json",
-        {"status": "COMMITTED"},
+    items = [] if action_mode == "NO_ACTION" else [{"symbol": "ABC", "action": "BUY", "quantity": 2}]
+    daily_plan = _write_json(
+        workspace / "artifacts" / state.runbook_day_id / "daily_plan.json",
+        {
+            "schema_version": "paper_daily_plan.v1",
+            "account_id": ACCOUNT_ID,
+            "data_date": DATA_DATE,
+            "trade_date": TRADE_DATE,
+            "plan_date": TRADE_DATE,
+            "run_mode": "official",
+            "official_run": True,
+            "generated_at": "2026-06-15T00:00:00Z",
+            "items": items,
+            "execution_intent": build_execution_intent(items),
+            "fingerprints": {},
+        },
     )
+    state = runbook_state.record_artifact(state, "daily_plan_json", str(daily_plan), workspace)
+    if action_mode == "NO_ACTION":
+        gate1 = _write_json(
+            workspace / "gate_runs" / state.runbook_day_id / "gate1.json",
+            {
+                "runner_result": "PASS",
+                "action_mode": "NO_ACTION",
+                "execution_required": False,
+                "candidate_execution_count": 0,
+                "manual_execution_row_count": 0,
+                "daily_plan_sha256": sha256_file(daily_plan),
+                "frozen_context": {
+                    "account_id": ACCOUNT_ID,
+                    "data_date": DATA_DATE,
+                    "trade_date": TRADE_DATE,
+                },
+            },
+        )
+        state = runbook_state.record_artifact(state, "gate1_readiness_json", str(gate1), workspace)
+        no_action = _write_json(
+            workspace / "no_action_runs" / state.runbook_day_id / "stage_b_no_action.json",
+            {
+                "schema_version": "stage_b_no_action.v1",
+                "runner_result": "PASS",
+                "runbook_day_id": state.runbook_day_id,
+                "account_id": ACCOUNT_ID,
+                "data_date": DATA_DATE,
+                "trade_date": TRADE_DATE,
+                "action_mode": "NO_ACTION",
+                "execution_required": False,
+                "candidate_execution_count": 0,
+                "manual_execution_row_count": 0,
+                "daily_plan_json": state.artifacts["daily_plan_json"],
+                "daily_plan_sha256": sha256_file(daily_plan),
+                "gate1_readiness_json": state.artifacts["gate1_readiness_json"],
+                "skipped_command_keys": [
+                    "execution_preview",
+                    "execution_reconciliation_preview",
+                    "execution_commit",
+                    "sync_execution_status",
+                ],
+                "ledger_write_performed": False,
+                "notion_write_performed": False,
+                "idempotency_record_created": False,
+            },
+        )
+        state = runbook_state.record_artifact(state, "stage_b_no_action_json", str(no_action), workspace)
+    if include_commit_report is None:
+        include_commit_report = action_mode == "EXECUTION"
+    if include_commit_report:
+        commit_report = _write_json(
+            workspace / "artifacts" / state.runbook_day_id / "stage_b" / "commit.json",
+            {"status": "COMMITTED"},
+        )
+        state = runbook_state.record_artifact(state, "execution_commit_report_json", str(commit_report), workspace)
+    if verified_no_action is None:
+        verified_no_action = action_mode == "NO_ACTION"
+    if committed_row_count is None:
+        committed_row_count = 0 if action_mode == "NO_ACTION" else 2
+    if action_mode == "NO_ACTION" and updated_count == 2:
+        updated_count = 0
     verification = _write_json(
         workspace / "verification_runs" / state.runbook_day_id / "latest_stage_b_verification.json",
         {
             "schema_version": "stage_b_verification.v1",
             "runner_result": verification_runner_result,
-            "committed_row_count": 2,
-            "failed_count": 0,
+            "runbook_day_id": state.runbook_day_id,
+            "account_id": ACCOUNT_ID,
+            "data_date": DATA_DATE,
+            "trade_date": TRADE_DATE,
+            "action_mode": action_mode,
+            "verified_no_action": verified_no_action,
+            "committed_row_count": committed_row_count,
+            "updated_count": updated_count,
+            "failed_count": failed_count,
         },
     )
-    state = runbook_state.record_artifact(state, "execution_commit_report_json", str(commit_report), workspace)
     state = runbook_state.record_artifact(state, "stage_b_verification_json", str(verification), workspace)
     state_path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     runbook_state.save_state(state, state_path)
@@ -149,6 +237,7 @@ def test_stage_c_runs_step_10_11_after_stage_b_verify_pass_without_overwriting_l
     assert state.artifacts["manual_review_template_csv"].startswith(f"artifacts/{state.runbook_day_id}/review_prep/")
     assert state.artifacts["manual_review_template_md"].startswith(f"artifacts/{state.runbook_day_id}/review_prep/")
     assert state.artifacts["notion_review_template_report_json"].startswith("command_runs/")
+    assert state.artifacts["stage_c_summary_json"].startswith(f"stage_runs/{state.runbook_day_id}/")
     assert (workspace / state.artifacts["manual_review_template_csv"]).exists()
     latest_c = workspace / "stage_runs" / state.runbook_day_id / "latest_C.json"
     latest_b = workspace / "stage_runs" / state.runbook_day_id / "latest_B.json"
@@ -163,7 +252,25 @@ def test_stage_c_missing_verification_is_blocked(tmp_path: Path) -> None:
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
     state = runbook_state.complete_stage(state, "B")
+    items = [{"symbol": "ABC", "action": "BUY", "quantity": 1}]
+    daily_plan = _write_json(
+        tmp_path / "daily_plan.json",
+        {
+            "schema_version": "paper_daily_plan.v1",
+                "account_id": ACCOUNT_ID,
+                "data_date": DATA_DATE,
+                "trade_date": TRADE_DATE,
+                "plan_date": TRADE_DATE,
+                "run_mode": "official",
+                "official_run": True,
+                "generated_at": "2026-06-15T00:00:00Z",
+                "items": items,
+                "execution_intent": build_execution_intent(items),
+                "fingerprints": {},
+        },
+    )
     commit_report = _write_json(tmp_path / "commit.json", {"status": "COMMITTED"})
+    state = runbook_state.record_artifact(state, "daily_plan_json", str(daily_plan), tmp_path)
     state = runbook_state.record_artifact(state, "execution_commit_report_json", str(commit_report), tmp_path)
     state_path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     runbook_state.save_state(state, state_path)
@@ -248,6 +355,192 @@ def test_stage_c_update_only_export_is_pass(tmp_path: Path, monkeypatch) -> None
 
     assert result["runner_result"] == "PASS"
     assert len(calls) == 2
+
+
+def test_stage_c_valid_no_action_runs_review_prep_without_commit_report(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    repo_outputs = tmp_path / "repo_outputs"
+    workspace.mkdir()
+    _seed_stage_b_verified_state(workspace, action_mode="NO_ACTION")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", _fake_review_prep_run(repo_outputs, calls))
+
+    result = runbook_stage_runner.run_stage_c(
+        workspace,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["action_mode"] == "NO_ACTION"
+    assert result["verified_no_action"] is True
+    assert result["candidate_execution_count"] == 0
+    assert result["execution_commit_report_json"] is None
+    assert result["stage_b_no_action_json"]
+    assert result["stage_b_verification_json"]
+    assert len(calls) == 2
+    summary = json.loads(Path(result["stage_summary_json"]).read_text(encoding="utf-8"))
+    assert summary["raw_payload"]["action_mode"] == "NO_ACTION"
+    expected_action = "No Manual Review input is required. Run Gate 2 to validate the pinned no-action review state."
+    assert result["next_required_action"] == expected_action
+    assert summary["summary"]["next_required_action"] == expected_action
+    assert summary["raw_payload"]["next_required_action"] == expected_action
+    latest_summary = json.loads(Path(result["latest_stage_summary_json"]).read_text(encoding="utf-8"))
+    assert latest_summary["summary"]["next_required_action"] == expected_action
+    state = runbook_state.load_state(Path(result["state_path"]))
+    assert state.artifacts["stage_c_summary_json"].startswith(f"stage_runs/{state.runbook_day_id}/")
+
+
+def test_stage_c_execution_retains_manual_review_message(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _seed_stage_b_verified_state(workspace)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        _fake_review_prep_run(tmp_path / "repo_outputs", calls),
+    )
+
+    result = runbook_stage_runner.run_stage_c(
+        workspace,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["action_mode"] == "EXECUTION"
+    assert result["next_required_action"] == "Fill Manual Review in Notion, then run Gate 2."
+
+
+def test_stage_c_evidence_error_returns_blocked_without_second_read(tmp_path: Path, monkeypatch) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path, action_mode="NO_ACTION")
+    calls = 0
+
+    def fail_evidence(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise runbook_stage_runner.EvidenceError("no_action_evidence_invalid", "fixture read error")
+
+    monkeypatch.setattr(runbook_stage_runner, "_stage_c_evidence_context", fail_evidence)
+    result = runbook_stage_runner.run_stage_c(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "no_action_evidence_invalid"
+    assert result["state_path"] == str(state_path)
+    assert calls == 1
+
+
+def test_stage_c_execution_requires_positive_commit_verification(tmp_path: Path) -> None:
+    _seed_stage_b_verified_state(tmp_path, committed_row_count=0)
+    state_path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.load_state(state_path)
+
+    assert runbook_stage_runner._stage_c_precondition_error(state, tmp_path) == "stage_b_verification_required"
+
+
+def test_stage_c_execution_requires_commit_report(tmp_path: Path) -> None:
+    _seed_stage_b_verified_state(tmp_path, include_commit_report=False)
+    state_path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.load_state(state_path)
+
+    assert runbook_stage_runner._stage_c_precondition_error(state, tmp_path) == "execution_commit_report_required"
+
+
+def test_stage_c_no_action_requires_verified_zero_counts(tmp_path: Path) -> None:
+    _seed_stage_b_verified_state(tmp_path, action_mode="NO_ACTION", verified_no_action=False)
+    state_path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.load_state(state_path)
+
+    assert (
+        runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
+        == "stage_b_no_action_verification_required"
+    )
+
+
+def test_stage_c_no_action_blocks_positive_committed_count(tmp_path: Path) -> None:
+    _seed_stage_b_verified_state(tmp_path, action_mode="NO_ACTION", committed_row_count=1)
+    state_path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.load_state(state_path)
+
+    assert (
+        runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
+        == "stage_b_no_action_verification_required"
+    )
+
+
+def test_stage_c_no_action_requires_verification_artifact(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path, action_mode="NO_ACTION")
+    state = runbook_state.load_state(state_path)
+    state.artifacts.pop("stage_b_verification_json")
+    runbook_state.save_state(state, state_path)
+
+    assert runbook_stage_runner._stage_c_precondition_error(state, tmp_path) == "stage_b_verification_required"
+
+
+def test_stage_c_no_action_blocks_unexpected_execution_artifact(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path, action_mode="NO_ACTION")
+    state = runbook_state.load_state(state_path)
+    report = _write_json(tmp_path / "unexpected_commit.json", {"status": "COMMITTED"})
+    state = runbook_state.record_artifact(state, "execution_commit_report_json", str(report), tmp_path)
+    runbook_state.save_state(state, state_path)
+
+    assert (
+        runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
+        == "unexpected_execution_artifact_for_no_action"
+    )
+
+
+def test_stage_c_no_action_blocks_execution_commit_pass_idempotency(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path, action_mode="NO_ACTION")
+    state = runbook_state.load_state(state_path)
+    state, key = runbook_state.reserve_idempotency(state, "execution_commit", 8, "B", workspace=tmp_path)
+    state = runbook_state.mark_idempotency_pass(state, key)
+    runbook_state.save_state(state, state_path)
+
+    assert (
+        runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
+        == "unexpected_execution_idempotency_for_no_action"
+    )
+
+
+def test_stage_c_blocks_action_mode_and_context_mismatch(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path, action_mode="NO_ACTION")
+    state = runbook_state.load_state(state_path)
+    verification_path = tmp_path / state.artifacts["stage_b_verification_json"]
+    verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    verification["action_mode"] = "EXECUTION"
+    _write_json(verification_path, verification)
+    assert runbook_stage_runner._stage_c_precondition_error(state, tmp_path) == "action_mode_mismatch"
+
+    verification["action_mode"] = "NO_ACTION"
+    verification["account_id"] = "paper_other"
+    _write_json(verification_path, verification)
+    assert (
+        runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
+        == "stage_b_verification_context_mismatch"
+    )
+
+
+def test_stage_c_no_action_blocks_daily_plan_hash_mismatch(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path, action_mode="NO_ACTION")
+    state = runbook_state.load_state(state_path)
+    daily_plan_path = tmp_path / state.artifacts["daily_plan_json"]
+    payload = json.loads(daily_plan_path.read_text(encoding="utf-8"))
+    payload["generated_at"] = "2026-06-15T01:00:00Z"
+    _write_json(daily_plan_path, payload)
+
+    assert runbook_stage_runner._stage_c_precondition_error(state, tmp_path) == "daily_plan_hash_mismatch"
 
 
 def test_stage_b_review_alias_reports_canonical_stage_c(tmp_path: Path) -> None:

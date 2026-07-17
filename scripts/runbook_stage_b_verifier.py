@@ -13,6 +13,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import runbook_state
+from scripts.runbook_no_action import (
+    NO_ACTION_SCHEMA_VERSION,
+    SKIPPED_COMMAND_KEYS,
+    EvidenceError,
+    artifact_path,
+    load_daily_plan_evidence,
+    load_gate1_evidence,
+    sha256_file,
+)
 
 
 SCHEMA_VERSION = "stage_b_verification.v1"
@@ -33,6 +42,24 @@ def verify_stage_b_completion(
 ) -> dict[str, Any]:
     workspace = Path(workspace)
     runbook_day_id = _runbook_day_id(account_id, data_date, trade_date)
+    if data_date:
+        state_path = runbook_state.get_state_path_for_context(workspace, account_id, data_date, trade_date)
+        if state_path.exists():
+            state = runbook_state.load_state(state_path)
+            if runbook_state.context_matches_state(state, account_id, data_date, trade_date):
+                try:
+                    _, intent, daily_plan_path = load_daily_plan_evidence(workspace, state)
+                except EvidenceError:
+                    intent = None
+                if intent and intent["action_mode"] == "NO_ACTION":
+                    return _verify_no_action_completion(
+                        workspace=workspace,
+                        state=state,
+                        daily_plan_path=daily_plan_path,
+                        commit_report=commit_report,
+                        sync_report=sync_report,
+                        timezone=timezone,
+                    )
     created_at = _now_iso()
     checks: list[dict[str, Any]] = []
     resolution = _resolve_stage_b_reports(
@@ -75,6 +102,9 @@ def verify_stage_b_completion(
         "committed_row_count": committed_row_count,
         "updated_count": updated_count,
         "failed_count": failed_count,
+        "action_mode": "EXECUTION",
+        "verified_no_action": False,
+        "stage_b_no_action_json": None,
         "checks": checks,
         "next_required_action": (
             "Proceed to Stage C review prep."
@@ -105,6 +135,186 @@ def verify_stage_b_completion(
         )
         _write_json(json_path, payload)
         _write_json(latest_json, payload)
+    return payload
+
+
+def _verify_no_action_completion(
+    *,
+    workspace: Path,
+    state: runbook_state.RunbookState,
+    daily_plan_path: Path,
+    commit_report: Path | None,
+    sync_report: Path | None,
+    timezone: str,
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    checks.append(
+        _check(
+            "stage_b_state",
+            PASS if state.stage_status.get("B") == PASS else BLOCKED,
+            "stage_b_pass" if state.stage_status.get("B") == PASS else "stage_b_not_pass",
+            f"stage_status.B={state.stage_status.get('B')}",
+        )
+    )
+    if commit_report is not None or sync_report is not None:
+        checks.append(
+            _check(
+                "unexpected_execution_reports",
+                BLOCKED,
+                "unexpected_execution_report_for_no_action",
+                "Commit or sync report was explicitly supplied for a no-action day.",
+            )
+        )
+    for artifact_key in (
+        "execution_commit_report_json",
+        "execution_status_sync_report_json",
+        "execution_status_sync_report",
+    ):
+        if state.artifacts.get(artifact_key):
+            checks.append(
+                _check(
+                    artifact_key,
+                    BLOCKED,
+                    "unexpected_execution_report_for_no_action",
+                    f"Unexpected state artifact exists: {artifact_key}",
+                )
+            )
+
+    commit_records = [
+        record
+        for record in state.idempotency_records.values()
+        if record.get("command_key") == "execution_commit"
+    ]
+    checks.append(
+        _check(
+            "execution_commit_idempotency",
+            BLOCKED if commit_records else PASS,
+            "unexpected_execution_idempotency_for_no_action" if commit_records else "no_execution_idempotency",
+            f"execution_commit records={len(commit_records)}",
+        )
+    )
+
+    no_action_ref = state.artifacts.get("stage_b_no_action_json")
+    no_action_payload: dict[str, Any] | None = None
+    no_action_path: Path | None = None
+    if not no_action_ref:
+        checks.append(_check("no_action_evidence", BLOCKED, "missing_no_action_artifact", "Artifact is not pinned."))
+    else:
+        no_action_path = artifact_path(workspace, str(no_action_ref))
+        no_action_payload = _load_json_report(no_action_path, "no_action_evidence", checks)
+
+    try:
+        gate1_payload, _ = load_gate1_evidence(workspace, state)
+    except EvidenceError as exc:
+        gate1_payload = None
+        checks.append(_check("gate1_evidence", BLOCKED, exc.reason, exc.detail))
+
+    expected_context = {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    if gate1_payload is not None:
+        gate_ok = (
+            gate1_payload.get("runner_result") == PASS
+            and gate1_payload.get("action_mode") == "NO_ACTION"
+            and gate1_payload.get("execution_required") is False
+            and gate1_payload.get("candidate_execution_count") == 0
+            and gate1_payload.get("manual_execution_row_count") == 0
+            and gate1_payload.get("daily_plan_sha256") == sha256_file(daily_plan_path)
+            and gate1_payload.get("frozen_context") == expected_context
+        )
+        checks.append(
+            _check(
+                "gate1_no_action",
+                PASS if gate_ok else BLOCKED,
+                "gate1_no_action_match" if gate_ok else "no_action_evidence_context_mismatch",
+                "Gate 1 no-action evidence validated." if gate_ok else "Gate 1 no-action evidence mismatch.",
+            )
+        )
+
+    if no_action_payload is not None:
+        expected_values = {
+            "schema_version": NO_ACTION_SCHEMA_VERSION,
+            "runner_result": PASS,
+            "runbook_day_id": state.runbook_day_id,
+            **expected_context,
+            "action_mode": "NO_ACTION",
+            "execution_required": False,
+            "candidate_execution_count": 0,
+            "manual_execution_row_count": 0,
+            "daily_plan_json": str(state.artifacts.get("daily_plan_json")),
+            "gate1_readiness_json": str(state.artifacts.get("gate1_readiness_json")),
+            "ledger_write_performed": False,
+            "notion_write_performed": False,
+            "idempotency_record_created": False,
+            "skipped_command_keys": list(SKIPPED_COMMAND_KEYS),
+        }
+        mismatches = [key for key, value in expected_values.items() if no_action_payload.get(key) != value]
+        checks.append(
+            _check(
+                "no_action_context",
+                PASS if not mismatches else BLOCKED,
+                "no_action_evidence_valid" if not mismatches else "no_action_evidence_context_mismatch",
+                "No-action artifact validated." if not mismatches else f"Mismatched fields: {', '.join(mismatches)}",
+            )
+        )
+        expected_hash = str(no_action_payload.get("daily_plan_sha256") or "")
+        actual_hash = sha256_file(daily_plan_path)
+        checks.append(
+            _check(
+                "daily_plan_hash",
+                PASS if expected_hash == actual_hash else BLOCKED,
+                "daily_plan_hash_match" if expected_hash == actual_hash else "daily_plan_hash_mismatch",
+                f"expected={expected_hash or '-'} actual={actual_hash}",
+            )
+        )
+
+    runner_result = _runner_result_from_checks(checks)
+    created_at = _now_iso()
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "runner_result": runner_result,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "runbook_day_id": state.runbook_day_id,
+        **expected_context,
+        "action_mode": "NO_ACTION",
+        "verified_no_action": runner_result == PASS,
+        "commit_report_json": None,
+        "sync_report_json": None,
+        "resolved_from_state": True,
+        "resolved_commit_report_json": None,
+        "resolved_sync_report_json": None,
+        "stage_b_no_action_json": str(no_action_path) if no_action_path else None,
+        "committed_row_count": 0,
+        "updated_count": 0,
+        "failed_count": 0,
+        "checks": checks,
+        "next_required_action": (
+            "Proceed to Stage C review prep."
+            if runner_result == PASS
+            else "Inspect no-action Stage B evidence before Stage C review prep."
+        ),
+        "state_updated": False,
+    }
+    json_path, md_path = write_stage_b_verification(workspace, state.runbook_day_id, payload)
+    payload["verification_json"] = str(json_path)
+    payload["verification_md"] = str(md_path)
+    latest_paths = get_stage_b_verification_paths(workspace, state.runbook_day_id)
+    payload["latest_verification_json"] = str(latest_paths["latest_json"])
+    payload["latest_verification_md"] = str(latest_paths["latest_md"])
+    payload["state_updated"] = _pin_verification_to_state(
+        workspace=workspace,
+        account_id=state.frozen_context.account_id,
+        data_date=state.frozen_context.data_date,
+        trade_date=state.frozen_context.trade_date,
+        verification_json=json_path,
+        verification_md=md_path,
+        timezone=timezone,
+    )
+    _write_json(json_path, payload)
+    _write_json(latest_paths["latest_json"], payload)
     return payload
 
 

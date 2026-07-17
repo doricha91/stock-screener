@@ -254,12 +254,14 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
         phase1_stage_policy="manual_gate_poll_only",
         phase2_interactive_policy="not_executable",
         expected_outputs=("gate1_readiness",),
-        success_criteria="Actual Price present, Status=READY, Account ID and Execution Date match",
+        success_criteria=(
+            "execution rows ready, or canonical no-action Daily Plan is valid with zero matching execution rows"
+        ),
         failure_policy="push_wait_or_blocked_without_advancing_stage",
         idempotency_key_fields=("account_id", "trade_date", "manual_gate"),
         duplicate_run_policy="not_executable",
         blocks_next_stage_on_failure=True,
-        notes="Manual Notion input gate; controller polls readiness only.",
+        notes="Manual Notion input gate; controller polls readiness or verifies canonical no-action evidence.",
     ),
     _command(
         command_key="execution_preview",
@@ -353,10 +355,13 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
         ),
         command_type="LOCAL_ARTIFACT_WRITE",
         phase1_auto_execute=True,
-        required_prior_artifacts=("execution_commit_report",),
+        required_prior_artifacts=("stage_b_verification_json",),
         produces_artifacts=("daily_review_report",),
         expected_outputs=("daily_review_report",),
-        success_criteria="review artifacts written",
+        success_criteria=(
+            "review artifacts written; execution path requires a committed execution report, "
+            "no-action path requires verified stage_b_no_action evidence"
+        ),
         duplicate_run_policy="replaceable_local_artifact_per_account_trade_date",
     ),
     _command(
@@ -395,12 +400,15 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
         phase1_stage_policy="manual_gate_poll_only",
         phase2_interactive_policy="not_executable",
         expected_outputs=("gate2_readiness",),
-        success_criteria="Manual Answer present, Review Status reviewed, Import Status READY, Account ID and Review Date match",
+        success_criteria=(
+            "execution path requires completed READY Manual Review rows; no-action path requires "
+            "verified no-action evidence and zero matching Manual Review rows"
+        ),
         failure_policy="push_wait_or_blocked_without_advancing_stage",
         idempotency_key_fields=("account_id", "trade_date", "manual_gate"),
         duplicate_run_policy="not_executable",
         blocks_next_stage_on_failure=True,
-        notes="Manual Notion input gate; controller polls readiness only.",
+        notes="Manual Notion input gate; controller polls readiness and validates canonical no-action evidence.",
     ),
     _command(
         command_key="review_preview",
@@ -421,7 +429,10 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
         phase1_auto_execute=True,
         produces_artifacts=("review_preview_json",),
         expected_outputs=("fail_count", "append_allowed", "review_preview_json"),
-        success_criteria="fail_count=0 and review preview artifact is pinned",
+        success_criteria=(
+            "execution path requires positive validated Review candidates and a pinned preview; "
+            "no-action path requires verified zero candidates and a SKIPPED preview write"
+        ),
     ),
     _command(
         command_key="review_append",
@@ -445,7 +456,10 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
         required_prior_artifacts=("review_preview_json",),
         produces_artifacts=("review_commit_report",),
         expected_outputs=("appended_count", "review_commit_report"),
-        success_criteria="append report written from pinned review preview",
+        success_criteria=(
+            "execution path requires append report from positive validated candidates; "
+            "no-action path requires verified zero candidates and a SKIPPED append write"
+        ),
         duplicate_run_policy=STRICT_ONCE_PER_ACCOUNT_TRADE_DATE,
         requires_preview_artifact=True,
     ),
@@ -469,7 +483,10 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
         phase1_auto_execute=True,
         required_prior_artifacts=("review_commit_report",),
         expected_outputs=("notion_review_sync_report",),
-        success_criteria="failed count is 0",
+        success_criteria=(
+            "execution path requires sync report with failed count 0; "
+            "no-action path requires verified zero candidates and a SKIPPED Notion write"
+        ),
         duplicate_run_policy="retry_same_commit_report_until_success",
         requires_commit_report=True,
     ),

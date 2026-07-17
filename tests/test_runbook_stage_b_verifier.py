@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from scripts import runbook_stage_b_verifier as verifier
 from scripts import runbook_state
+from scripts.runbook_no_action import sha256_file, write_stage_b_no_action_evidence
+from core.paper_execution_intent import build_execution_intent
 
 
 ACCOUNT_ID = "paper_pilot_202606"
@@ -86,6 +89,60 @@ def _seed_stage_b_state(
     return state_path
 
 
+def _seed_no_action_state(workspace: Path) -> tuple[Path, Path, Path]:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.complete_stage(state, "A")
+    state = runbook_state.complete_stage(state, "GATE1")
+    state = runbook_state.complete_stage(state, "B")
+    plan_path = _write_json(
+        workspace / "daily_plan_no_action.json",
+        {
+            "schema_version": "paper_daily_plan.v1",
+            "account_id": ACCOUNT_ID,
+            "data_date": DATA_DATE,
+            "trade_date": TRADE_DATE,
+            "plan_date": TRADE_DATE,
+            "run_mode": "official",
+            "official_run": True,
+            "generated_at": "2026-06-30T12:00:00Z",
+            "items": [],
+            "execution_intent": build_execution_intent([]),
+            "fingerprints": {"generator_version": "paper_daily_plan.v1"},
+        },
+    )
+    gate_path = _write_json(
+        workspace / "gate1_no_action.json",
+        {
+            "schema_version": "runbook_gate_result.v1",
+            "runner_result": "PASS",
+            "gate_id": "GATE1",
+            "frozen_context": {
+                "account_id": ACCOUNT_ID,
+                "data_date": DATA_DATE,
+                "trade_date": TRADE_DATE,
+            },
+            "action_mode": "NO_ACTION",
+            "execution_required": False,
+            "candidate_execution_count": 0,
+            "manual_execution_row_count": 0,
+            "daily_plan_sha256": sha256_file(plan_path),
+        },
+    )
+    state = runbook_state.record_artifact(state, "daily_plan_json", str(plan_path), workspace)
+    state = runbook_state.record_artifact(state, "gate1_readiness_json", str(gate_path), workspace)
+    _, evidence_path, evidence_md = write_stage_b_no_action_evidence(
+        workspace,
+        state,
+        daily_plan_path=plan_path,
+        gate1_path=gate_path,
+    )
+    state = runbook_state.record_artifact(state, "stage_b_no_action_json", str(evidence_path), workspace)
+    state = runbook_state.record_artifact(state, "stage_b_no_action_md", str(evidence_md), workspace)
+    state_path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    runbook_state.save_state(state, state_path)
+    return state_path, plan_path, evidence_path
+
+
 def test_stage_b_verifier_passes_normal_reports_and_writes_artifacts(tmp_path: Path) -> None:
     commit_path, sync_path = _reports(tmp_path, _commit_report(), _sync_report())
 
@@ -105,6 +162,127 @@ def test_stage_b_verifier_passes_normal_reports_and_writes_artifacts(tmp_path: P
     assert Path(result["verification_md"]).exists()
     assert Path(result["latest_verification_json"]).exists()
     assert "Proceed to Stage C" in Path(result["verification_md"]).read_text(encoding="utf-8")
+
+
+def test_stage_b_verifier_passes_valid_no_action_evidence(tmp_path: Path) -> None:
+    state_path, _, evidence_path = _seed_no_action_state(tmp_path)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["action_mode"] == "NO_ACTION"
+    assert result["verified_no_action"] is True
+    assert result["committed_row_count"] == 0
+    assert result["updated_count"] == 0
+    assert result["failed_count"] == 0
+    assert result["commit_report_json"] is None
+    assert result["sync_report_json"] is None
+    assert result["stage_b_no_action_json"] == str(evidence_path)
+    loaded = runbook_state.load_state(state_path)
+    assert "stage_b_verification_json" in loaded.artifacts
+
+
+def test_stage_b_verifier_blocks_no_action_daily_plan_hash_mismatch(tmp_path: Path) -> None:
+    _, plan_path, _ = _seed_no_action_state(tmp_path)
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["generated_at"] = "2026-06-30T13:00:00Z"
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path, account_id=ACCOUNT_ID, data_date=DATA_DATE, trade_date=TRADE_DATE
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "daily_plan_hash_mismatch" for check in result["checks"])
+
+
+def test_stage_b_verifier_blocks_no_action_context_mismatch(tmp_path: Path) -> None:
+    _, _, evidence_path = _seed_no_action_state(tmp_path)
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    payload["trade_date"] = "2026-07-02"
+    evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path, account_id=ACCOUNT_ID, data_date=DATA_DATE, trade_date=TRADE_DATE
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "no_action_evidence_context_mismatch" for check in result["checks"])
+
+
+def test_stage_b_verifier_blocks_explicit_report_for_no_action(tmp_path: Path) -> None:
+    _seed_no_action_state(tmp_path)
+    commit_path = _write_json(tmp_path / "unexpected_commit.json", _commit_report())
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(
+        check["reason_code"] == "unexpected_execution_report_for_no_action" for check in result["checks"]
+    )
+
+
+def test_stage_b_verifier_blocks_explicit_sync_report_for_no_action(tmp_path: Path) -> None:
+    _seed_no_action_state(tmp_path)
+    sync_path = _write_json(tmp_path / "unexpected_sync.json", _sync_report())
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        sync_report=sync_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(
+        check["reason_code"] == "unexpected_execution_report_for_no_action" for check in result["checks"]
+    )
+
+
+def test_stage_b_verifier_blocks_no_action_execution_commit_idempotency(tmp_path: Path) -> None:
+    state_path, _, _ = _seed_no_action_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state, key = runbook_state.reserve_idempotency(state, "execution_commit", 8, "B", {}, tmp_path)
+    state = runbook_state.mark_idempotency_pass(state, key)
+    runbook_state.save_state(state, state_path)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path, account_id=ACCOUNT_ID, data_date=DATA_DATE, trade_date=TRADE_DATE
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(
+        check["reason_code"] == "unexpected_execution_idempotency_for_no_action"
+        for check in result["checks"]
+    )
+
+
+def test_stage_b_verifier_blocks_missing_no_action_artifact(tmp_path: Path) -> None:
+    state_path, _, _ = _seed_no_action_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    artifacts = dict(state.artifacts)
+    artifacts.pop("stage_b_no_action_json")
+    state = replace(state, artifacts=artifacts)
+    runbook_state.save_state(state, state_path)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path, account_id=ACCOUNT_ID, data_date=DATA_DATE, trade_date=TRADE_DATE
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "missing_no_action_artifact" for check in result["checks"])
 
 
 def test_stage_b_verifier_prefers_cli_paths_when_both_are_provided(tmp_path: Path) -> None:
@@ -301,6 +479,26 @@ def test_stage_b_verifier_blocks_when_commit_status_is_not_committed(tmp_path: P
 
     assert result["runner_result"] == "BLOCKED"
     assert any(check["reason_code"] == "commit_status_not_committed" for check in result["checks"])
+
+
+def test_stage_b_verifier_execution_path_still_blocks_zero_committed_rows(tmp_path: Path) -> None:
+    commit_path, sync_path = _reports(
+        tmp_path,
+        _commit_report(committed_row_count=0, committed_trade_ids=[], committed_rows=[]),
+        _sync_report(candidate_count=0, updated_count=0, rows=[]),
+    )
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+        sync_report=sync_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["action_mode"] == "EXECUTION"
+    assert any(check["reason_code"] == "committed_row_count_zero" for check in result["checks"])
 
 
 def test_stage_b_verifier_blocks_count_mismatch(tmp_path: Path) -> None:

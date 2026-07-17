@@ -135,6 +135,22 @@ def test_commit_report_dependency_metadata_for_sync_steps() -> None:
     assert "review_commit_report" in sync_review.required_prior_artifacts
 
 
+def test_daily_review_dependency_metadata_uses_stage_b_verification() -> None:
+    daily_review = registry.get_command("daily_review")
+
+    assert daily_review.required_prior_artifacts == ("stage_b_verification_json",)
+    assert "committed execution report" in daily_review.success_criteria
+    assert "stage_b_no_action" in daily_review.success_criteria
+
+
+def test_gate2_registry_metadata_documents_execution_and_no_action_paths() -> None:
+    gate2 = registry.get_command("wait_review_input")
+
+    assert "completed READY Manual Review rows" in gate2.success_criteria
+    assert "verified no-action evidence" in gate2.success_criteria
+    assert "zero matching Manual Review rows" in gate2.success_criteria
+
+
 def test_argv_templates_are_list_like_without_raw_shell_strings() -> None:
     for command in registry.list_commands():
         assert isinstance(command.argv_template, tuple)
