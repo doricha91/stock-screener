@@ -1,5 +1,6 @@
 # core/daily_plan_generator.py
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -19,7 +20,8 @@ from core.target_portfolio_state import (
     calculate_available_buying_power,
     CurrentPortfolioState,
     TargetPortfolioState,
-    RebalanceDecision
+    RebalanceDecision,
+    rank_candidates,
 )
 from core.paths import front_daily_action_plan_path, market_db_path
 from core.backtest_engine import evaluate_switching_opportunity
@@ -29,6 +31,12 @@ from core.paper_config_snapshot import save_paper_config_snapshot
 from core.paper_config_hash import PAPER_CONFIG_HASH_POLICY, compute_paper_config_hash_from_file
 from core.paper_execution_intent import build_execution_intent
 from core.position_sizing import calculate_entry_shares
+from core.long_position_policy import (
+    DEFAULT_MAX_LONG_POSITIONS,
+    LongPositionAction,
+    normalize_symbol,
+    validate_long_position_limits,
+)
 from core.universe_manager import load_universe_snapshot_as_of_quarter
 
 ACTION_BUY = "BUY"
@@ -48,6 +56,8 @@ WARNING_HIGHEST_PRICE_META_MISSING = "WARNING_HIGHEST_PRICE_META_MISSING"
 WARNING_HIGHEST_PRICE_STALE = "WARNING_HIGHEST_PRICE_STALE"
 WARNING_HIGHEST_PRICE_INCONSISTENT = "WARNING_HIGHEST_PRICE_INCONSISTENT"
 WARNING_HIGHEST_PRICE_MARKET_DATA_UNAVAILABLE = "WARNING_HIGHEST_PRICE_MARKET_DATA_UNAVAILABLE"
+WARNING_LONG_POSITION_RECOVERY_SCORE_UNAVAILABLE = "WARNING_LONG_POSITION_RECOVERY_SCORE_UNAVAILABLE"
+WARNING_LONG_POSITION_RECOVERY_UNEXPECTED_ACTION = "WARNING_LONG_POSITION_RECOVERY_UNEXPECTED_ACTION"
 
 SEVERITY_LOW = "LOW"
 SEVERITY_MEDIUM = "MEDIUM"
@@ -847,6 +857,247 @@ def build_strategy_entry_action_items(
     return action_items
 
 
+def _daily_plan_policy_actions(action_items: List[Dict[str, Any]]) -> list[LongPositionAction]:
+    """Adapt executable Daily Plan BUY/SELL rows to the shared policy API."""
+    actions = []
+    for item in action_items:
+        action_type = item.get("type")
+        if action_type not in {ACTION_BUY, ACTION_SELL}:
+            continue
+        actions.append(LongPositionAction(
+            symbol=item.get("symbol"),
+            action_type=action_type,
+            quantity=item.get("shares"),
+        ))
+    return actions
+
+
+def _is_valid_holding_score(value: Any) -> bool:
+    try:
+        return value is not None and math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _determine_daily_plan_long_position_mode(
+    current_state: CurrentPortfolioState,
+    max_long_positions: int,
+) -> str:
+    """Choose the action-generation mode from actual non-hedge holdings."""
+    policy = validate_long_position_limits(
+        dict(current_state.shares),
+        [],
+        max_long_positions=max_long_positions,
+        excluded_symbols=current_state.hedge_symbols,
+    )
+    return "OVER_CAP_RECOVERY" if policy.current_count > max_long_positions else "NORMAL"
+
+
+def _recovery_sell_order(scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lowest strategy score first; preserve the specified deterministic ties."""
+    ordered = sorted(scores, key=lambda item: str(item["symbol"]), reverse=True)
+    ordered = sorted(ordered, key=lambda item: item["rs_val"])
+    return sorted(ordered, key=lambda item: item["score"])
+
+
+def _is_switch_action(item: Dict[str, Any]) -> bool:
+    reason = str(item.get("reason", ""))
+    return reason.startswith(("SWITCH_OUT", "SWITCH_IN"))
+
+
+def validate_final_daily_plan_long_position_actions(
+    current_state: CurrentPortfolioState,
+    action_items: List[Dict[str, Any]],
+    long_position_mode: str,
+    max_long_positions: int,
+    warning_items: List[Dict[str, Any]],
+) -> None:
+    """Fail before any output write when final Daily Plan actions violate the shared cap."""
+    final_policy = validate_long_position_limits(
+        dict(current_state.shares),
+        _daily_plan_policy_actions(action_items),
+        max_long_positions=max_long_positions,
+        excluded_symbols=current_state.hedge_symbols,
+    )
+
+    if long_position_mode == "NORMAL":
+        if not (
+            final_policy.allowed
+            and final_policy.is_within_cap
+            and final_policy.projected_count <= max_long_positions
+        ):
+            raise RuntimeError(
+                "Final NORMAL Daily Plan violates the long-position hard cap: "
+                f"errors={final_policy.error_codes}, projected={final_policy.projected_count}, "
+                f"max={max_long_positions}"
+            )
+        return
+
+    has_buy = any(item.get("type") == ACTION_BUY for item in action_items)
+    has_switch = any(_is_switch_action(item) for item in action_items)
+    if (
+        has_buy
+        or has_switch
+        or not final_policy.allowed
+        or final_policy.projected_count > final_policy.current_count
+    ):
+        raise RuntimeError(
+            "Final OVER_CAP_RECOVERY Daily Plan is unsafe: "
+            f"has_buy={has_buy}, has_switch={has_switch}, errors={final_policy.error_codes}, "
+            f"current={final_policy.current_count}, projected={final_policy.projected_count}"
+        )
+
+    warning_reasons = {str(item.get("reason", "")) for item in warning_items}
+    unresolved_warning_reasons = {
+        WARNING_LONG_POSITION_RECOVERY_SCORE_UNAVAILABLE,
+        WARNING_LONG_POSITION_RECOVERY_UNEXPECTED_ACTION,
+    }
+    if (
+        not warning_reasons.intersection(unresolved_warning_reasons)
+        and final_policy.projected_count > max_long_positions
+    ):
+        raise RuntimeError(
+            "Final OVER_CAP_RECOVERY Daily Plan did not restore the hard cap: "
+            f"projected={final_policy.projected_count}, max={max_long_positions}"
+        )
+
+
+def apply_daily_plan_long_position_cap(
+    current_state: CurrentPortfolioState,
+    action_items: List[Dict[str, Any]],
+    holding_score_results: List[Dict[str, Any]],
+    max_long_positions: int,
+    current_prices: Dict[str, float],
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]], bool]:
+    """Apply the shared long-position policy before normal strategy BUY creation."""
+    positions = dict(current_state.shares)
+    excluded_symbols = set(current_state.hedge_symbols)
+    current_policy = validate_long_position_limits(
+        positions,
+        [],
+        max_long_positions=max_long_positions,
+        excluded_symbols=excluded_symbols,
+    )
+    over_cap = current_policy.current_count > max_long_positions
+    warnings: list[dict[str, Any]] = []
+
+    if not over_cap:
+        policy = validate_long_position_limits(
+            positions,
+            _daily_plan_policy_actions(action_items),
+            max_long_positions=max_long_positions,
+            excluded_symbols=excluded_symbols,
+        )
+        return action_items, policy.available_slots if policy.allowed else 0, warnings, False
+
+    unexpected_actions = [
+        item for item in action_items
+        if item.get("type") == ACTION_BUY or _is_switch_action(item)
+    ]
+    if unexpected_actions:
+        safe_actions = [item for item in action_items if item not in unexpected_actions]
+        unexpected_details = "; ".join(
+            f"{item.get('symbol', '-')}:type={item.get('type', '-')},reason={item.get('reason', '-')}"
+            for item in unexpected_actions
+        )
+        warnings.append({
+            "symbol": ", ".join(sorted({str(item.get("symbol", "")) for item in unexpected_actions})),
+            "reason": WARNING_LONG_POSITION_RECOVERY_UNEXPECTED_ACTION,
+            "severity": SEVERITY_HIGH,
+            "note": (
+                "OVER_CAP_RECOVERY에서 예상하지 못한 BUY/SWITCH action을 제거하고 복구 SELL 생성을 "
+                f"중단했습니다. {unexpected_details}"
+            ),
+        })
+        return safe_actions, 0, warnings, True
+
+    # Only independent existing SELL actions contribute to the recovery projection.
+    capped_actions = list(action_items)
+    recovery_policy = validate_long_position_limits(
+        positions,
+        _daily_plan_policy_actions(capped_actions),
+        max_long_positions=max_long_positions,
+        excluded_symbols=excluded_symbols,
+    )
+    score_by_symbol = {str(item.get("symbol", "")).strip().upper(): item for item in holding_score_results}
+    missing_symbols = []
+    valid_scores = []
+    for symbol, _shares in current_policy.projected_positions:
+        score_row = score_by_symbol.get(symbol)
+        if score_row is None or not score_row.get("valid", False):
+            missing_symbols.append(symbol)
+            continue
+        try:
+            rs_val = float(score_row.get("rs_val", 0.0))
+            if not math.isfinite(rs_val):
+                rs_val = 0.0
+        except (TypeError, ValueError):
+            rs_val = 0.0
+        valid_scores.append({"symbol": symbol, "score": float(score_row["score"]), "rs_val": rs_val})
+
+    if missing_symbols:
+        symbols_text = ", ".join(sorted(missing_symbols))
+        warnings.append({
+            "symbol": symbols_text,
+            "reason": WARNING_LONG_POSITION_RECOVERY_SCORE_UNAVAILABLE,
+            "severity": SEVERITY_HIGH,
+            "note": (
+                f"현재 {symbols_text}의 전략 점수를 구할 수 없어 초과 포지션 복구 매도 순위를 "
+                "결정할 수 없습니다. 해당 종목의 데이터와 전략 점수를 확인해 주세요."
+            ),
+        })
+        return capped_actions, 0, warnings, True
+
+    normalized_shares: dict[str, int] = {}
+    for raw_symbol, shares in current_state.shares.items():
+        symbol = normalize_symbol(raw_symbol)
+        normalized_shares[symbol] = normalized_shares.get(symbol, 0) + shares
+    normalized_prices = {
+        normalize_symbol(raw_symbol): price
+        for raw_symbol, price in current_prices.items()
+    }
+
+    required_sells = max(0, recovery_policy.projected_count - max_long_positions)
+    symbols_after_existing_sells = {symbol for symbol, _shares in recovery_policy.projected_positions}
+    for score_row in _recovery_sell_order(valid_scores):
+        symbol = score_row["symbol"]
+        if required_sells <= 0:
+            break
+        if symbol not in symbols_after_existing_sells:
+            continue
+        shares = normalized_shares.get(symbol, 0)
+        if shares <= 0:
+            continue
+        capped_actions.append({
+            "type": ACTION_SELL,
+            "symbol": symbol,
+            "shares": shares,
+            "price": normalized_prices.get(symbol, 0),
+            "reason": "LONG_POSITION_CAP_RECOVERY",
+        })
+        symbols_after_existing_sells.remove(symbol)
+        required_sells -= 1
+
+    return capped_actions, 0, warnings, True
+
+
+def select_strategy_entry_symbols_with_long_cap(
+    symbols: List[str],
+    formatted_candidates: List[Dict[str, Any]],
+    available_slots: int,
+) -> list[str]:
+    """Keep the existing candidate rank while truncating to hard-cap capacity."""
+    candidate_by_symbol = {str(row.get("symbol", "")): row for row in formatted_candidates}
+    ranked = []
+    for symbol in symbols:
+        row = candidate_by_symbol.get(symbol)
+        if row is None:
+            continue
+        ranked.append(row)
+    ranked = rank_candidates(ranked)
+    return [str(row["symbol"]) for row in ranked[:max(0, available_slots)]]
+
+
 def generate_daily_plan(
     date_str: str = None,
     data_date: str | None = None,
@@ -1081,17 +1332,28 @@ def generate_daily_plan(
         target_state.target_cash_ratio
     )
 
-    # [MFU 5] 능동적 스위칭 (Active Switching) 판단
+    # Decide the cap mode before generating any switch or strategy-entry action.
+    max_long_positions = merged_config.get("max_long_positions", DEFAULT_MAX_LONG_POSITIONS)
+    long_position_mode = _determine_daily_plan_long_position_mode(
+        current_state, max_long_positions,
+    )
+    hedge_symbols = {str(symbol).strip().upper() for symbol in current_state.hedge_symbols}
+    non_hedge_symbols = [
+        symbol for symbol in current_state.current_symbols
+        if str(symbol).strip().upper() not in hedge_symbols
+    ]
+
+    # Holding scores are computed once and then projected for their consumers.
     switch_pairs = []
-    if not df_candidates.empty and current_state.current_symbols:
+    holding_score_results: list[dict[str, Any]] = []
+    if non_hedge_symbols:
         # 1. 현재 보유 종목 점수 재계산 (백테스트와 동일 로직)
-        current_pos_scores = []
         # 국면별 가중치 가져오기 (config.REGIME_RULES 참조)
         candidates_by_symbol = df_candidates.set_index('symbol', drop=False) if 'symbol' in df_candidates.columns else pd.DataFrame()
         
         from core.decision_core import compute_candidate_score
         
-        for s in current_state.current_symbols:
+        for s in non_hedge_symbols:
             try:
                 # 최신 지표가 포함된 데이터 필요 (screener/indicator.py 활용 권장하나, 여기서는 후보군 생성 시 계산된 값 참조가 어려우므로 단순화된 비교 수행)
                 # 실전에서는 build_screener_results()가 이미 모든 종목(보유주 포함)의 점수를 계산하도록 설계되어 있어야 함.
@@ -1101,10 +1363,7 @@ def generate_daily_plan(
                 if not candidates_by_symbol.empty and s in candidates_by_symbol.index:
                     score = candidates_by_symbol.loc[s, 'score']
                     holding_rs = candidates_by_symbol.loc[s, 'rs_val'] if 'rs_val' in candidates_by_symbol.columns else None
-                    print(
-                        f"Holding switching score: {s} score={float(score):.2f} "
-                        f"rs={'N/A' if pd.isna(holding_rs) else f'{float(holding_rs):.4f}'} reasons=candidate_reuse"
-                    )
+                    holding_reasons = ["candidate_reuse"]
                 else:
                     rs_weight = merged_config.get('rs_weight', getattr(config, 'RS_WEIGHT', 1.0))
                     score, holding_rs, holding_reasons = compute_holding_score_for_switching(
@@ -1116,34 +1375,48 @@ def generate_daily_plan(
                         rs_weight,
                         merged_config,
                     )
-                    if score is None:
-                        print(f"[WARN] Skipping switching score for {s}: unable to compute holding score")
-                        continue
-                    reason_text = ",".join(holding_reasons) if holding_reasons else "none"
-                    print(
-                        f"Holding switching score: {s} score={float(score):.2f} "
-                        f"rs={'N/A' if holding_rs is None or pd.isna(holding_rs) else f'{float(holding_rs):.4f}'} "
-                        f"reasons={reason_text}"
-                    )
-                
+                score_valid = _is_valid_holding_score(score)
                 p_ret = (current_prices[s] - current_state.avg_price[s]) / current_state.avg_price[s] if current_state.avg_price[s] > 0 else 0
-                current_pos_scores.append({
-                    'symbol': s, 'score': score, 'return': p_ret, 
-                    'shares': current_state.shares[s], 'price': current_prices[s]
+                holding_score_results.append({
+                    "symbol": s,
+                    "score": float(score) if score_valid else score,
+                    "rs_val": holding_rs,
+                    "position_return": p_ret,
+                    "shares": current_state.shares[s],
+                    "price": current_prices[s],
+                    "valid": score_valid,
+                    "error": None if score_valid else "score is None, non-finite, or not numeric",
                 })
+                if score_valid:
+                    reason_text = ",".join(holding_reasons) if holding_reasons else "none"
+                    print(f"Holding score: {s} score={float(score):.2f} reasons={reason_text}")
+                else:
+                    print(f"[WARN] Holding score unavailable for {s}")
             except Exception as e:
                 print(f"[WARN] Failed to re-evaluate score for {s}: {e}")
+                holding_score_results.append({
+                    "symbol": s, "score": None, "rs_val": None,
+                    "position_return": None, "shares": current_state.shares.get(s, 0),
+                    "price": current_prices.get(s), "valid": False, "error": str(e),
+                })
 
-        current_pos_scores.sort(key=lambda x: x['score'])
-
-        # 2. 교체 기회 평가
-        # backtest parity: switch-in candidates must satisfy buy_signal-like gate
-        c_df = filter_switch_candidates_for_daily_plan(df_candidates, score_threshold)
-
-        if current_pos_scores:
-            switch_pairs = evaluate_switching_opportunity(c_df, current_pos_scores, merged_config)
+        if long_position_mode == "NORMAL":
+            switching_scores = [
+                {
+                    "symbol": row["symbol"], "score": row["score"],
+                    "return": row["position_return"], "shares": row["shares"],
+                    "price": row["price"], "rs_val": row["rs_val"],
+                }
+                for row in holding_score_results
+                if row["valid"] and row["position_return"] is not None
+            ]
+            c_df = filter_switch_candidates_for_daily_plan(df_candidates, score_threshold)
+            if switching_scores and not df_candidates.empty:
+                switch_pairs = evaluate_switching_opportunity(c_df, switching_scores, merged_config)
+            else:
+                print("[WARN] Skipping active switching: no valid holding scores could be computed.")
         else:
-            print("[WARN] Skipping active switching: no holding scores could be computed.")
+            print("[WARN] OVER_CAP_RECOVERY: active switching is not evaluated.")
 
     # 5. 상세 행동 산출 (매도/매수 수량)
     action_items = []
@@ -1159,11 +1432,12 @@ def generate_daily_plan(
     stop_alerts = [] # 트레일링 스탑 감시 목록
     
     # [MFU 5] 5-0. 교체 매매 액션 추가 (최우선 순위 - 슬롯 확보용)
-    switch_action_items, processed_symbols, switch_buy_symbols = build_switch_action_items(
-        switch_pairs,
-        current_state,
-        current_prices,
-    )
+    if long_position_mode == "NORMAL":
+        switch_action_items, processed_symbols, switch_buy_symbols = build_switch_action_items(
+            switch_pairs, current_state, current_prices,
+        )
+    else:
+        switch_action_items, processed_symbols, switch_buy_symbols = [], set(), set()
     action_items.extend(switch_action_items)
 
     for symbol in current_state.current_symbols:
@@ -1256,6 +1530,15 @@ def generate_daily_plan(
                 "note": "Target portfolio에서 제외됨. 즉시 매도 지시가 아니라 수동 검토 대상."
             })
 
+    action_items, available_long_slots, cap_warning_items, over_long_cap = apply_daily_plan_long_position_cap(
+        current_state,
+        action_items,
+        holding_score_results,
+        max_long_positions,
+        current_prices,
+    )
+    warning_items.extend(cap_warning_items)
+
     # 5-2. 매수 판단
     buying_power = calculate_available_buying_power(
         current_state.absolute_cash,
@@ -1271,9 +1554,14 @@ def generate_daily_plan(
             "note": "매수 후보가 있으나 현재 가용 Buying Power가 부족하거나 0입니다.",
         })
     
+    capped_entry_symbols = [] if over_long_cap else select_strategy_entry_symbols_with_long_cap(
+        rebalance.symbol_diff_added,
+        formatted_candidates,
+        available_long_slots,
+    )
     action_items.extend(
         build_strategy_entry_action_items(
-            rebalance.symbol_diff_added,
+            capped_entry_symbols,
             current_state,
             formatted_candidates,
             cp_status,
@@ -1281,6 +1569,14 @@ def generate_daily_plan(
             merged_config["max_positions"],
             planned_buy_symbols=switch_buy_symbols,
         )
+    )
+
+    validate_final_daily_plan_long_position_actions(
+        current_state,
+        action_items,
+        long_position_mode,
+        max_long_positions,
+        warning_items,
     )
 
     for symbol in sorted(set(stale_holdings_alert)):

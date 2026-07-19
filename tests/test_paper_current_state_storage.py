@@ -83,6 +83,25 @@ def test_save_paper_current_state_creates_json_with_required_fields():
         _cleanup(output_path, archive_dir)
 
 
+def test_paper_current_state_marks_configured_hedge_as_excluded_symbol():
+    output_path = _unique_state_path()
+    archive_dir = _unique_archive_dir()
+    try:
+        state = build_paper_state_from_trades(
+            [
+                _make_trade("t1", "AAPL", "BUY", 10, 100.0),
+                _make_trade("t2", "SQQQ", "BUY", 10, 20.0),
+            ],
+            initial_cash=100000.0,
+            currency="USD",
+        )
+        payload = save_paper_current_state(state, "20260509", output_path, archive_dir)["payload"]
+        assert payload["hedge_symbols"] == ["SQQQ"]
+        assert payload["current_hedge_ratio"] > 0
+    finally:
+        _cleanup(output_path, archive_dir)
+
+
 def test_save_paper_current_state_backs_up_existing_file_before_overwrite():
     output_path = _unique_state_path()
     archive_dir = _unique_archive_dir()

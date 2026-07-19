@@ -6,6 +6,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from core.portfolio_config import PORTFOLIO_CONFIG
+
+
+DEFAULT_MAX_LONG_POSITIONS = PORTFOLIO_CONFIG["max_long_positions"]
 
 BUY = "BUY"
 SELL = "SELL"
@@ -51,7 +55,7 @@ def validate_long_position_limits(
     positions: Mapping[str, Any] | Iterable[Any],
     actions: Iterable[LongPositionAction | Mapping[str, Any]],
     *,
-    max_long_positions: int = 10,
+    max_long_positions: int = DEFAULT_MAX_LONG_POSITIONS,
     excluded_symbols: Iterable[str] = (),
 ) -> LongPositionPolicyResult:
     """Project ordered actions and validate the distinct-long hard cap.
