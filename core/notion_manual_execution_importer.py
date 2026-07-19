@@ -14,6 +14,12 @@ from core.notion_account_keys import (
 )
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
+from core.long_position_policy import DEFAULT_MAX_LONG_POSITIONS, LongPositionAction
+from core.manual_execution_long_position_cap import (
+    ManualExecutionLongPositionValidation,
+    get_configured_manual_execution_hedge_symbols,
+    validate_manual_execution_long_position_actions,
+)
 from core.paper_account_paths import PaperAccountPaths
 from core.paper_execution_log import build_paper_trade_id
 from core.paths import (
@@ -98,6 +104,7 @@ class ManualExecutionPreview:
     projected_cash_end: float
     projected_cash_impact: float
     projected_position_impact: dict[str, int]
+    long_position_policy: dict[str, Any]
     candidates: list[ManualExecutionCandidate]
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,6 +123,7 @@ class ManualExecutionPreview:
             "projected_cash_end": self.projected_cash_end,
             "projected_cash_impact": self.projected_cash_impact,
             "projected_position_impact": self.projected_position_impact,
+            "long_position_policy": self.long_position_policy,
             "candidates": [
                 {
                     **asdict(candidate),
@@ -136,6 +144,7 @@ def build_manual_execution_preview(
     account_paths: PaperAccountPaths | None = None,
     env: dict[str, str] | None = None,
     reports_dir: Path | None = None,
+    max_long_positions: int = DEFAULT_MAX_LONG_POSITIONS,
 ) -> ManualExecutionPreview:
     resolved_account_id = normalize_notion_account_id(account_id)
     if account_paths is not None and account_paths.account_id != resolved_account_id:
@@ -162,6 +171,7 @@ def build_manual_execution_preview(
     existing_trade_ids = _load_existing_trade_ids(account_paths=account_paths)
     available_cash = _load_latest_cash_balance(account_paths=account_paths)
     holdings = _load_latest_position_shares(account_paths=account_paths)
+    hedge_symbols = get_configured_manual_execution_hedge_symbols()
     projected_position_impact: dict[str, int] = {}
 
     for candidate in candidates:
@@ -211,6 +221,24 @@ def build_manual_execution_preview(
                 running_cash = projected_cash
                 running_holdings[candidate.symbol] = running_holdings.get(candidate.symbol, 0) + candidate.quantity
 
+    long_position_validation = validate_manual_execution_long_position_actions(
+        holdings,
+        [
+            LongPositionAction(
+                symbol=candidate.symbol,
+                action_type=candidate.side,
+                quantity=candidate.quantity,
+            )
+            for candidate in candidates
+        ],
+        max_long_positions=max_long_positions,
+        hedge_symbols=hedge_symbols,
+    )
+    if candidates and not long_position_validation.allowed:
+        issue = _long_position_cap_issue(long_position_validation)
+        for candidate in candidates:
+            candidate.validation_issues.append(issue)
+
     commit_allowed = _derive_commit_allowed(candidates)
     output_dir = _resolve_preview_reports_dir(account_paths=account_paths, reports_dir=reports_dir)
     compact_date = execution_date.replace("-", "")
@@ -232,6 +260,7 @@ def build_manual_execution_preview(
         projected_cash_end=running_cash,
         projected_cash_impact=running_cash - available_cash,
         projected_position_impact=dict(sorted(projected_position_impact.items())),
+        long_position_policy=long_position_validation.to_dict(),
         candidates=candidates,
     )
     _write_preview_files(preview, json_path=json_path, markdown_path=markdown_path)
@@ -555,6 +584,22 @@ def _load_latest_position_shares(*, account_paths: PaperAccountPaths | None = No
     return holdings
 
 
+def _long_position_cap_issue(
+    validation: ManualExecutionLongPositionValidation,
+) -> ManualExecutionIssue:
+    policy = validation.policy
+    return ManualExecutionIssue(
+        severity=FAIL,
+        code="long_position_cap_blocked",
+        message=(
+            "Long-position hard-cap validation blocked the entire batch: "
+            f"mode={validation.mode}, current={policy.current_count}, "
+            f"projected={policy.projected_count}, max={validation.max_long_positions}, "
+            f"error_codes={','.join(validation.error_codes) or 'none'}."
+        ),
+    )
+
+
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows: list[dict[str, str]] = []
@@ -608,6 +653,10 @@ def _render_preview_markdown(preview: ManualExecutionPreview) -> str:
         f"- Projected Cash Start: {preview.projected_cash_start:.2f}",
         f"- Projected Cash End: {preview.projected_cash_end:.2f}",
         f"- Projected Cash Impact: {preview.projected_cash_impact:.2f}",
+        f"- Long Position Mode: {preview.long_position_policy['mode']}",
+        f"- Long Position Count: {preview.long_position_policy['current_count']} -> {preview.long_position_policy['projected_count']}",
+        f"- Max Long Positions: {preview.long_position_policy['max_long_positions']}",
+        f"- Long Position Policy Errors: {preview.long_position_policy['error_codes'] or []}",
         "",
         "## Position Impact",
     ]

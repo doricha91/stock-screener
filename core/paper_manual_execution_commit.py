@@ -29,6 +29,12 @@ from core.paper_account_paths import PaperAccountPaths
 from core.paper_account_state import build_paper_state_from_trades
 from core.paper_current_state_storage import save_paper_current_state
 from core.paper_execution_log import append_paper_execution_log
+from core.long_position_policy import DEFAULT_MAX_LONG_POSITIONS, LongPositionAction
+from core.manual_execution_long_position_cap import (
+    ManualExecutionLongPositionValidation,
+    get_configured_manual_execution_hedge_symbols,
+    validate_manual_execution_long_position_actions,
+)
 from core.paper_market_valuation import value_paper_account_state
 from core.paper_position_snapshot import (
     build_paper_position_snapshot_rows,
@@ -75,6 +81,7 @@ def commit_manual_execution_preview(
     preview_json_path: Path,
     allow_warnings: bool = False,
     account_paths: PaperAccountPaths | None = None,
+    max_long_positions: int = DEFAULT_MAX_LONG_POSITIONS,
 ) -> ManualExecutionCommitResult:
     preview_payload = _load_preview_payload(preview_json_path)
     resolved_account_id = _resolve_preview_account_id(preview_payload, account_paths=account_paths)
@@ -97,6 +104,31 @@ def commit_manual_execution_preview(
     previews = [_candidate_to_trade_preview(candidate) for candidate in candidate_payloads]
     writer_paths = _resolve_execution_writer_paths(execution_date=execution_date, account_paths=account_paths)
     log_path = writer_paths["paper_execution_log"]
+    initial_cash, currency = _load_initial_cash_and_currency(writer_paths["paper_account_snapshot"])
+    latest_state = build_paper_state_from_trades(
+        _read_csv_rows(log_path),
+        initial_cash=initial_cash,
+        currency=currency,
+    )
+    hedge_symbols = get_configured_manual_execution_hedge_symbols()
+    long_position_validation = validate_manual_execution_long_position_actions(
+        latest_state.positions,
+        [
+            LongPositionAction(
+                symbol=preview.symbol,
+                action_type=preview.side,
+                quantity=abs(preview.shares),
+            )
+            for preview in previews
+        ],
+        max_long_positions=max_long_positions,
+        hedge_symbols=hedge_symbols,
+    )
+    if not long_position_validation.allowed:
+        raise ManualExecutionCommitError(
+            _format_long_position_cap_error(long_position_validation)
+        )
+
     rows_to_append, append_warnings = append_paper_execution_log(
         previews,
         log_path,
@@ -117,10 +149,7 @@ def commit_manual_execution_preview(
         )
     if len(rows_to_append) != len(previews):
         raise ManualExecutionCommitError("Commit blocked because pre-check row count does not match preview candidate count.")
-
-    initial_cash, currency = _load_initial_cash_and_currency(writer_paths["paper_account_snapshot"])
     current_state_path = writer_paths["paper_state"]
-
     backup_paths = _create_dev_backups(
         execution_date=execution_date,
         targets={
@@ -231,6 +260,18 @@ def commit_manual_execution_preview(
         current_state_written=True,
         account_snapshot_written=True,
         position_snapshot_written=True,
+    )
+
+
+def _format_long_position_cap_error(
+    validation: ManualExecutionLongPositionValidation,
+) -> str:
+    policy = validation.policy
+    return (
+        "Commit blocked by independent long-position hard-cap validation before any write: "
+        f"mode={validation.mode}, current={policy.current_count}, "
+        f"projected={policy.projected_count}, max={validation.max_long_positions}, "
+        f"error_codes={','.join(validation.error_codes) or 'none'}."
     )
 
 
