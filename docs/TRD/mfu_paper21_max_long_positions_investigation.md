@@ -1,4 +1,7 @@
-# 최대 롱 보유 종목 10개 — 코드 조사 결과
+# 최대 롱 보유 종목 hard cap — 조사 및 MFU-SAFE1 최종 결과
+
+> 문서 상태: MFU-SAFE1 구현 및 통합 검증 완료. 아래 1~16절은 구현 전 조사 기록이며,
+> 현재 확정 정책과 검증 결과는 17절을 기준으로 한다.
 
 ## 1. 조사 범위와 기준
 
@@ -332,3 +335,118 @@ SUCCESS
 ```
 
 조사 과정에서 production/test/DB/Notion schema 변경과 Git write 작업은 수행하지 않았다.
+
+## 17. MFU-SAFE1 최종 구현 및 검증 결과
+
+### 17.1 최종 상태와 구현 커밋
+
+MFU-SAFE1은 Paper Daily Plan과 Manual Execution Preview/Commit에 동일한 distinct long
+hard-cap 정책을 적용하는 것으로 완료됐다. 구현 커밋은 다음과 같다.
+
+| 단계 | 커밋 | 내용 |
+|---|---|---|
+| 공통 정책 | `b13353fccc46f9fefe8af6e826eca889c7f0d4f9` | Paper long-position hard-cap 공통 정책과 설정 추가 |
+| Daily Plan | `670e666177855c49c4e65efbfe05f1253007d052` | 후보 절단, over-cap 복구, 최종 action 재검증 |
+| Manual Execution | `0b93dbf298e43c26c2c51ebb146075b484a44329` | Preview/Commit 독립 hard-cap 재검증과 config hedge SSOT |
+
+통합 검증 기준 HEAD는 `0b93dbf298e43c26c2c51ebb146075b484a44329`이다.
+
+### 17.2 확정 정책
+
+- `max_long_positions`의 SSOT는 `core/portfolio_config.py`의 `PORTFOLIO_CONFIG`이며 기본값은 10이다.
+- hard cap은 국면별 목표인 `target_long_slots` 및 sizing용 `max_positions`와 별개다.
+- runtime override로 15, 20 같은 값을 주입할 수 있으며 구현에는 literal 10 의존성이 없다.
+- `max_long_positions`는 `core/param_grid.py`에 없으며 optimizer 탐색 대상이 아니다.
+- hedge SSOT는 호출 시점의 `config.HEDGE_TICKERS`다. symbol은 공통 `normalize_symbol()`로 정규화한다.
+- current-state JSON의 `hedge_symbols`는 파생 출력이며 Manual Execution 정책 입력이 아니다.
+- config에 없는 custom symbol은 state JSON에 hedge로 기록돼 있어도 일반 long으로 계산한다.
+
+### 17.3 Daily Plan 동작
+
+- 일반 신규 BUY 후보는 기존 전략 순위인 score 내림차순, RS 내림차순, symbol 오름차순을
+  보존한 채 사용 가능한 long slot 수로 절단한다.
+- 기존 종목 추가매수는 distinct long 수를 증가시키지 않는다.
+- 전량 SELL만 slot을 확보하며 부분 SELL과 review-only `REVIEW_EXIT`는 slot을 확보하지 않는다.
+- 시작 상태가 cap을 초과하면 active switching과 신규 BUY를 실행하지 않는다.
+- over-cap 복구는 유효한 보유 점수를 한 번만 계산한 결과를 사용해 전략 순위가 가장 낮은
+  종목부터 필요한 수만큼 전량 `LONG_POSITION_CAP_RECOVERY` SELL을 생성한다.
+- 점수를 계산할 수 없는 보유 종목이 있으면 SELL을 추정하지 않고
+  `WARNING_LONG_POSITION_RECOVERY_SCORE_UNAVAILABLE` 운영자 확인 경고를 남긴다.
+- 모든 action 생성 후 공통 정책으로 다시 검증하며, 위반 시 Markdown/journal/JSON sidecar 기록 전에 중단한다.
+
+### 17.4 Manual Execution Preview/Commit 동작
+
+- Preview는 account-scoped position snapshot과 실제 READY candidate의 `Act_Shares` 및
+  `Actual Price`를 사용해 전체 batch를 검증한다.
+- Commit은 Preview의 `long_position_policy`, `projected_count`, hedge metadata 또는 validation
+  결과를 신뢰하지 않는다.
+- Commit은 account-scoped execution log를 다시 replay한 최신 position과 호출 시점의
+  `config.HEDGE_TICKERS`로 실제 commit action 전체를 독립 재검증한다.
+- cap 위반 batch는 허용 가능한 SELL이 함께 있어도 부분 commit하지 않고 전체 차단한다.
+- hard-cap 검증은 append pre-check, backup, execution-log append, snapshot, archive 및 sidecar
+  write보다 앞에 있다. 검증 실패 시 persistent write는 0회다.
+- `Actual Price`와 `Act_Shares`는 Preview에서 Commit execution row까지 유지된다.
+
+### 17.5 스키마와 백테스트 영향
+
+- DB schema, Notion schema, execution-log 포맷은 변경하지 않았다.
+- 최초 MFU-SAFE1 커밋의 부모 `ed421f8d22c34c913bb148dcee7d7717feee01b8`부터 통합 검증
+  기준 HEAD까지 `core/backtest_engine.py`, `backtesting/`, `core/optimizer_engine.py`,
+  `core/optimizer_storage.py`, `scripts/run_portfolio_backtest.py`, `scripts/run_optimizer.py`,
+  `core/param_grid.py`, `core/position_sizing.py`에는 MFU-SAFE1 변경이 없다.
+- `core/backtest_engine.py`, `core/param_grid.py`, `backtesting/`에는
+  `max_long_positions`, `long_position_policy`, `manual_execution_long_position_cap` 참조가 없다.
+- 따라서 Paper hard cap은 backtest engine 실행 경로에 연결되지 않았고 optimizer parameter로도 추가되지 않았다.
+
+### 17.6 통합 테스트와 완전 격리 smoke
+
+`tests/test_mfu_safe1_end_to_end.py`는 다음 실제 경계를 연결한다.
+
+```text
+통제된 CurrentPortfolioState
+→ generate_daily_plan()
+→ Daily Plan JSON action
+→ fixture Notion page
+→ normalize_manual_execution_pages()
+→ build_manual_execution_preview()
+→ commit_manual_execution_preview()
+→ execution log replay
+```
+
+검증 결과:
+
+- 정상 흐름: non-hedge 9종목과 신규 후보 2개에서 Daily Plan이 상위 1개만 선택하고,
+  Preview/Commit 후 최종 distinct long이 10임을 확인했다.
+- 복구 흐름: non-hedge 11종목에서 최저 점수 1종목의 전량 복구 SELL만 생성하고,
+  Preview/Commit 후 최종 distinct long이 10임을 확인했다.
+- 상태 변화: Preview 당시 허용된 batch가 Commit 직전 별도 position 추가로 11개가 되면
+  Commit 독립 재검증이 전체 batch를 차단하고 persistent write가 0회임을 확인했다.
+- `Actual Price`와 `Act_Shares`가 최종 execution row에 그대로 유지됨을 확인했다.
+- end-to-end 전용 검증은 3개 테스트가 통과했다.
+- 정상/복구 smoke는 `D:\python\mfu_safe1_4_smoke_20260720_211436_2487981`에서 실행했으며
+  2개 테스트가 통과했다. account snapshot, position snapshot, execution log, current-state JSON,
+  Daily Plan 및 Manual Execution report는 모두 이 고유 외부 경로 아래에서만 생성한 뒤 제거했다.
+- 필수 관련 테스트와 무쓰기 switching parity 테스트는 총 150개가 통과했다.
+- 유일한 warning은 외부 `pandas_ta`가 사용하는 `pkg_resources` deprecation warning이다.
+- 운영 Paper 경로 374개 파일의 경로, SHA-256, UTC timestamp, size manifest가 smoke 전후 동일했다.
+- 전체 회귀 실행 중 기존 `tests/test_paper_manual_execution_commit.py`의 default-account fixture가
+  운영 archive에 156-byte current-state backup 한 개를 생성하는 격리 한계를 확인했다. 작업 전
+  manifest에 없던 이번 실행 산출물임을 이름, 생성 시각, 크기와 SHA-256으로 확인해 해당 파일만
+  제거했으며, 최종 운영 manifest는 작업 전 값과 다시 일치했다.
+
+### 17.7 백테스트 실행 판정
+
+`tests/test_smoke_optimizer.py`는 `backtest_log_db_path()`의 SQLite DB에 결과를 기록하므로 실행하지 않았다.
+`tests/test_smoke_backtest.py`는 `core.backtest_engine.prepare_market_data()`를 통해 운영 market DB를
+읽으며 완전한 임시 DB 격리가 없으므로 실행하지 않았다. 대신 MFU 기준 전체 diff, 실행 경로 참조 검색,
+공통 정책 단위 테스트와 파일 write가 없는 `tests/test_paper_switching_parity.py`를 검증했다.
+
+### 17.8 남은 제한 사항과 후속 문서
+
+- Paper position role schema를 추가하지 않았으므로 hedge 분류는 configured ticker에 의존한다.
+- Daily Plan과 Manual Execution 사이의 운영자/Notion 검토 경계는 유지되며 직접 자동 실행 API는 없다.
+- 이번 검증은 fixture Notion read와 mock valuation을 사용했으며 실제 Notion, Telegram, broker 또는 live 주문을 실행하지 않았다.
+- 향후 전체 Manual Execution 회귀 실행에서는 default-account backup 경로도 외부 temp root로
+  monkeypatch해 위 테스트 fixture의 운영 archive 생성 가능성을 제거해야 한다.
+- 보호 문서 `docs/operations/paper_daily_cycle_commands.md`와
+  `idea, PRD, TRD/paper 운영 기능 개발 로드맵 v1.3.md`는 이번 작업에서 수정하지 않았으며 후속 문서 동기화 대상으로 남긴다.
