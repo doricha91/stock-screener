@@ -109,6 +109,35 @@ def test_cli_passes_date_to_daily_plan_export(monkeypatch):
     assert captured["daily_plan_date"] == "2026-06-05"
 
 
+@pytest.mark.parametrize("target", ["--benchmark", "--account-snapshot"])
+def test_cli_snapshot_exports_require_expected_date(target):
+    with pytest.raises(SystemExit):
+        export_paper_to_notion.main([target, "--dry-run"])
+
+
+def test_cli_passes_expected_date_to_snapshot_export(monkeypatch):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(export_paper_to_notion, "load_notion_settings", lambda allow_missing=True: object())
+    monkeypatch.setattr(export_paper_to_notion, "load_notion_property_mapping", lambda: {})
+
+    def fake_export_selected_paper_reports_to_notion(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        export_paper_to_notion,
+        "export_selected_paper_reports_to_notion",
+        fake_export_selected_paper_reports_to_notion,
+    )
+
+    rc = export_paper_to_notion.main(
+        ["--benchmark", "--account-snapshot", "--expected-date", "2026-06-15", "--dry-run"]
+    )
+
+    assert rc == 0
+    assert captured["expected_date"] == "2026-06-15"
+
+
 def test_cli_manual_review_template_requires_dry_run_or_confirm_actual():
     with pytest.raises(SystemExit):
         export_paper_to_notion.main(

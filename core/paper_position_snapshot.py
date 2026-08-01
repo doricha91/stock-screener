@@ -7,13 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from core.paper_account_guard import assert_non_default_writer_target
+from core.paper_account_profile import validate_account_id
 from core.paper_account_state import PaperAccountState
 from core.paper_market_valuation import PaperAccountValuation
 from core.paper_safety import assert_paper_path
+from core.paper_snapshot_identity import validate_snapshot_account_identity
 from core.paths import PAPER_TEST_DIR
 
 
 PAPER_POSITION_SNAPSHOT_COLUMNS = [
+    "account_id",
     "snapshot_date",
     "symbol",
     "shares",
@@ -65,7 +68,9 @@ def build_paper_position_snapshot_rows(
     market_valuation: PaperAccountValuation,
     snapshot_date: str,
     created_at: str | None = None,
+    account_id: str = "paper_default",
 ) -> list[dict[str, Any]]:
+    account_id = validate_account_id(account_id)
     normalized_date = _normalize_snapshot_date(snapshot_date)
     rows: list[dict[str, Any]] = []
 
@@ -75,6 +80,7 @@ def build_paper_position_snapshot_rows(
         cost_value = float(position.cost_value)
         rows.append(
             {
+                "account_id": account_id,
                 "snapshot_date": normalized_date,
                 "symbol": position.symbol,
                 "shares": position.shares,
@@ -125,14 +131,35 @@ def save_paper_position_snapshot(
         assert_paper_path(archive_dir, PAPER_TEST_DIR)
 
     normalized_date = _normalize_snapshot_date(snapshot_date)
+    expected_account_id = account_paths.account_id if account_paths is not None else "paper_default"
+    account_root = account_paths.root if account_paths is not None else PAPER_TEST_DIR
+    validate_snapshot_account_identity(
+        rows,
+        fieldnames=PAPER_POSITION_SNAPSHOT_COLUMNS,
+        allowed_fieldnames=PAPER_POSITION_SNAPSHOT_COLUMNS,
+        expected_account_id=expected_account_id,
+        source_path=snapshot_path,
+        account_root=account_root,
+    )
+
     existing_rows: list[dict[str, Any]] = []
     backup_path: Path | None = None
     replaced = False
+    legacy_backfilled = False
 
     if snapshot_path.exists():
         with snapshot_path.open("r", encoding="utf-8-sig", newline="") as handle:
-            existing_rows = list(csv.DictReader(handle))
-        if any(str(row.get("snapshot_date", "")).strip() == normalized_date for row in existing_rows):
+            reader = csv.DictReader(handle)
+            existing_rows, legacy_backfilled = validate_snapshot_account_identity(
+                list(reader),
+                fieldnames=reader.fieldnames,
+                allowed_fieldnames=PAPER_POSITION_SNAPSHOT_COLUMNS,
+                expected_account_id=expected_account_id,
+                source_path=snapshot_path,
+                account_root=account_root,
+                allow_legacy_backfill=True,
+            )
+        if legacy_backfilled or any(str(row.get("snapshot_date", "")).strip() == normalized_date for row in existing_rows):
             archive_dir.mkdir(parents=True, exist_ok=True)
             backup_path = build_paper_position_snapshot_backup_path(snapshot_path, archive_dir, now=now)
             if account_paths is None or account_paths.account_id == "paper_default":
@@ -144,7 +171,10 @@ def save_paper_position_snapshot(
                     account_root=account_paths.root,
                 )
             shutil.copy2(snapshot_path, backup_path)
-            replaced = True
+            replaced = any(
+                str(row.get("snapshot_date", "")).strip() == normalized_date
+                for row in existing_rows
+            )
 
     kept_rows = [
         row for row in existing_rows
@@ -178,6 +208,7 @@ def save_paper_position_snapshot(
         "backup_path": backup_path,
         "row_count": len(final_rows),
         "replaced": replaced,
+        "legacy_backfilled": legacy_backfilled,
         "snapshot_date": normalized_date,
         "saved_rows": rows,
     }

@@ -11,7 +11,7 @@ from core.paths import OUTPUTS
 
 
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-NASDAQ100_WIKI_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
+NASDAQ100_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies"
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

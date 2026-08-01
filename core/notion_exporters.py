@@ -38,9 +38,15 @@ from core.notion_client import (
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
 from core.paper_account_paths import build_paper_account_paths
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_snapshot_identity import (
+    PaperSnapshotIdentityError,
+    validate_snapshot_account_identity,
+)
 from core.paper_daily_plan_candidates import is_daily_plan_execution_candidate
 from core.paper_manual_review_log_validator import validate_manual_review_log_columns
 from core.paths import (
+    PAPER_TEST_DIR,
     paper_account_snapshot_path,
     paper_daily_action_plan_path,
     paper_reports_dir,
@@ -184,6 +190,26 @@ def _resolve_manual_review_template_root(
     ).root
 
 
+def _resolve_snapshot_export_root(
+    *,
+    account_id: str,
+    paper_root: Path | None,
+) -> Path:
+    if paper_root is not None:
+        return Path(paper_root)
+    if account_id == "paper_default":
+        return build_paper_account_paths(
+            account_id,
+            account_root=PAPER_TEST_DIR,
+            create=False,
+        ).root
+    return build_paper_account_paths(
+        account_id,
+        allow_legacy_default=False,
+        create=False,
+    ).root
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise NotionExportError(f"Missing source file: {path}")
@@ -203,6 +229,15 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
                 normalized[(key or "").replace("\ufeff", "").strip()] = value or ""
             rows.append(normalized)
         return rows
+
+
+def _read_snapshot_csv_rows(path: Path) -> tuple[list[dict[str, str]], list[str] | None]:
+    if not path.exists():
+        raise NotionExportError(f"Missing source file: {path}")
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = [dict(row) for row in reader]
+        return rows, reader.fieldnames
 
 
 def _safe_float(value: str | float | int | None) -> float | None:
@@ -1371,15 +1406,39 @@ def export_benchmark_report_to_notion(
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
     account_id: str | None = None,
+    expected_date: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> ExportResult:
     resolved_account_id = normalize_notion_account_id(account_id)
-    root = Path(paper_root) if paper_root is not None else paper_reports_dir().parent
+    if expected_date is None:
+        raise NotionExportError(
+            "Benchmark export requires expected_date: "
+            f"expected_account_id={resolved_account_id} reason=missing_expected_date"
+        )
+    normalized_expected_date = _normalize_export_date(expected_date)
+    root = _resolve_snapshot_export_root(
+        account_id=resolved_account_id,
+        paper_root=paper_root,
+    )
     reports_dir = root / "reports"
     json_path = reports_dir / "paper_benchmark_comparison.json"
     markdown_path = reports_dir / "paper_benchmark_comparison.md"
     summary = _read_json(json_path)
+    actual_account_id = str(summary.get("account_id") or "").strip()
+    if actual_account_id != resolved_account_id:
+        raise NotionExportError(
+            "Benchmark account identity mismatch: "
+            f"expected_account_id={resolved_account_id} actual_account_id={actual_account_id or '<blank>'} "
+            f"path={json_path} reason=account_id_mismatch"
+        )
+    actual_date = str(summary.get("latest_snapshot_date") or "").strip()
+    if actual_date != normalized_expected_date:
+        raise NotionExportError(
+            "Benchmark latest date mismatch: "
+            f"expected_date={normalized_expected_date} actual_date={actual_date or '<blank>'} "
+            f"expected_account_id={resolved_account_id} path={json_path} reason=date_mismatch"
+        )
     if not markdown_path.exists():
         raise NotionExportError(f"Missing source file: {markdown_path}")
     mapping = get_mapping_section(mapping_root, "benchmark_reports")
@@ -1426,16 +1485,44 @@ def export_latest_account_snapshot_to_notion(
     settings: NotionSettings,
     mapping_root: dict[str, dict[str, str]],
     account_id: str | None = None,
+    expected_date: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> ExportResult:
     resolved_account_id = normalize_notion_account_id(account_id)
-    root = Path(paper_root) if paper_root is not None else paper_account_snapshot_path().parent
+    if expected_date is None:
+        raise NotionExportError(
+            "Account snapshot export requires expected_date: "
+            f"expected_account_id={resolved_account_id} reason=missing_expected_date"
+        )
+    normalized_expected_date = _normalize_export_date(expected_date)
+    root = _resolve_snapshot_export_root(
+        account_id=resolved_account_id,
+        paper_root=paper_root,
+    )
     csv_path = root / paper_account_snapshot_path().name
-    rows = _read_csv_rows(csv_path)
+    rows, fieldnames = _read_snapshot_csv_rows(csv_path)
+    try:
+        rows, _ = validate_snapshot_account_identity(
+            rows,
+            fieldnames=fieldnames,
+            allowed_fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS,
+            expected_account_id=resolved_account_id,
+            source_path=csv_path,
+            account_root=root,
+        )
+    except PaperSnapshotIdentityError as exc:
+        raise NotionExportError(str(exc)) from exc
     if not rows:
         raise NotionExportError(f"No account snapshot rows found: {csv_path}")
     latest_row = max(rows, key=lambda row: row.get("snapshot_date", ""))
+    actual_date = str(latest_row.get("snapshot_date") or "").strip()
+    if actual_date != normalized_expected_date:
+        raise NotionExportError(
+            "Account snapshot latest date mismatch: "
+            f"expected_date={normalized_expected_date} actual_date={actual_date or '<blank>'} "
+            f"expected_account_id={resolved_account_id} path={csv_path} reason=date_mismatch"
+        )
     mapping = get_mapping_section(mapping_root, "account_snapshots")
     synced_at = datetime.now(timezone.utc).isoformat()
     external_key = build_account_snapshot_external_key(latest_row, resolved_account_id)
@@ -1859,6 +1946,7 @@ def export_selected_paper_reports_to_notion(
     export_daily_review_summary: bool = False,
     review_date: str | None = None,
     daily_plan_date: str | None = None,
+    expected_date: str | None = None,
     paper_root: Path | None = None,
     dry_run: bool = False,
 ) -> list[ExportResult]:
@@ -1885,6 +1973,7 @@ def export_selected_paper_reports_to_notion(
                 settings=settings,
                 mapping_root=mapping_root,
                 account_id=account_id,
+                expected_date=expected_date,
                 paper_root=paper_root,
                 dry_run=dry_run,
             )
@@ -1896,6 +1985,7 @@ def export_selected_paper_reports_to_notion(
                 settings=settings,
                 mapping_root=mapping_root,
                 account_id=account_id,
+                expected_date=expected_date,
                 paper_root=paper_root,
                 dry_run=dry_run,
             )

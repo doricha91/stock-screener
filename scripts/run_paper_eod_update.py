@@ -449,6 +449,7 @@ def run_paper_eod_dry_run(
                 source_current_state=str(paths["paper_state"]),
                 market_valuation=market_valuation,
                 market_valuation_error=market_valuation_error,
+                account_id=account_paths.account_id if account_paths is not None else "paper_default",
             )
         except Exception as exc:
             snapshot_save_error = str(exc)
@@ -459,6 +460,7 @@ def run_paper_eod_dry_run(
                 paper_account_state,
                 market_valuation,
                 date_str,
+                account_id=account_paths.account_id if account_paths is not None else "paper_default",
             )
         except Exception as exc:
             position_snapshot_save_error = str(exc)

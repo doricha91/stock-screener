@@ -213,8 +213,12 @@ def test_eod_accounting_close_uses_existing_manual_execution_rows_without_virtua
     assert "would_append_execution_log: false" in output
     assert "rows_appended: 0" in output
     assert paths.current_state_snapshot_path("2026-06-15").exists()
-    assert any(row["snapshot_date"] == "2026-06-15" for row in _read_csv(paths.account_snapshot_path))
-    assert any(row["snapshot_date"] == "2026-06-15" for row in _read_csv(paths.position_snapshot_path))
+    account_rows = _read_csv(paths.account_snapshot_path)
+    position_rows = _read_csv(paths.position_snapshot_path)
+    assert any(row["snapshot_date"] == "2026-06-15" for row in account_rows)
+    assert any(row["snapshot_date"] == "2026-06-15" for row in position_rows)
+    assert {row["account_id"] for row in account_rows} == {paths.account_id}
+    assert {row["account_id"] for row in position_rows} == {paths.account_id}
 
 
 def test_eod_blocks_when_candidates_exist_without_committed_rows_or_commit_report(tmp_path, monkeypatch, capsys):
@@ -412,6 +416,8 @@ def test_eod_empty_no_action_account_writes_cash_only_snapshots(tmp_path, monkey
         for row in account_rows
     )
     assert _read_csv(paths.position_snapshot_path) == []
+    with paths.position_snapshot_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        assert "account_id" in (csv.DictReader(handle).fieldnames or [])
 
 
 def test_eod_no_action_account_values_existing_position(tmp_path, monkeypatch, capsys):

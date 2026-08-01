@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import core.notion_exporters as notion_exporters
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
 from core.notion_exporters import (
     NotionExportError,
     build_manual_execution_template_properties,
@@ -23,6 +26,7 @@ from core.notion_exporters import (
     export_manual_review_template_to_notion,
     build_weekly_report_properties,
     export_daily_plan_to_notion,
+    export_benchmark_report_to_notion,
     export_latest_account_snapshot_to_notion,
     export_selected_paper_reports_to_notion,
     summarize_daily_plan_artifacts,
@@ -66,11 +70,12 @@ def _seed_weekly(root: Path) -> None:
     _write(root / "reports" / "paper_weekly_status_summary.md", "# weekly\n")
 
 
-def _seed_benchmark(root: Path) -> None:
+def _seed_benchmark(root: Path, account_id: str = "paper_default") -> None:
     _write(
         root / "reports" / "paper_benchmark_comparison.json",
         json.dumps(
             {
+                "account_id": account_id,
                 "schema_version": "paper_benchmark_comparison.v1",
                 "run_mode": "exploratory",
                 "official_run": False,
@@ -104,13 +109,59 @@ def _seed_benchmark(root: Path) -> None:
     _write(root / "reports" / "paper_benchmark_comparison.md", "# benchmark\n")
 
 
-def _seed_account(root: Path) -> None:
-    _write(
-        root / "paper_account_snapshot.csv",
-        "snapshot_date,initial_cash,cash,total_equity_market_value,total_equity_cost_basis,unrealized_pnl,cash_ratio_market_value,cash_ratio_cost_basis,position_count,symbols,market_valuation_status,valuation_price_date\n"
-        "2026-05-19,100000,60000,99000,98900,100,0.60,0.61,3,A|B|C,success,2026-05-19\n"
-        "2026-05-20,100000,60344.67,99827.61,99387.46,440.15,0.6044888,0.6071658,3,BRK-B|F|GEN,success,2026-05-20\n",
+def _seed_account(
+    root: Path,
+    account_id: str = "paper_default",
+    *,
+    missing_columns: set[str] | None = None,
+) -> None:
+    fieldnames = [
+        column
+        for column in PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+        if column not in (missing_columns or set())
+    ]
+    source_rows = [
+        {
+            "account_id": account_id,
+            "snapshot_date": "2026-05-19",
+            "initial_cash": "100000",
+            "cash": "60000",
+            "total_equity_market_value": "99000",
+            "total_equity_cost_basis": "98900",
+            "unrealized_pnl": "100",
+            "cash_ratio_market_value": "0.60",
+            "cash_ratio_cost_basis": "0.61",
+            "position_count": "3",
+            "symbols": "A|B|C",
+            "market_valuation_status": "success",
+            "valuation_price_date": "2026-05-19",
+        },
+        {
+            "account_id": account_id,
+            "snapshot_date": "2026-05-20",
+            "initial_cash": "100000",
+            "cash": "60344.67",
+            "total_equity_market_value": "99827.61",
+            "total_equity_cost_basis": "99387.46",
+            "unrealized_pnl": "440.15",
+            "cash_ratio_market_value": "0.6044888",
+            "cash_ratio_cost_basis": "0.6071658",
+            "position_count": "3",
+            "symbols": "BRK-B|F|GEN",
+            "market_valuation_status": "success",
+            "valuation_price_date": "2026-05-20",
+        },
+    ]
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(
+        [
+            {column: source_row.get(column, "") for column in fieldnames}
+            for source_row in source_rows
+        ]
     )
+    _write(root / "paper_account_snapshot.csv", output.getvalue())
 
 
 def _seed_daily_plan(root: Path, *, date: str = "2026-05-20", symbol: str = "ABC") -> None:
@@ -750,6 +801,172 @@ def test_upsert_helper_is_called_in_export_path(tmp_path):
     assert client.calls[0]["refresh_children_on_update"] is False
 
 
+def test_account_snapshot_non_default_export_uses_account_root(tmp_path, monkeypatch):
+    accounts_root = tmp_path / "paper_accounts"
+    monkeypatch.setattr("core.paper_account_paths.PAPER_ACCOUNTS_ROOT", accounts_root)
+    root = accounts_root / "paper_growth"
+    _seed_account(root, "paper_growth")
+    client = FakeClient()
+
+    result = export_latest_account_snapshot_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_growth",
+        expected_date="2026-05-20",
+        dry_run=False,
+    )
+
+    assert Path(result.source_path) == root / "paper_account_snapshot.csv"
+    assert result.external_key == "account_snapshot:paper_growth:2026-05-20"
+    assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "account_id,expected_date,error_part",
+    [
+        ("paper_other", "2026-05-20", "account_id_mismatch"),
+        ("paper_default", "2026-05-21", "date_mismatch"),
+    ],
+)
+def test_account_snapshot_validation_precedes_notion_call(
+    tmp_path,
+    account_id,
+    expected_date,
+    error_part,
+):
+    root = tmp_path / "paper_test"
+    _seed_account(root)
+    client = FakeClient()
+
+    with pytest.raises(NotionExportError, match=error_part):
+        export_latest_account_snapshot_to_notion(
+            client=client,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id=account_id,
+            expected_date=expected_date,
+            paper_root=root,
+            dry_run=False,
+        )
+
+    assert client.calls == []
+
+
+def test_benchmark_non_default_export_validates_identity_and_date(tmp_path, monkeypatch):
+    accounts_root = tmp_path / "paper_accounts"
+    monkeypatch.setattr("core.paper_account_paths.PAPER_ACCOUNTS_ROOT", accounts_root)
+    root = accounts_root / "paper_growth"
+    _seed_benchmark(root, "paper_growth")
+    client = FakeClient()
+
+    result = export_benchmark_report_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_growth",
+        expected_date="2026-05-20",
+        dry_run=False,
+    )
+
+    assert Path(result.source_path) == root / "reports" / "paper_benchmark_comparison.json"
+    assert result.external_key == "benchmark:paper_growth:2026-05-20:exploratory"
+    assert len(client.calls) == 1
+
+
+def test_benchmark_validation_precedes_notion_call(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_benchmark(root, "paper_other")
+    client = FakeClient()
+
+    with pytest.raises(NotionExportError, match="account_id_mismatch"):
+        export_benchmark_report_to_notion(
+            client=client,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_default",
+            expected_date="2026-05-20",
+            paper_root=root,
+            dry_run=False,
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("target", ["account", "benchmark"])
+def test_non_default_snapshot_exports_never_fall_back_to_legacy_root(
+    tmp_path,
+    monkeypatch,
+    target,
+):
+    accounts_root = tmp_path / "paper_accounts"
+    legacy_root = tmp_path / "paper_test"
+    monkeypatch.setattr("core.paper_account_paths.PAPER_ACCOUNTS_ROOT", accounts_root)
+    _seed_account(legacy_root, "paper_growth")
+    _seed_benchmark(legacy_root, "paper_growth")
+    client = FakeClient()
+
+    exporter = (
+        export_latest_account_snapshot_to_notion
+        if target == "account"
+        else export_benchmark_report_to_notion
+    )
+    with pytest.raises(NotionExportError, match=str(accounts_root / "paper_growth").replace("\\", "\\\\")):
+        exporter(
+            client=client,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_growth",
+            expected_date="2026-05-20",
+            dry_run=False,
+        )
+
+    assert client.calls == []
+
+
+def test_account_snapshot_export_rejects_legacy_schema_before_notion_call(tmp_path):
+    root = tmp_path / "paper_test"
+    _write(
+        root / "paper_account_snapshot.csv",
+        "snapshot_date,initial_cash,total_equity_market_value\n"
+        "2026-05-20,100000,101000\n",
+    )
+    client = FakeClient()
+
+    with pytest.raises(NotionExportError, match="reason=missing_columns"):
+        export_latest_account_snapshot_to_notion(
+            client=client,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_default",
+            expected_date="2026-05-20",
+            paper_root=root,
+            dry_run=False,
+        )
+
+    assert client.calls == []
+
+
+def test_account_snapshot_export_rejects_missing_required_columns_before_notion_call(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_account(root, missing_columns={"currency"})
+    client = FakeClient()
+
+    with pytest.raises(NotionExportError, match="reason=missing_columns") as exc_info:
+        export_latest_account_snapshot_to_notion(
+            client=client,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_default",
+            expected_date="2026-05-20",
+            paper_root=root,
+            dry_run=False,
+        )
+
+    assert "currency" in str(exc_info.value)
+    assert client.calls == []
+
+
 def test_account_snapshot_default_export_uses_latest_row(tmp_path):
     root = tmp_path / "paper_test"
     _seed_account(root)
@@ -759,6 +976,7 @@ def test_account_snapshot_default_export_uses_latest_row(tmp_path):
         settings=_settings(),
         mapping_root=_mapping(),
         paper_root=root,
+        expected_date="2026-05-20",
         dry_run=False,
     )
     assert result.external_key == "account_snapshot:paper_default:2026-05-20"

@@ -4,8 +4,32 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import pandas as pd
 
 import core.universe_manager as universe_manager
+
+
+def test_fetch_live_basket_symbols_uses_current_nasdaq_100_constituents_url(monkeypatch):
+    requested_urls: list[str] = []
+
+    def fake_read_html_tables(url: str) -> list[pd.DataFrame]:
+        requested_urls.append(url)
+        if url == universe_manager.SP500_WIKI_URL:
+            return [pd.DataFrame({"Symbol": ["BRK.B", "AAPL"]})]
+        if url == universe_manager.NASDAQ100_WIKI_URL:
+            return [pd.DataFrame({"Ticker": ["MSFT", "AAPL"]})]
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(universe_manager, "_read_html_tables", fake_read_html_tables)
+
+    assert universe_manager.NASDAQ100_WIKI_URL == (
+        "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies"
+    )
+    assert universe_manager.fetch_live_basket_symbols() == {"BRK-B", "AAPL", "MSFT"}
+    assert requested_urls == [
+        universe_manager.SP500_WIKI_URL,
+        universe_manager.NASDAQ100_WIKI_URL,
+    ]
 
 
 @pytest.fixture

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import sqlite3
 from pathlib import Path
+
+import pytest
 
 from core.paper_benchmark_comparison import (
     build_paper_benchmark_comparison_summary,
     generate_paper_benchmark_comparison,
 )
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_snapshot_identity import PaperSnapshotIdentityError
 
 
 def _write(path: Path, text: str) -> None:
@@ -47,8 +53,27 @@ def _seed_market_db(path: Path) -> None:
         conn.close()
 
 
-def _seed_account_snapshot(root: Path, text: str) -> None:
-    _write(root / "paper_account_snapshot.csv", text)
+def _seed_account_snapshot(
+    root: Path,
+    text: str,
+    *,
+    missing_columns: set[str] | None = None,
+) -> None:
+    reader = csv.DictReader(io.StringIO(text))
+    fieldnames = [
+        column
+        for column in PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+        if column not in (missing_columns or set())
+    ]
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for source_row in reader:
+        row = {column: source_row.get(column, "") for column in fieldnames}
+        if "account_id" in fieldnames and not row["account_id"]:
+            row["account_id"] = "paper_default"
+        writer.writerow(row)
+    _write(root / "paper_account_snapshot.csv", output.getvalue())
 
 
 def test_initial_cash_is_read_from_account_snapshot(tmp_path):
@@ -63,6 +88,33 @@ def test_initial_cash_is_read_from_account_snapshot(tmp_path):
     )
     summary = build_paper_benchmark_comparison_summary(paper_root=root, market_db=db_path)
     assert summary["initial_cash"] == 100000.0
+
+
+def test_benchmark_rejects_missing_required_snapshot_columns_without_output_mutation(tmp_path):
+    root = tmp_path / "paper_test"
+    reports_dir = root / "reports"
+    markdown_path = reports_dir / "paper_benchmark_comparison.md"
+    json_path = reports_dir / "paper_benchmark_comparison.json"
+    _seed_account_snapshot(
+        root,
+        "snapshot_date,initial_cash,total_equity_market_value\n"
+        "2026-05-20,100000,101000\n",
+        missing_columns={"currency"},
+    )
+    _write(markdown_path, "existing markdown\n")
+    _write(json_path, '{"existing": true}\n')
+    before_markdown = markdown_path.read_bytes()
+    before_json = json_path.read_bytes()
+
+    with pytest.raises(PaperSnapshotIdentityError, match="reason=missing_columns") as exc_info:
+        generate_paper_benchmark_comparison(
+            paper_root=root,
+            market_db=tmp_path / "missing.db",
+        )
+
+    assert "currency" in str(exc_info.value)
+    assert markdown_path.read_bytes() == before_markdown
+    assert json_path.read_bytes() == before_json
 
 
 def test_snapshot_dates_drive_paper_series(tmp_path):

@@ -45,6 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manual-execution-template", action="store_true", help="Export Manual Execution DRAFT rows from Daily Plan JSON")
     parser.add_argument("--manual-review-template", action="store_true", help="Export Manual Review template rows")
     parser.add_argument("--date", help="Date for dated exports in YYYY-MM-DD format")
+    parser.add_argument(
+        "--expected-date",
+        help="Required source date guard for benchmark/account snapshot exports (YYYY-MM-DD)",
+    )
     parser.add_argument("--all", action="store_true", help="Export all supported targets")
     parser.add_argument("--dry-run", action="store_true", help="Build payload summary without Notion write")
     parser.add_argument("--confirm-actual", action="store_true", help="Confirm actual Notion write for guarded targets")
@@ -64,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     export_daily_ops_status = args.daily_ops_status
     export_manual_execution_template = args.manual_execution_template
     export_manual_review_template = args.manual_review_template
+    if (export_benchmark or export_account_snapshot) and not args.expected_date:
+        parser.error("--expected-date is required for --benchmark and --account-snapshot")
     if export_daily_review_summary and not args.date:
         parser.error("--date is required for --daily-review-summary")
     if export_manual_execution_template and not args.date:
@@ -260,20 +266,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     client = None if args.dry_run else NotionClient(get_notion_token(settings))
-    results = export_selected_paper_reports_to_notion(
-        client=client,
-        settings=settings,
-        mapping_root=mapping,
-        account_id=args.account_id,
-        export_weekly=export_weekly,
-        export_benchmark=export_benchmark,
-        export_account_snapshot=export_account_snapshot,
-        export_daily_plan=export_daily_plan,
-        export_daily_review_summary=export_daily_review_summary,
-        review_date=args.date,
-        daily_plan_date=args.date if export_daily_plan else None,
-        dry_run=args.dry_run,
-    )
+    try:
+        results = export_selected_paper_reports_to_notion(
+            client=client,
+            settings=settings,
+            mapping_root=mapping,
+            account_id=args.account_id,
+            export_weekly=export_weekly,
+            export_benchmark=export_benchmark,
+            export_account_snapshot=export_account_snapshot,
+            export_daily_plan=export_daily_plan,
+            export_daily_review_summary=export_daily_review_summary,
+            review_date=args.date,
+            daily_plan_date=args.date if export_daily_plan else None,
+            expected_date=args.expected_date,
+            dry_run=args.dry_run,
+        )
+    except NotionExportError as exc:
+        print("PAPER NOTION EXPORT")
+        print(f"  action=failed error={exc}", file=sys.stderr)
+        return 1
     summary = [
         {
             "account_id": item.account_id,

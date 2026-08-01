@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from core.paper_account_paths import PaperAccountPaths
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_snapshot_identity import validate_snapshot_account_identity
 from core.paths import market_db_path, paper_account_snapshot_path, paper_reports_dir
 
 SCHEMA_VERSION = "paper_benchmark_comparison.v1"
@@ -20,9 +22,9 @@ LIMITATIONS = [
 ]
 
 
-def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+def _read_csv_rows(path: Path) -> tuple[list[dict[str, str]], list[str] | None]:
     if not path.exists():
-        return []
+        return [], None
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         rows: list[dict[str, str]] = []
@@ -31,7 +33,7 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
             for key, value in row.items():
                 normalized[(key or "").replace("\ufeff", "").strip()] = value or ""
             rows.append(normalized)
-        return rows
+        return rows, reader.fieldnames
 
 
 def _safe_float(value: str | None) -> float | None:
@@ -152,7 +154,16 @@ def build_paper_benchmark_comparison_summary(
     account_path = root / paper_account_snapshot_path().name
     db_path = Path(market_db) if market_db is not None else Path(market_db_path())
 
-    account_rows = _read_csv_rows(account_path)
+    expected_account_id = account_paths.account_id if account_paths is not None else "paper_default"
+    account_rows, account_fieldnames = _read_csv_rows(account_path)
+    account_rows, _ = validate_snapshot_account_identity(
+        account_rows,
+        fieldnames=account_fieldnames,
+        allowed_fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS,
+        expected_account_id=expected_account_id,
+        source_path=account_path,
+        account_root=root,
+    )
     account_rows = [row for row in account_rows if row.get("snapshot_date")]
     account_rows.sort(key=lambda row: row["snapshot_date"])
 
@@ -175,7 +186,7 @@ def build_paper_benchmark_comparison_summary(
 
     if len(valid_rows) < 2:
         return {
-            "account_id": account_paths.account_id if account_paths is not None else "paper_default",
+            "account_id": expected_account_id,
             "account_root": str(root),
             "legacy_default_used": bool(account_paths.legacy_default_used) if account_paths is not None else False,
             "schema_version": SCHEMA_VERSION,
@@ -347,7 +358,7 @@ def build_paper_benchmark_comparison_summary(
     }
 
     return {
-        "account_id": account_paths.account_id if account_paths is not None else "paper_default",
+        "account_id": expected_account_id,
         "account_root": str(root),
         "legacy_default_used": bool(account_paths.legacy_default_used) if account_paths is not None else False,
         "schema_version": SCHEMA_VERSION,

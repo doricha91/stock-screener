@@ -729,19 +729,20 @@ def run_report_chain(account_paths=None) -> list[dict[str, object]]:
 
 
 def handle_reports(args: argparse.Namespace) -> int:
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=True)
     summary = run_preflight(
         stage="reports",
         date_str=None,
         strict=args.strict,
         write_report=False,
+        account_paths=account_paths,
     )
     if summary["result"] == "FAIL":
         print("Paper reports aborted because preflight failed.")
         return 1
 
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=True)
     results = _call_with_optional_account_paths(run_report_chain, account_paths=account_paths)
     print("PAPER REPORTS")
     for item in results:
@@ -762,18 +763,19 @@ def handle_review_template(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Paper review-template aborted: {exc}")
         return 1
+    account_paths = None
+    if args.account_id and args.account_id != "paper_default":
+        account_paths = build_paper_account_paths(args.account_id, create=True)
     summary = run_preflight(
         stage="review-template",
         date_str=review_date,
         strict=False,
         write_report=False,
+        account_paths=account_paths,
     )
     if summary["result"] == "FAIL":
         print("Paper review-template aborted because preflight failed.")
         return 1
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=True)
     result = generate_paper_manual_review_log_template(account_paths=account_paths, review_date=review_date)
     print("PAPER REVIEW TEMPLATE")
     print(f"  csv_output_path: {result['csv_output_path']}")

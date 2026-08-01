@@ -28,7 +28,11 @@ def test_reports_passes_non_default_account_paths(monkeypatch):
     account_paths = _account_paths("paper_growth", root)
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(paper, "run_preflight", lambda **kwargs: {"result": "PASS"})
+    def fake_run_preflight(**kwargs):
+        captured["preflight_account_id"] = kwargs["account_paths"].account_id
+        return {"result": "PASS"}
+
+    monkeypatch.setattr(paper, "run_preflight", fake_run_preflight)
     def fake_build_paper_account_paths(account_id=None, *, create=False):
         captured["built"] = (account_id, create)
         return account_paths
@@ -43,6 +47,7 @@ def test_reports_passes_non_default_account_paths(monkeypatch):
     exit_code = paper.main(["reports", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert captured["built"] == ("paper_growth", True)
+    assert captured["preflight_account_id"] == "paper_growth"
     assert captured["account_id"] == "paper_growth"
 
 
@@ -56,7 +61,11 @@ def test_review_template_and_validate_use_non_default_account_paths(monkeypatch)
         "build_paper_account_paths",
         lambda account_id=None, *, create=False: account_paths,
     )
-    monkeypatch.setattr(paper, "run_preflight", lambda **kwargs: {"result": "PASS"})
+    def fake_run_preflight(**kwargs):
+        captured["preflight_account_id"] = kwargs["account_paths"].account_id
+        return {"result": "PASS"}
+
+    monkeypatch.setattr(paper, "run_preflight", fake_run_preflight)
     def fake_generate_paper_manual_review_log_template(account_paths=None, review_date=None):
         captured["template_account_id"] = account_paths.account_id
         captured["template_review_date"] = review_date
@@ -81,6 +90,7 @@ def test_review_template_and_validate_use_non_default_account_paths(monkeypatch)
     assert paper.main(["review-template", "--account-id", "paper_growth", "--date", "2026-06-08"]) == 0
     assert paper.main(["review-validate", "--account-id", "paper_growth"]) == 0
     assert captured["template_account_id"] == "paper_growth"
+    assert captured["preflight_account_id"] == "paper_growth"
     assert captured["template_review_date"] == "2026-06-08"
     assert captured["validate_account_id"] == "paper_growth"
 

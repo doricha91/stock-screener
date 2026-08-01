@@ -1,8 +1,7 @@
 import csv
-import shutil
 from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,20 +12,6 @@ from core.paper_position_snapshot import (
     build_paper_position_snapshot_rows,
     save_paper_position_snapshot,
 )
-from core.paths import FRONT_TEST_DIR, PAPER_TEST_DIR
-
-
-@pytest.fixture
-def tmp_path() -> Path:
-    root = Path("_tmp_test_artifacts")
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"paper_position_snapshot_{uuid4().hex}"
-    path.mkdir(parents=True, exist_ok=False)
-    try:
-        yield path
-    finally:
-        if path.exists():
-            shutil.rmtree(path)
 
 
 def _trade(trade_id: str, symbol: str, side: str, shares: int, price: float) -> dict:
@@ -85,12 +70,14 @@ def _valuation_for_state() -> PaperAccountValuation:
     )
 
 
-def _unique_snapshot_path() -> Path:
-    return PAPER_TEST_DIR / f"paper_position_snapshot_test_{uuid4().hex}.csv"
+def _unique_snapshot_path(tmp_path: Path) -> Path:
+    root = tmp_path / "paper_growth"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "paper_position_snapshot.csv"
 
 
-def _unique_archive_dir() -> Path:
-    return PAPER_TEST_DIR / f"archive_position_snapshot_test_{uuid4().hex}"
+def _unique_archive_dir(tmp_path: Path) -> Path:
+    return tmp_path / "paper_growth" / "archive"
 
 
 def _read_rows(path: Path) -> list[dict]:
@@ -146,13 +133,15 @@ def test_build_paper_position_snapshot_rows_reflects_realized_and_total_pnl():
     assert gen["total_pnl_pct_on_current_cost"] == 0.1
 
 
-def test_save_paper_position_snapshot_replaces_same_date_and_creates_backup():
-    snapshot_path = _unique_snapshot_path()
-    archive_dir = _unique_archive_dir()
+def test_save_paper_position_snapshot_replaces_same_date_and_creates_backup(tmp_path):
+    snapshot_path = _unique_snapshot_path(tmp_path)
+    archive_dir = _unique_archive_dir(tmp_path)
+    account_paths = SimpleNamespace(account_id="paper_growth", root=snapshot_path.parent)
     try:
         old_row = {column: "" for column in PAPER_POSITION_SNAPSHOT_COLUMNS}
         old_row.update(
             {
+                "account_id": "paper_growth",
                 "snapshot_date": "2026-05-09",
                 "symbol": "OLD",
                 "shares": "1",
@@ -171,13 +160,19 @@ def test_save_paper_position_snapshot_replaces_same_date_and_creates_backup():
                 _trade("t3", "GEN", "BUY", 5, 50.0),
             ]
         )
-        rows = build_paper_position_snapshot_rows(state, _valuation_for_state(), "2026-05-09")
+        rows = build_paper_position_snapshot_rows(
+            state,
+            _valuation_for_state(),
+            "2026-05-09",
+            account_id="paper_growth",
+        )
         result = save_paper_position_snapshot(
             rows,
             "2026-05-09",
             snapshot_path,
             archive_dir,
             now=datetime(2026, 5, 12, 8, 0, 0),
+            account_paths=account_paths,
         )
         assert result["replaced"] is True
         assert result["backup_path"] is not None
@@ -189,13 +184,15 @@ def test_save_paper_position_snapshot_replaces_same_date_and_creates_backup():
         _cleanup(snapshot_path, archive_dir)
 
 
-def test_save_paper_position_snapshot_keeps_other_dates():
-    snapshot_path = _unique_snapshot_path()
-    archive_dir = _unique_archive_dir()
+def test_save_paper_position_snapshot_keeps_other_dates(tmp_path):
+    snapshot_path = _unique_snapshot_path(tmp_path)
+    archive_dir = _unique_archive_dir(tmp_path)
+    account_paths = SimpleNamespace(account_id="paper_growth", root=snapshot_path.parent)
     try:
         row_0508 = {column: "" for column in PAPER_POSITION_SNAPSHOT_COLUMNS}
         row_0508.update(
             {
+                "account_id": "paper_growth",
                 "snapshot_date": "2026-05-08",
                 "symbol": "AAPL",
                 "shares": "10",
@@ -214,8 +211,19 @@ def test_save_paper_position_snapshot_keeps_other_dates():
                 _trade("t3", "GEN", "BUY", 5, 50.0),
             ]
         )
-        rows = build_paper_position_snapshot_rows(state, _valuation_for_state(), "2026-05-09")
-        result = save_paper_position_snapshot(rows, "2026-05-09", snapshot_path, archive_dir)
+        rows = build_paper_position_snapshot_rows(
+            state,
+            _valuation_for_state(),
+            "2026-05-09",
+            account_id="paper_growth",
+        )
+        result = save_paper_position_snapshot(
+            rows,
+            "2026-05-09",
+            snapshot_path,
+            archive_dir,
+            account_paths=account_paths,
+        )
         assert result["replaced"] is False
         saved_rows = _read_rows(snapshot_path)
         assert [(row["snapshot_date"], row["symbol"]) for row in saved_rows] == [
@@ -227,18 +235,182 @@ def test_save_paper_position_snapshot_keeps_other_dates():
         _cleanup(snapshot_path, archive_dir)
 
 
-def test_save_paper_position_snapshot_rejects_non_paper_path():
-    snapshot_path = FRONT_TEST_DIR / f"paper_position_snapshot_test_{uuid4().hex}.csv"
-    archive_dir = _unique_archive_dir()
+def test_save_paper_position_snapshot_rejects_non_paper_path(tmp_path):
+    root = tmp_path / "paper_growth"
+    snapshot_path = tmp_path / "outside" / "paper_position_snapshot.csv"
+    archive_dir = root / "archive"
     try:
         state = build_paper_state_from_trades(
             [_trade("t1", "CPAY", "BUY", 10, 100.0)]
         )
-        rows = build_paper_position_snapshot_rows(state, _valuation_for_state(), "2026-05-09")
+        rows = build_paper_position_snapshot_rows(
+            state,
+            _valuation_for_state(),
+            "2026-05-09",
+            account_id="paper_growth",
+        )
         with pytest.raises(ValueError):
-            save_paper_position_snapshot(rows, "2026-05-09", snapshot_path, archive_dir)
+            save_paper_position_snapshot(
+                rows,
+                "2026-05-09",
+                snapshot_path,
+                archive_dir,
+                account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+            )
     finally:
         if archive_dir.exists():
             for child in archive_dir.iterdir():
                 child.unlink()
             archive_dir.rmdir()
+
+
+def test_save_position_snapshot_backfills_legacy_identity_under_account_root(tmp_path):
+    root = tmp_path / "paper_growth"
+    snapshot_path = root / "paper_position_snapshot.csv"
+    archive_dir = root / "archive"
+    root.mkdir(parents=True)
+    legacy_fieldnames = [
+        column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "account_id"
+    ]
+    legacy_row = {column: "" for column in legacy_fieldnames}
+    legacy_row.update(
+        {
+            "snapshot_date": "2026-05-08",
+            "symbol": "AAPL",
+            "shares": "1",
+        }
+    )
+    with snapshot_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=legacy_fieldnames)
+        writer.writeheader()
+        writer.writerow(legacy_row)
+    state = build_paper_state_from_trades(
+        [_trade("t1", "CPAY", "BUY", 10, 100.0)]
+    )
+    rows = build_paper_position_snapshot_rows(
+        state,
+        _valuation_for_state(),
+        "2026-05-09",
+        account_id="paper_growth",
+    )
+
+    result = save_paper_position_snapshot(
+        rows,
+        "2026-05-09",
+        snapshot_path,
+        archive_dir,
+        account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+    )
+
+    assert result["legacy_backfilled"] is True
+    assert result["backup_path"] is not None
+    assert {saved["account_id"] for saved in _read_rows(snapshot_path)} == {"paper_growth"}
+
+
+def test_position_snapshot_rejects_unknown_header_without_mutation(tmp_path):
+    root = tmp_path / "paper_growth"
+    snapshot_path = root / "paper_position_snapshot.csv"
+    archive_dir = root / "archive"
+    root.mkdir(parents=True)
+    fieldnames = [*PAPER_POSITION_SNAPSHOT_COLUMNS, "unknown_legacy_field"]
+    existing_row = {column: "" for column in fieldnames}
+    existing_row.update(
+        {
+            "account_id": "paper_growth",
+            "snapshot_date": "2026-05-08",
+            "symbol": "AAPL",
+            "unknown_legacy_field": "must-not-be-dropped",
+        }
+    )
+    with snapshot_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(existing_row)
+    before = snapshot_path.read_bytes()
+    state = build_paper_state_from_trades(
+        [_trade("t1", "CPAY", "BUY", 10, 100.0)]
+    )
+    rows = build_paper_position_snapshot_rows(
+        state,
+        _valuation_for_state(),
+        "2026-05-09",
+        account_id="paper_growth",
+    )
+
+    with pytest.raises(ValueError, match="reason=unknown_columns") as exc_info:
+        save_paper_position_snapshot(
+            rows,
+            "2026-05-09",
+            snapshot_path,
+            archive_dir,
+            account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+        )
+
+    assert "unknown_legacy_field" in str(exc_info.value)
+    assert snapshot_path.read_bytes() == before
+    assert not archive_dir.exists()
+
+
+def test_save_empty_position_snapshot_keeps_current_schema(tmp_path):
+    root = tmp_path / "paper_growth"
+    snapshot_path = root / "paper_position_snapshot.csv"
+    archive_dir = root / "archive"
+
+    result = save_paper_position_snapshot(
+        [],
+        "2026-05-09",
+        snapshot_path,
+        archive_dir,
+        account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+    )
+
+    with snapshot_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == PAPER_POSITION_SNAPSHOT_COLUMNS
+        assert list(reader) == []
+    assert result["row_count"] == 0
+    assert not archive_dir.exists()
+
+
+def test_position_snapshot_rejects_missing_required_header_without_mutation(tmp_path):
+    root = tmp_path / "paper_growth"
+    snapshot_path = root / "paper_position_snapshot.csv"
+    archive_dir = root / "archive"
+    root.mkdir(parents=True)
+    fieldnames = [
+        column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "symbol"
+    ]
+    existing_row = {column: "" for column in fieldnames}
+    existing_row.update(
+        {
+            "account_id": "paper_growth",
+            "snapshot_date": "2026-05-08",
+        }
+    )
+    with snapshot_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(existing_row)
+    before = snapshot_path.read_bytes()
+    state = build_paper_state_from_trades(
+        [_trade("t1", "CPAY", "BUY", 10, 100.0)]
+    )
+    rows = build_paper_position_snapshot_rows(
+        state,
+        _valuation_for_state(),
+        "2026-05-09",
+        account_id="paper_growth",
+    )
+
+    with pytest.raises(ValueError, match="reason=missing_columns") as exc_info:
+        save_paper_position_snapshot(
+            rows,
+            "2026-05-09",
+            snapshot_path,
+            archive_dir,
+            account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+        )
+
+    assert "symbol" in str(exc_info.value)
+    assert snapshot_path.read_bytes() == before
+    assert not archive_dir.exists()
