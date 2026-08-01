@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 
@@ -10,7 +12,7 @@ from core.paper_execution_intent import build_execution_intent
 from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
 from core.runbook_calendar import load_market_calendar
 from core.runbook_day_rollover import preview_rollover
-from scripts import runbook_stage_runner, runbook_state
+from scripts import paper_daily_ops, runbook_stage_runner, runbook_state
 from scripts.runbook_no_action import sha256_file
 
 
@@ -180,6 +182,7 @@ def _complete_no_action_stage_d(workspace: Path) -> runbook_state.RunbookState:
 
 
 def _fake_no_action_stage_e_run(
+    workspace: Path,
     output_root: Path,
     calls: list[list[str]],
     *,
@@ -223,6 +226,13 @@ def _fake_no_action_stage_e_run(
             current_state.write_text(json.dumps({"positions": {}}), encoding="utf-8")
             account_snapshot.write_text("snapshot_date,position_count\n2026-07-02,%s\n" % position_count, encoding="utf-8")
             position_snapshot.write_text("snapshot_date,symbol,shares\n", encoding="utf-8")
+            state = runbook_state.load_state(
+                runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+            )
+            daily_plan_source = workspace / state.artifacts["daily_plan_json"]
+            (output_root / "daily_action_plan_20260702.json").write_bytes(daily_plan_source.read_bytes())
+            (output_root / "daily_action_plan_20260702.md").write_text("# verified no action plan\n", encoding="utf-8")
+            (output_root / "paper_execution_log.csv").write_text("date,source,symbol\n", encoding="utf-8")
             payload = {
                 "runner_result": "PASS",
                 "status": "COMMITTED",
@@ -243,27 +253,20 @@ def _fake_no_action_stage_e_run(
             json_path.write_text(json.dumps(payload), encoding="utf-8")
             markdown_path.write_text("# commit\n", encoding="utf-8")
         elif "paper_daily_ops.py" in joined and "status" in argv:
-            payload = {
-                "schema_version": "mfu_oper9_daily_ops_status.v1",
-                "overall_status": final_status,
-                "account_id": ACCOUNT_ID,
-                "data_date": DATA_DATE,
-                "trade_date": TRADE_DATE,
-                "workflow_status": "REVIEW_DONE",
-                "read_only": True,
-                "write_executed": False,
-                "operation_write_executed": False,
-                "notion_api_called": False,
-                "notion_live_read_enabled": False,
-                "notion_live_read_called": False,
-                "commit_append_executed": False,
-                "blockers": [],
-                "warnings": [],
-                "summary": {},
-                "stage_counts": {},
-                "stages": [],
-                "operator_summary": {},
-            }
+            status_index = list(argv).index("status")
+            cli_argv = [*list(argv)[status_index:], "--account-root", str(output_root)]
+            legacy_root = output_root.parent / "paper_test"
+            (legacy_root / "reports").mkdir(parents=True, exist_ok=True)
+            (legacy_root / "reviews").mkdir(exist_ok=True)
+            (legacy_root / "config_snapshots").mkdir(exist_ok=True)
+            cli_argv.extend(["--legacy-root", str(legacy_root)])
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = paper_daily_ops.main(cli_argv)
+            assert exit_code == 0
+            payload = json.loads(stdout.getvalue())
+            if final_status != "PASS":
+                payload["overall_status"] = final_status
         else:
             raise AssertionError(f"unexpected Stage E command: {argv}")
         return {"exit_code": 0, "duration_ms": 10, "stdout": json.dumps(payload), "stderr": ""}
@@ -512,7 +515,7 @@ def test_no_action_stage_e_executes_eod_and_leaves_stage_f_pending(
     monkeypatch.setattr(
         runbook_stage_runner,
         "run_allowlisted_command",
-        _fake_no_action_stage_e_run(output_root, calls, position_count=position_count),
+        _fake_no_action_stage_e_run(workspace, output_root, calls, position_count=position_count),
     )
 
     result = runbook_stage_runner.run_stage_e(
@@ -654,7 +657,7 @@ def test_no_action_stage_e_retries_final_status_without_repeating_commit(tmp_pat
     monkeypatch.setattr(
         runbook_stage_runner,
         "run_allowlisted_command",
-        _fake_no_action_stage_e_run(output_root, first_calls, position_count=0, final_status="FAILED"),
+        _fake_no_action_stage_e_run(workspace, output_root, first_calls, position_count=0, final_status="FAILED"),
     )
 
     first = runbook_stage_runner.run_stage_e(
@@ -667,7 +670,7 @@ def test_no_action_stage_e_retries_final_status_without_repeating_commit(tmp_pat
     monkeypatch.setattr(
         runbook_stage_runner,
         "run_allowlisted_command",
-        _fake_no_action_stage_e_run(output_root, second_calls, position_count=0),
+        _fake_no_action_stage_e_run(workspace, output_root, second_calls, position_count=0),
     )
     second = runbook_stage_runner.run_stage_e(
         workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True

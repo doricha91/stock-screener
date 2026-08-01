@@ -322,6 +322,39 @@ def test_wrapper_pass_cannot_hide_failed_raw_payload(tmp_path: Path, actual_payl
     assert any("overall_status" in blocker for blocker in result["blockers"])
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("terminal", _MISSING),
+        ("terminal", False),
+        ("terminal", "true"),
+        ("terminal", 1),
+        ("needs_attention", _MISSING),
+        ("needs_attention", True),
+        ("needs_attention", 0),
+    ],
+)
+def test_terminal_summary_mutations_fail_closed(
+    actual_payload: dict[str, object],
+    field: str,
+    value: object,
+) -> None:
+    payload = deepcopy(actual_payload)
+    summary = payload["summary"]
+    assert isinstance(summary, dict)
+    if value is _MISSING:
+        summary.pop(field)
+    else:
+        summary[field] = value
+    assert runbook_stage_e_evidence.validate_final_status_payload(payload, _state())
+
+
+def test_terminal_payload_with_next_command_fails_closed(actual_payload: dict[str, object]) -> None:
+    payload = deepcopy(actual_payload)
+    payload["next_command"] = "python scripts\\paper.py review"
+    assert runbook_stage_e_evidence.validate_final_status_payload(payload, _state())
+
+
 def test_rollover_accepts_actual_producer_wrapper_without_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

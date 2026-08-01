@@ -36,6 +36,9 @@ from core.paper_status import WORKFLOW_REVIEW_DONE, run_paper_status
 
 
 SCHEMA_VERSION = "mfu_oper9_daily_ops_status.v1"
+COMPLETION_MODE_STANDARD = "STANDARD"
+COMPLETION_MODE_NO_ACTION = "NO_ACTION"
+NO_ACTION_COMPLETION_SCHEMA_VERSION = "runbook_no_action_completion.v1"
 
 DONE = "DONE"
 READY = "READY"
@@ -96,6 +99,7 @@ def build_daily_ops_status(
     include_notion_read: bool = False,
     notion_timeout_seconds: int = 30,
     notion_status_report: dict[str, Any] | None = None,
+    completion_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = []
@@ -104,6 +108,12 @@ def build_daily_ops_status(
     normalized_trade_date = _normalize_date(trade_date, "trade_date")
     data_dt = datetime.strptime(normalized_data_date, "%Y-%m-%d").date()
     trade_dt = datetime.strptime(normalized_trade_date, "%Y-%m-%d").date()
+    no_action_completion = _validate_no_action_completion_context(
+        completion_context,
+        account_id=normalized_account_id,
+        data_date=normalized_data_date,
+        trade_date=normalized_trade_date,
+    )
     if trade_dt <= data_dt:
         blockers.append(f"trade_date {normalized_trade_date} must be after data_date {normalized_data_date}.")
 
@@ -179,7 +189,10 @@ def build_daily_ops_status(
     reconciliation_summary = apply_reconciliation(stages, workflow_status=workflow_status)
     _suppress_manual_execution_no_candidate_skips_when_notion_rows_exist(stages)
     _ensure_ready_stage_commands(stages, stage_context)
-    terminal = _is_terminal_workflow(workflow_status, stages)
+    completion_mode = COMPLETION_MODE_NO_ACTION if no_action_completion else COMPLETION_MODE_STANDARD
+    if no_action_completion:
+        _apply_verified_no_action_completion(stages)
+    terminal = _is_terminal_workflow(workflow_status, stages, completion_mode=completion_mode)
     if terminal:
         for stage in stages:
             stage["next_command"] = None
@@ -207,6 +220,8 @@ def build_daily_ops_status(
         "trade_date": normalized_trade_date,
         "overall_status": overall_status,
         "workflow_status": workflow_status,
+        "completion_mode": completion_mode,
+        "completion_proof": no_action_completion,
         "read_only": True,
         "write_executed": False,
         "operation_write_executed": False,
@@ -240,6 +255,68 @@ def build_daily_ops_status(
     }
     payload["operator_summary"] = build_operator_summary(payload)
     return payload
+
+
+def _validate_no_action_completion_context(
+    context: dict[str, Any] | None,
+    *,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+) -> dict[str, Any] | None:
+    if context is None:
+        return None
+    if not isinstance(context, dict):
+        raise ValueError("completion_context_must_be_object")
+    expected = {
+        "schema_version": NO_ACTION_COMPLETION_SCHEMA_VERSION,
+        "account_id": account_id,
+        "data_date": data_date,
+        "trade_date": trade_date,
+        "action_mode": "NO_ACTION",
+        "verified_no_action": True,
+        "execution_required": False,
+        "review_required": False,
+        "candidate_execution_count": 0,
+        "manual_review_row_count": 0,
+        "required_status_sync": False,
+        "execution_write_performed": False,
+        "review_write_performed": False,
+        "eod_close_verified": True,
+    }
+    mismatches = [field for field, expected_value in expected.items() if context.get(field) != expected_value]
+    if mismatches:
+        raise ValueError(f"no_action_completion_context_mismatch:{','.join(mismatches)}")
+    strict_bool_fields = (
+        "verified_no_action",
+        "execution_required",
+        "review_required",
+        "required_status_sync",
+        "execution_write_performed",
+        "review_write_performed",
+        "eod_close_verified",
+    )
+    if any(not isinstance(context.get(field), bool) for field in strict_bool_fields):
+        raise ValueError("no_action_completion_boolean_type_invalid")
+    for field in ("candidate_execution_count", "manual_review_row_count"):
+        value = context.get(field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"no_action_completion_{field}_type_invalid")
+    for field in ("runbook_day_id", "daily_plan_sha256", "stage_d_no_action_json", "eod_commit_report_json"):
+        value = context.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"no_action_completion_{field}_required")
+    return dict(context)
+
+
+def _apply_verified_no_action_completion(stages: list[dict[str, Any]]) -> None:
+    for stage in stages:
+        stage["status"] = DONE
+        stage["blockers"] = []
+        stage["warnings"] = []
+        stage["next_command"] = None
+        stage["next_action"] = None
+        stage["note"] = "Verified runbook NO_ACTION completion requires no further local operator action."
 
 
 def _validate_required_account_id(account_id: str) -> str:
@@ -1210,7 +1287,14 @@ def _has_manual_review_input_wait(stages: list[dict[str, Any]]) -> bool:
     return (pending_count > 0 or draft_count > 0) and ready_count == 0 and reviewed_count == 0 and answered_count == 0
 
 
-def _is_terminal_workflow(workflow_status: str | None, stages: list[dict[str, Any]]) -> bool:
+def _is_terminal_workflow(
+    workflow_status: str | None,
+    stages: list[dict[str, Any]],
+    *,
+    completion_mode: str = COMPLETION_MODE_STANDARD,
+) -> bool:
+    if completion_mode == COMPLETION_MODE_NO_ACTION:
+        return not _has_required_status_sync(stages)
     return workflow_status == WORKFLOW_REVIEW_DONE and not _has_required_status_sync(stages)
 
 

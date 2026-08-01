@@ -11,7 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.paper_account_paths import build_paper_account_paths  # noqa: E402
 from core.paper_daily_ops_orchestrator import OpsEvidencePaths, build_daily_ops_status  # noqa: E402
+from scripts import runbook_state  # noqa: E402
+from scripts.runbook_no_action import build_no_action_completion_context  # noqa: E402
 
 
 def _load_root_dotenv() -> None:
@@ -32,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--trade-date", required=True, help="Paper trade/operation date, YYYYMMDD or YYYY-MM-DD")
     status.add_argument("--account-root", help="Optional account root override for tests or diagnostics")
     status.add_argument("--legacy-root", help="Optional legacy paper_test root override for tests or diagnostics")
+    status.add_argument("--runbook-workspace", help="Controller workspace containing verified completion evidence")
+    status.add_argument("--runbook-state-json", help="Controller state path pinned by the official runbook runner")
     status.add_argument("--execution-preview-json", help="Optional Manual Execution preview JSON evidence path")
     status.add_argument("--execution-commit-report", help="Optional Manual Execution commit report JSON evidence path")
     status.add_argument("--review-preview-json", help="Optional Manual Review preview JSON evidence path")
@@ -64,6 +69,7 @@ def handle_status(args: argparse.Namespace) -> int:
         review_commit_report=Path(args.review_commit_report) if args.review_commit_report else None,
     )
     try:
+        completion_context = _load_completion_context(args)
         payload = build_daily_ops_status(
             account_id=args.account_id,
             data_date=args.data_date,
@@ -73,6 +79,7 @@ def handle_status(args: argparse.Namespace) -> int:
             evidence_paths=evidence,
             include_notion_read=bool(args.include_notion_read),
             notion_timeout_seconds=int(args.notion_timeout_seconds),
+            completion_context=completion_context,
         )
     except ValueError as exc:
         payload = {
@@ -163,6 +170,46 @@ def handle_status(args: argparse.Namespace) -> int:
         for stage in payload["stages"]:
             print(f"  {stage['stage_name']}: {stage['status']}")
     return _exit_code(payload, strict=bool(args.strict_exit))
+
+
+def _load_completion_context(args: argparse.Namespace) -> dict | None:
+    workspace_arg = str(args.runbook_workspace or "").strip()
+    state_arg = str(args.runbook_state_json or "").strip()
+    if not workspace_arg and not state_arg:
+        return None
+    if not workspace_arg or not state_arg:
+        raise ValueError("runbook_workspace_and_state_are_required_together")
+    workspace = Path(workspace_arg).resolve(strict=False)
+    state_path = Path(state_arg)
+    state_path = state_path.resolve(strict=False) if state_path.is_absolute() else (workspace / state_path).resolve(strict=False)
+    try:
+        state_path.relative_to(workspace)
+    except ValueError as exc:
+        raise ValueError("runbook_state_outside_workspace") from exc
+    state = runbook_state.load_state(state_path)
+    expected_state = runbook_state.create_initial_state(
+        str(args.account_id), str(args.data_date), str(args.trade_date)
+    )
+    expected = {
+        "account_id": expected_state.frozen_context.account_id,
+        "data_date": expected_state.frozen_context.data_date,
+        "trade_date": expected_state.frozen_context.trade_date,
+    }
+    actual = {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    if actual != expected:
+        raise ValueError("runbook_state_context_mismatch")
+    if not state.artifacts.get("stage_d_no_action_json"):
+        return None
+    account_root = (
+        Path(args.account_root)
+        if args.account_root
+        else build_paper_account_paths(str(args.account_id), create=False).root
+    )
+    return build_no_action_completion_context(workspace, state, account_root=account_root)
 
 
 def _status_report_path(payload: dict, explicit_path: str | None) -> Path:

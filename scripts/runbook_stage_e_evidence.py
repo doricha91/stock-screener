@@ -5,11 +5,14 @@ from pathlib import Path
 from typing import Any
 
 from scripts import runbook_result
+from scripts import runbook_no_action
 from scripts.runbook_state import RunbookState
 
 
 FINAL_STATUS_SCHEMA_VERSION = "mfu_oper9_daily_ops_status.v1"
 FINAL_STATUS_WORKFLOW_COMPLETE = "REVIEW_DONE"
+FINAL_STATUS_COMPLETION_STANDARD = "STANDARD"
+FINAL_STATUS_COMPLETION_NO_ACTION = "NO_ACTION"
 FINAL_STATUS_REQUIRED_FIELDS = (
     "schema_version",
     "account_id",
@@ -17,6 +20,8 @@ FINAL_STATUS_REQUIRED_FIELDS = (
     "trade_date",
     "overall_status",
     "workflow_status",
+    "completion_mode",
+    "completion_proof",
     "read_only",
     "write_executed",
     "operation_write_executed",
@@ -26,6 +31,8 @@ FINAL_STATUS_REQUIRED_FIELDS = (
     "commit_append_executed",
     "blockers",
     "warnings",
+    "next_command",
+    "next_action",
     "summary",
     "stage_counts",
     "stages",
@@ -121,7 +128,11 @@ def validate_eod_commit_report_payload(payload: dict[str, Any], state: RunbookSt
     return blockers
 
 
-def validate_final_status_payload(payload: dict[str, Any], state: RunbookState) -> list[str]:
+def validate_final_status_payload(
+    payload: dict[str, Any],
+    state: RunbookState,
+    workspace: Path | None = None,
+) -> list[str]:
     blockers: list[str] = []
     for field in FINAL_STATUS_REQUIRED_FIELDS:
         if field not in payload:
@@ -141,10 +152,34 @@ def validate_final_status_payload(payload: dict[str, Any], state: RunbookState) 
         blockers.append(f"final_status schema_version must be {FINAL_STATUS_SCHEMA_VERSION}")
     if payload.get("overall_status") != "PASS":
         blockers.append("final_status overall_status must be PASS")
-    if payload.get("workflow_status") != FINAL_STATUS_WORKFLOW_COMPLETE:
-        blockers.append(f"final_status workflow_status must be {FINAL_STATUS_WORKFLOW_COMPLETE}")
     if "runner_result" in payload and payload.get("runner_result") != "PASS":
         blockers.append("final_status runner_result contradicts overall_status")
+
+    completion_mode = payload.get("completion_mode")
+    completion_proof = payload.get("completion_proof")
+    if completion_mode == FINAL_STATUS_COMPLETION_STANDARD:
+        if payload.get("workflow_status") != FINAL_STATUS_WORKFLOW_COMPLETE:
+            blockers.append(f"final_status workflow_status must be {FINAL_STATUS_WORKFLOW_COMPLETE}")
+        if completion_proof is not None:
+            blockers.append("final_status standard completion_proof must be null")
+    elif completion_mode == FINAL_STATUS_COMPLETION_NO_ACTION:
+        if not isinstance(payload.get("workflow_status"), str) or not payload.get("workflow_status"):
+            blockers.append("final_status no-action workflow_status must be a non-empty string")
+        if not isinstance(completion_proof, dict):
+            blockers.append("final_status no-action completion_proof must be an object")
+        elif workspace is None:
+            blockers.append("final_status no-action workspace is required")
+        else:
+            try:
+                expected_proof = runbook_no_action.build_no_action_completion_context(workspace, state)
+            except (OSError, ValueError) as exc:
+                reason = getattr(exc, "reason", type(exc).__name__)
+                blockers.append(f"final_status no-action proof invalid:{reason}")
+            else:
+                if completion_proof != expected_proof:
+                    blockers.append("final_status no-action completion_proof mismatch")
+    else:
+        blockers.append("final_status completion_mode is invalid")
 
     for field in ("blockers", "warnings"):
         value = payload.get(field)
@@ -176,6 +211,16 @@ def validate_final_status_payload(payload: dict[str, Any], state: RunbookState) 
     for field, expected_type in expected_structures.items():
         if not isinstance(payload.get(field), expected_type):
             blockers.append(f"final_status {field} must be {expected_type.__name__}")
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        if summary.get("terminal") is not True or not isinstance(summary.get("terminal"), bool):
+            blockers.append("final_status summary.terminal must be true boolean")
+        if summary.get("needs_attention") is not False or not isinstance(summary.get("needs_attention"), bool):
+            blockers.append("final_status summary.needs_attention must be false boolean")
+    if payload.get("next_command") is not None:
+        blockers.append("final_status next_command must be null")
+    if payload.get("next_action") is not None:
+        blockers.append("final_status next_action must be null")
     return blockers
 
 
@@ -215,7 +260,10 @@ def validate_stored_final_status(
         blockers.append("final_status_report_json:command_key_mismatch")
     raw_payload = payload.get("raw_payload")
     if isinstance(raw_payload, dict):
-        blockers.extend(f"final_status_report_json:payload:{item}" for item in validate_final_status_payload(raw_payload, state))
+        blockers.extend(
+            f"final_status_report_json:payload:{item}"
+            for item in validate_final_status_payload(raw_payload, state, workspace)
+        )
     else:
         blockers.append("final_status_report_json:raw_payload_invalid")
     return {"valid": not blockers, "blockers": blockers}

@@ -13,6 +13,7 @@ from scripts.runbook_state import RunbookState
 
 
 NO_ACTION_SCHEMA_VERSION = "stage_b_no_action.v1"
+NO_ACTION_COMPLETION_SCHEMA_VERSION = "runbook_no_action_completion.v1"
 SKIPPED_COMMAND_KEYS = (
     "execution_preview",
     "execution_reconciliation_preview",
@@ -30,7 +31,86 @@ class EvidenceError(ValueError):
 
 def artifact_path(workspace: Path, artifact_ref: str) -> Path:
     path = Path(str(artifact_ref))
-    return path if path.is_absolute() else Path(workspace) / path
+    workspace_resolved = Path(workspace).resolve(strict=False)
+    resolved = path.resolve(strict=False) if path.is_absolute() else (workspace_resolved / path).resolve(strict=False)
+    try:
+        resolved.relative_to(workspace_resolved)
+    except ValueError as exc:
+        raise EvidenceError("artifact_ref_outside_workspace", f"artifact is outside workspace: {resolved}") from exc
+    return resolved
+
+
+def build_no_action_completion_context(
+    workspace: Path,
+    state: RunbookState,
+    *,
+    account_root: Path | None = None,
+) -> dict[str, Any]:
+    if state.stage_status.get("D") != "PASS":
+        raise EvidenceError("stage_d_required", "Stage D must be PASS for no-action completion")
+    context = validate_no_action_through_gate2(workspace, state)
+    if context.get("action_mode") != "NO_ACTION" or context.get("verified_no_action") is not True:
+        raise EvidenceError("no_action_evidence_mismatch", "Verified no-action context is required")
+    evidence, evidence_path = load_stage_d_no_action_evidence(
+        workspace,
+        state,
+        daily_plan_sha256=str(context.get("daily_plan_sha256") or ""),
+    )
+    if any(state.artifacts.get(key) for key in ("review_preview_json", "review_append_report_json", "review_status_sync_report_json")):
+        raise EvidenceError("unexpected_review_artifact_for_no_action", "Review artifacts contradict no-action completion")
+
+    eod_ref = state.artifacts.get("eod_commit_report_json")
+    if not eod_ref:
+        raise EvidenceError("eod_commit_report_required", "EOD commit report is not pinned")
+    eod_path = artifact_path(workspace, str(eod_ref))
+    eod = _load_json(eod_path, "eod_commit_report_required", "eod_commit_report_invalid")
+    expected_eod = {
+        "runner_result": "PASS",
+        "status": "COMMITTED",
+        "mode": "commit",
+        "account_id": state.frozen_context.account_id,
+        "date": state.frozen_context.trade_date,
+        "trade_date": state.frozen_context.trade_date,
+        "failed_count": 0,
+        "blocked_count": 0,
+        "current_state_written": True,
+        "account_snapshot_written": True,
+        "position_snapshot_written": True,
+        "market_valuation_status": "success",
+    }
+    if any(eod.get(key) != value for key, value in expected_eod.items()):
+        raise EvidenceError("eod_commit_report_invalid", "EOD commit report does not prove same-date completion")
+    for field in ("failed_count", "blocked_count"):
+        if isinstance(eod.get(field), bool) or not isinstance(eod.get(field), int):
+            raise EvidenceError("eod_commit_report_invalid", f"{field} must be an integer")
+
+    if account_root is not None:
+        account_plan = Path(account_root) / f"daily_action_plan_{state.frozen_context.trade_date.replace('-', '')}.json"
+        if not account_plan.is_file():
+            raise EvidenceError("account_daily_plan_required", "Account-root Daily Plan is required")
+        if sha256_file(account_plan) != context["daily_plan_sha256"]:
+            raise EvidenceError("daily_plan_hash_mismatch", "Account-root Daily Plan hash does not match proof")
+
+    return {
+        "schema_version": NO_ACTION_COMPLETION_SCHEMA_VERSION,
+        "runbook_day_id": state.runbook_day_id,
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+        "action_mode": "NO_ACTION",
+        "verified_no_action": True,
+        "execution_required": False,
+        "review_required": False,
+        "candidate_execution_count": 0,
+        "manual_review_row_count": 0,
+        "required_status_sync": False,
+        "execution_write_performed": False,
+        "review_write_performed": False,
+        "eod_close_verified": True,
+        "daily_plan_sha256": context["daily_plan_sha256"],
+        "stage_d_no_action_json": str(state.artifacts.get("stage_d_no_action_json")),
+        "eod_commit_report_json": str(eod_ref),
+    }
 
 
 def load_daily_plan_evidence(

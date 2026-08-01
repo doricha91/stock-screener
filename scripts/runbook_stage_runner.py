@@ -3512,6 +3512,14 @@ def _run_stage_e_command(
 ) -> tuple[dict[str, Any], str, list[str]]:
     artifact_refs = _stage_b_render_artifacts(state.artifacts, workspace)
     artifact_refs["workspace"] = str(workspace)
+    artifact_refs["runbook_state_json"] = str(
+        runbook_state.get_state_path_for_context(
+            workspace,
+            state.frozen_context.account_id,
+            state.frozen_context.data_date,
+            state.frozen_context.trade_date,
+        )
+    )
     rendered_argv = render_argv_template(command, state.frozen_context, artifact_refs)
     argv = normalize_python_script_argv(rendered_argv, repo_root)
     if dry_run:
@@ -4022,7 +4030,7 @@ def _validate_eod_commit_payload(payload: dict[str, Any], state: RunbookState) -
 
 
 def _validate_final_status_payload(payload: dict[str, Any], state: RunbookState, workspace: Path) -> dict[str, Any]:
-    blockers = runbook_stage_e_evidence.validate_final_status_payload(payload, state)
+    blockers = runbook_stage_e_evidence.validate_final_status_payload(payload, state, workspace)
     blockers.extend(_validate_stage_e_pinned_eod_reports(state, workspace))
     runner_result = "BLOCKED" if blockers else "PASS"
     return _payload_validation(
