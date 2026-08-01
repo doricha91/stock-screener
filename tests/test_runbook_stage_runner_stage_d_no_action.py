@@ -244,10 +244,25 @@ def _fake_no_action_stage_e_run(
             markdown_path.write_text("# commit\n", encoding="utf-8")
         elif "paper_daily_ops.py" in joined and "status" in argv:
             payload = {
+                "schema_version": "mfu_oper9_daily_ops_status.v1",
                 "overall_status": final_status,
                 "account_id": ACCOUNT_ID,
+                "data_date": DATA_DATE,
                 "trade_date": TRADE_DATE,
-                "unresolved_error_count": 0 if final_status == "PASS" else 1,
+                "workflow_status": "REVIEW_DONE",
+                "read_only": True,
+                "write_executed": False,
+                "operation_write_executed": False,
+                "notion_api_called": False,
+                "notion_live_read_enabled": False,
+                "notion_live_read_called": False,
+                "commit_append_executed": False,
+                "blockers": [],
+                "warnings": [],
+                "summary": {},
+                "stage_counts": {},
+                "stages": [],
+                "operator_summary": {},
             }
         else:
             raise AssertionError(f"unexpected Stage E command: {argv}")

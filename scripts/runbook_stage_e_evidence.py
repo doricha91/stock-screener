@@ -8,7 +8,29 @@ from scripts import runbook_result
 from scripts.runbook_state import RunbookState
 
 
-FINAL_STATUS_SUCCESS_VALUES = {"PASS", "OK", "READY", "DONE"}
+FINAL_STATUS_SCHEMA_VERSION = "mfu_oper9_daily_ops_status.v1"
+FINAL_STATUS_WORKFLOW_COMPLETE = "REVIEW_DONE"
+FINAL_STATUS_REQUIRED_FIELDS = (
+    "schema_version",
+    "account_id",
+    "data_date",
+    "trade_date",
+    "overall_status",
+    "workflow_status",
+    "read_only",
+    "write_executed",
+    "operation_write_executed",
+    "notion_api_called",
+    "notion_live_read_enabled",
+    "notion_live_read_called",
+    "commit_append_executed",
+    "blockers",
+    "warnings",
+    "summary",
+    "stage_counts",
+    "stages",
+    "operator_summary",
+)
 
 
 def _path_is_within(path: Path, parent: Path) -> bool:
@@ -101,25 +123,59 @@ def validate_eod_commit_report_payload(payload: dict[str, Any], state: RunbookSt
 
 def validate_final_status_payload(payload: dict[str, Any], state: RunbookState) -> list[str]:
     blockers: list[str] = []
-    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
-        blockers.append("final_status account_id must match frozen context")
-    date_fields = ("trade_date", "date", "target_date")
-    present_dates = [(field, payload[field]) for field in date_fields if field in payload]
-    if not present_dates:
-        blockers.append("final_status trade_date is required")
-    else:
-        for field, value in present_dates:
-            if not isinstance(value, str) or value.strip() != state.frozen_context.trade_date:
-                blockers.append(f"final_status {field} must match trade_date")
-    blockers.extend(_strict_zero_count(payload, "unresolved_error_count", "final_status"))
-    status_fields = ("runner_result", "overall_status", "workflow_status")
-    present_statuses = [payload[field] for field in status_fields if field in payload]
-    if not present_statuses:
-        blockers.append("final_status success status is required")
-    else:
-        status = present_statuses[0]
-        if not isinstance(status, str) or status.strip().upper() not in FINAL_STATUS_SUCCESS_VALUES:
-            blockers.append("final_status must be PASS")
+    for field in FINAL_STATUS_REQUIRED_FIELDS:
+        if field not in payload:
+            blockers.append(f"final_status {field} is required")
+
+    expected_strings = {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    for field, expected in expected_strings.items():
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip() or value != expected:
+            blockers.append(f"final_status {field} must exactly match frozen context")
+
+    if payload.get("schema_version") != FINAL_STATUS_SCHEMA_VERSION:
+        blockers.append(f"final_status schema_version must be {FINAL_STATUS_SCHEMA_VERSION}")
+    if payload.get("overall_status") != "PASS":
+        blockers.append("final_status overall_status must be PASS")
+    if payload.get("workflow_status") != FINAL_STATUS_WORKFLOW_COMPLETE:
+        blockers.append(f"final_status workflow_status must be {FINAL_STATUS_WORKFLOW_COMPLETE}")
+    if "runner_result" in payload and payload.get("runner_result") != "PASS":
+        blockers.append("final_status runner_result contradicts overall_status")
+
+    for field in ("blockers", "warnings"):
+        value = payload.get(field)
+        if not isinstance(value, list):
+            blockers.append(f"final_status {field} must be a list")
+        elif value:
+            blockers.append(f"final_status {field} must be empty")
+
+    expected_flags = {
+        "read_only": True,
+        "write_executed": False,
+        "operation_write_executed": False,
+        "commit_append_executed": False,
+        "notion_api_called": False,
+        "notion_live_read_enabled": False,
+        "notion_live_read_called": False,
+    }
+    for field, expected in expected_flags.items():
+        value = payload.get(field)
+        if not isinstance(value, bool) or value is not expected:
+            blockers.append(f"final_status {field} must be {str(expected).lower()} boolean")
+
+    expected_structures = {
+        "summary": dict,
+        "stage_counts": dict,
+        "stages": list,
+        "operator_summary": dict,
+    }
+    for field, expected_type in expected_structures.items():
+        if not isinstance(payload.get(field), expected_type):
+            blockers.append(f"final_status {field} must be {expected_type.__name__}")
     return blockers
 
 
