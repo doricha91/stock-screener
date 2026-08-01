@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from core import runbook_day_rollover as rollover_core
 from core.runbook_calendar import load_market_calendar
 from core.runbook_day_prep import (
     prepare_runbook_day_local,
@@ -23,12 +25,73 @@ NEXT_VALUES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _patch_account_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    monkeypatch.setattr(
+        rollover_core,
+        "build_paper_account_paths",
+        lambda account_id, create=False: type("Paths", (), {"root": account_root})(),
+    )
+
+
 def _write_cmd(path: Path, lines: list[str]) -> None:
     path.write_bytes(("\r\n".join([*lines, ""])).encode("ascii"))
 
 
 def _complete_state(workspace: Path, data_date: str = "2026-07-01", trade_date: str = "2026-07-02") -> None:
     state = runbook_state.create_initial_state(ACCOUNT_ID, data_date, trade_date)
+    account_root = workspace.parent / "outputs" / "paper_accounts" / ACCOUNT_ID
+    snapshot = account_root / "paper_account_snapshot.csv"
+    benchmark_source = account_root / "reports" / "paper_benchmark_comparison.json"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    benchmark_source.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text(f"account_id,snapshot_date\n{ACCOUNT_ID},{trade_date}\n", encoding="utf-8")
+    benchmark_payload = {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date}
+    benchmark_source.write_text(json.dumps(benchmark_payload), encoding="utf-8")
+    command_dir = workspace / "command_runs" / state.runbook_day_id
+    artifact_dir = workspace / "artifacts" / state.runbook_day_id / "stage_f"
+    command_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "benchmark.json").write_text(json.dumps(benchmark_payload), encoding="utf-8")
+
+    def notion_result(command_key: str, step_id: int, source: Path) -> dict[str, object]:
+        timestamp = "2026-07-02T18:00:00+09:00"
+        return {
+            "schema_version": "runbook_command_result.v1",
+            "runner_result": "PASS",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "runbook_day_id": state.runbook_day_id,
+            "frozen_context": {"account_id": ACCOUNT_ID, "data_date": data_date, "trade_date": trade_date},
+            "stage_id": "F",
+            "step_id": step_id,
+            "command_key": command_key,
+            "command_type": "NOTION_WRITE",
+            "process": {"executed": True, "exit_code": 0, "duration_ms": 1},
+            "outputs": {"json_ref": None, "txt_ref": None, "log_ref": None, "artifact_refs": {}},
+            "summary": {"title": command_key, "message": "PASS", "warnings": [], "blockers": []},
+            "raw_payload": {
+                "json": [{
+                    "account_id": ACCOUNT_ID,
+                    "external_key": f"{command_key}:{ACCOUNT_ID}:{trade_date}",
+                    "action": "created",
+                    "source_path": str(source),
+                    "failed_count": 0,
+                }]
+            },
+        }
+
+    account_notion = command_dir / "account_notion.json"
+    benchmark_notion = command_dir / "benchmark_notion.json"
+    account_notion.write_text(
+        json.dumps(notion_result("account_snapshot_notion_upsert", 20, snapshot)), encoding="utf-8"
+    )
+    benchmark_notion.write_text(
+        json.dumps(notion_result("benchmark_report_notion_upsert", 21, benchmark_source)), encoding="utf-8"
+    )
+    (command_dir / "eod_commit.json").write_text('{"runner_result":"PASS"}', encoding="utf-8")
+    (command_dir / "final_status.json").write_text('{"runner_result":"PASS"}', encoding="utf-8")
     state = replace(
         state,
         current_stage="F",
@@ -37,8 +100,11 @@ def _complete_state(workspace: Path, data_date: str = "2026-07-01", trade_date: 
         last_completed_stage="F",
         stage_status={stage_id: "PASS" for stage_id in runbook_state.STAGE_IDS},
         artifacts={
+            "eod_commit_report_json": f"command_runs/{state.runbook_day_id}/eod_commit.json",
             "final_status_report_json": f"command_runs/{state.runbook_day_id}/final_status.json",
-            "benchmark_notion_report_json": f"command_runs/{state.runbook_day_id}/benchmark_sync.json",
+            "benchmark_report_json": f"artifacts/{state.runbook_day_id}/stage_f/benchmark.json",
+            "account_snapshot_notion_report_json": f"command_runs/{state.runbook_day_id}/account_notion.json",
+            "benchmark_notion_report_json": f"command_runs/{state.runbook_day_id}/benchmark_notion.json",
         },
     )
     runbook_state.save_state(

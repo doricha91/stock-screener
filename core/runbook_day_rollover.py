@@ -7,7 +7,9 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_paths import build_paper_account_paths
 from core.runbook_calendar import CalendarCoverageError, MarketCalendar
+from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
 
 
@@ -42,17 +44,37 @@ def _blocked(reason: str, blockers: list[str] | None = None) -> dict[str, Any]:
     }
 
 
-def _is_completed(state: runbook_state.RunbookState) -> bool:
-    return (
+def _is_completed(workspace: Path, state: runbook_state.RunbookState) -> bool:
+    state_complete = (
         state.current_stage == "F"
         and state.current_status == "PASS"
         and state.last_completed_step == 21
         and state.last_completed_stage == "F"
         and all(state.stage_status.get(stage_id) == "PASS" for stage_id in COMPLETION_STAGES)
         and bool(state.artifacts.get("final_status_report_json"))
+        and bool(state.artifacts.get("account_snapshot_notion_report_json"))
         and bool(state.artifacts.get("benchmark_notion_report_json"))
         and state.last_error is None
     )
+    if not state_complete:
+        return False
+    for artifact_name in ("eod_commit_report_json", "final_status_report_json"):
+        _, _, error = runbook_stage_f_evidence.load_workspace_json_artifact(
+            workspace,
+            state.artifacts.get(artifact_name),
+        )
+        if error:
+            return False
+    try:
+        account_root = build_paper_account_paths(state.frozen_context.account_id, create=False).root
+    except ValueError:
+        return False
+    evidence = runbook_stage_f_evidence.validate_stage_f_completion_evidence(
+        workspace,
+        state,
+        account_root,
+    )
+    return bool(evidence["valid"])
 
 
 def _account_filename_prefix(account_id: str) -> str:
@@ -122,7 +144,7 @@ def preview_rollover(
     if not records:
         return _blocked("completed_runbook_day_not_found")
 
-    active = [record for record in records if not _is_completed(record.state)]
+    active = [record for record in records if not _is_completed(workspace_path, record.state)]
     if len(active) > 1:
         return _blocked(
             "multiple_active_runbook_days",
@@ -134,7 +156,7 @@ def preview_rollover(
             [f"active_runbook_day:{active[0].state.runbook_day_id}"],
         )
 
-    completed = [record for record in records if _is_completed(record.state)]
+    completed = [record for record in records if _is_completed(workspace_path, record.state)]
     if not completed:
         return _blocked("completed_runbook_day_not_found")
     latest_trade_date = max(record.state.frozen_context.trade_date for record in completed)

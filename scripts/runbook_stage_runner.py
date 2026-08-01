@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts import runbook_command_registry as registry
 from scripts import runbook_gate_checker
 from scripts import runbook_result
+from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
 from scripts.runbook_no_action import (
     EvidenceError,
@@ -2042,21 +2043,6 @@ def run_stage_f(
     except ValueError as exc:
         return _blocked_stage_f_payload(str(exc), dry_run, confirm_paper_test)
 
-    if state.stage_status.get(STAGE_F_ID, "PENDING") == "PASS":
-        return {
-            "runner_result": "SKIPPED",
-            "stage_id": STAGE_F_ID,
-            "canonical_stage_id": STAGE_F_ID,
-            "reason": "stage_f_already_pass",
-            "runbook_day_id": state.runbook_day_id,
-            "state_path": str(state_path),
-            "rendered_commands": [],
-            "next_stage": None,
-            "next_required_action": "Runbook day complete.",
-            "paper_test_confirmed": confirm_paper_test,
-            "dry_run": dry_run,
-        }
-
     if state.stage_status.get(STAGE_E_ID) != "PASS":
         return {
             **_blocked_stage_f_payload("stage_e_not_pass", dry_run, confirm_paper_test),
@@ -2076,6 +2062,33 @@ def run_stage_f(
         account_root = account_paths.root
         precondition_error = _stage_f_precondition_error(state, workspace, account_paths.root)
 
+    evidence_repair = False
+    evidence_blockers: list[str] = []
+    if account_root is not None and state.stage_status.get(STAGE_F_ID, "PENDING") == "PASS":
+        evidence = runbook_stage_f_evidence.validate_stage_f_completion_evidence(
+            workspace,
+            state,
+            account_root,
+        )
+        evidence_blockers = evidence["blockers"]
+        if evidence["valid"]:
+            return {
+                "runner_result": "SKIPPED",
+                "stage_id": STAGE_F_ID,
+                "canonical_stage_id": STAGE_F_ID,
+                "reason": "stage_f_already_pass",
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+                "rendered_commands": [],
+                "next_stage": None,
+                "next_required_action": "Runbook day complete.",
+                "paper_test_confirmed": confirm_paper_test,
+                "dry_run": dry_run,
+                "stage_f_evidence_repair": False,
+                "stage_f_evidence_blockers": [],
+            }
+        evidence_repair = True
+
     if precondition_error:
         if not dry_run:
             state = runbook_state.block_stage(state, STAGE_F_ID, precondition_error)
@@ -2087,6 +2100,8 @@ def run_stage_f(
             "account_root": str(account_root) if account_root is not None else None,
             "rendered_commands": [],
             "next_required_action": "Stage E remains PASS. Fix the Stage F failure and rerun Stage F only.",
+            "stage_f_evidence_repair": evidence_repair,
+            "stage_f_evidence_blockers": evidence_blockers,
         }
 
     stage_f_commands = get_stage_f_commands(commands)
@@ -2094,6 +2109,12 @@ def run_stage_f(
     rendered_commands: list[dict[str, Any]] = []
     stage_result = "PASS"
     if not dry_run:
+        if evidence_repair:
+            state = replace(
+                state,
+                last_completed_step=18,
+                last_completed_stage=STAGE_E_ID,
+            )
         state = runbook_state.start_stage(state, STAGE_F_ID)
         runbook_state.save_state(state, state_path)
 
@@ -2109,16 +2130,18 @@ def run_stage_f(
             timeout_sec,
         )
         rendered_commands.append({"command_key": command.command_key, "argv": rendered_argv})
-        command_json_path, command_txt_path = _write_command_result_and_log(
-            workspace,
-            state,
-            command,
-            command_result,
-            log_text,
-        )
-        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
-        command_results.append(command_result)
-        if not dry_run:
+        if dry_run:
+            command_results.append(command_result)
+        else:
+            command_json_path, command_txt_path = _write_command_result_and_log(
+                workspace,
+                state,
+                command,
+                command_result,
+                log_text,
+            )
+            command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+            command_results.append(command_result)
             state = _apply_stage_f_step_result(
                 state,
                 state_path,
@@ -2156,25 +2179,34 @@ def run_stage_f(
         "account_snapshot_notion_report_json": state.artifacts.get("account_snapshot_notion_report_json"),
         "benchmark_notion_report_json": state.artifacts.get("benchmark_notion_report_json"),
         "stage_e_remains_pass": state.stage_status.get(STAGE_E_ID) == "PASS",
+        "stage_f_evidence_repair": evidence_repair,
+        "stage_f_evidence_blockers": evidence_blockers,
         "next_required_action": next_action,
     }
-    stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
-    stage_summary_paths = runbook_result.get_stage_summary_paths(
-        workspace,
-        state.runbook_day_id,
-        STAGE_F_ID,
-        timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
-    )
+    stage_summary_json: Path | None = None
+    stage_summary_txt: Path | None = None
+    latest_stage_summary_json: Path | None = None
+    latest_stage_summary_txt: Path | None = None
+    if not dry_run:
+        stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
+        stage_summary_paths = runbook_result.get_stage_summary_paths(
+            workspace,
+            state.runbook_day_id,
+            STAGE_F_ID,
+            timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
+        )
+        latest_stage_summary_json = stage_summary_paths["latest_json"]
+        latest_stage_summary_txt = stage_summary_paths["latest_txt"]
     return {
         "runner_result": stage_summary["runner_result"],
         "stage_id": STAGE_F_ID,
         "canonical_stage_id": STAGE_F_ID,
         "runbook_day_id": state.runbook_day_id,
         "state_path": str(state_path),
-        "stage_summary_json": str(stage_summary_json),
-        "stage_summary_txt": str(stage_summary_txt),
-        "latest_stage_summary_json": str(stage_summary_paths["latest_json"]),
-        "latest_stage_summary_txt": str(stage_summary_paths["latest_txt"]),
+        "stage_summary_json": str(stage_summary_json) if stage_summary_json is not None else None,
+        "stage_summary_txt": str(stage_summary_txt) if stage_summary_txt is not None else None,
+        "latest_stage_summary_json": str(latest_stage_summary_json) if latest_stage_summary_json is not None else None,
+        "latest_stage_summary_txt": str(latest_stage_summary_txt) if latest_stage_summary_txt is not None else None,
         "command_results": [
             step["result_json_ref"]
             for step in stage_summary["steps"]
@@ -2187,6 +2219,8 @@ def run_stage_f(
         "next_stage": None,
         "next_required_action": next_action,
         "stage_e_remains_pass": state.stage_status.get(STAGE_E_ID) == "PASS",
+        "stage_f_evidence_repair": evidence_repair,
+        "stage_f_evidence_blockers": evidence_blockers,
     }
 
 
@@ -3798,39 +3832,7 @@ def _validate_stage_f_benchmark_payload(
     state: RunbookState,
     account_root: Path,
 ) -> dict[str, Any]:
-    blockers: list[str] = []
-    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
-        blockers.append("benchmark account_id must match frozen context")
-    if str(payload.get("latest_snapshot_date") or "").strip() != state.frozen_context.trade_date:
-        blockers.append("benchmark latest_snapshot_date must match trade_date")
-    json_path = Path(str(payload.get("json_path") or ""))
-    markdown_path = Path(str(payload.get("markdown_path") or ""))
-    reports_root = (account_root / "reports").resolve(strict=False)
-    for label, path in (("benchmark json_path", json_path), ("benchmark markdown_path", markdown_path)):
-        if not str(path) or str(path) == "." or not path.is_file():
-            blockers.append(f"{label} must exist")
-        elif not _path_is_within(path, reports_root):
-            blockers.append(f"{label} must be under the account reports root")
-    if json_path.is_file():
-        try:
-            report_payload = json.loads(json_path.read_text(encoding="utf-8-sig"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            blockers.append("benchmark JSON must be valid")
-        else:
-            if str(report_payload.get("account_id") or "").strip() != state.frozen_context.account_id:
-                blockers.append("benchmark JSON account_id must match frozen context")
-            if str(report_payload.get("latest_snapshot_date") or "").strip() != state.frozen_context.trade_date:
-                blockers.append("benchmark JSON latest_snapshot_date must match trade_date")
-    artifacts = {
-        "benchmark_report_json": str(json_path),
-        "benchmark_report_md": str(markdown_path),
-    }
-    return _payload_validation(
-        "BLOCKED" if blockers else "PASS",
-        "Benchmark artifacts are account/date scoped and pinned." if not blockers else "Benchmark result failed validation.",
-        artifacts if not blockers else {},
-        blockers,
-    )
+    return runbook_stage_f_evidence.validate_stage_f_benchmark_payload(payload, state, account_root)
 
 
 def _validate_stage_f_export_payload(
@@ -3841,32 +3843,12 @@ def _validate_stage_f_export_payload(
     expected_source: Path,
     label: str,
 ) -> dict[str, Any]:
-    blockers: list[str] = []
-    rows = payload.get("json")
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
-        return _payload_validation("FAILED", f"{label} exporter returned invalid JSON.", {}, ["one export result is required"])
-    item = rows[0]
-    if str(item.get("account_id") or "").strip() != state.frozen_context.account_id:
-        blockers.append("export account_id must match frozen context")
-    if _int_payload(item, "failed_count") != 0:
-        blockers.append("failed_count must be 0")
-    if str(item.get("action") or "").strip().lower() not in {"created", "updated", "skipped"}:
-        blockers.append("action must be created/updated/skipped")
-    if not str(item.get("external_key") or "").strip():
-        blockers.append("external_key is required")
-    source_path = Path(str(item.get("source_path") or ""))
-    if not source_path.is_file():
-        blockers.append("source_path must exist")
-    else:
-        if source_path.resolve(strict=False) != expected_source.resolve(strict=False):
-            blockers.append("source_path must match the frozen account source")
-        if not _path_is_within(source_path, account_root.resolve(strict=False)):
-            blockers.append("source_path must be under the frozen account root")
-    return _payload_validation(
-        "BLOCKED" if blockers else "PASS",
-        f"{label} Notion upsert is validated." if not blockers else f"{label} Notion upsert failed validation.",
-        {},
-        blockers,
+    return runbook_stage_f_evidence.validate_stage_f_export_payload(
+        payload,
+        state,
+        account_root,
+        expected_source=expected_source,
+        label=label,
     )
 
 

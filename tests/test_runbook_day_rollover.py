@@ -5,16 +5,122 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
+import pytest
+
+from core import runbook_day_rollover as rollover_core
 from core.runbook_calendar import CalendarCoverageError, load_market_calendar
 from core.runbook_day_rollover import preview_rollover
-from scripts import runbook_day_rollover, runbook_state
+from scripts import runbook_day_rollover as runbook_day_rollover_cli
+from scripts import runbook_state
 
 
 ACCOUNT_ID = "paper_pilot_202606"
 
 
+@pytest.fixture(autouse=True)
+def _patch_account_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    monkeypatch.setattr(
+        rollover_core,
+        "build_paper_account_paths",
+        lambda account_id, create=False: type("Paths", (), {"root": account_root})(),
+    )
+
+
+def _write_json(path: Path, payload: object) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _command_result(
+    state: runbook_state.RunbookState,
+    command_key: str,
+    step_id: int,
+    raw_payload: dict[str, object],
+) -> dict[str, object]:
+    timestamp = "2026-07-02T18:00:00+09:00"
+    return {
+        "schema_version": "runbook_command_result.v1",
+        "runner_result": "PASS",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "runbook_day_id": state.runbook_day_id,
+        "frozen_context": {
+            "account_id": state.frozen_context.account_id,
+            "data_date": state.frozen_context.data_date,
+            "trade_date": state.frozen_context.trade_date,
+        },
+        "stage_id": "F",
+        "step_id": step_id,
+        "command_key": command_key,
+        "command_type": "NOTION_WRITE",
+        "process": {"executed": True, "exit_code": 0, "duration_ms": 1},
+        "outputs": {"json_ref": None, "txt_ref": None, "log_ref": None, "artifact_refs": {}},
+        "summary": {"title": command_key, "message": "PASS", "warnings": [], "blockers": []},
+        "raw_payload": raw_payload,
+    }
+
+
 def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
     state = runbook_state.create_initial_state(ACCOUNT_ID, data_date, trade_date)
+    account_root = workspace.parent / "outputs" / "paper_accounts" / ACCOUNT_ID
+    snapshot_path = account_root / "paper_account_snapshot.csv"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(
+        f"account_id,snapshot_date,total_equity\n{ACCOUNT_ID},{trade_date},100000\n",
+        encoding="utf-8",
+    )
+    benchmark_source = _write_json(
+        account_root / "reports" / "paper_benchmark_comparison.json",
+        {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date},
+    )
+    benchmark_artifact = _write_json(
+        workspace / "artifacts" / state.runbook_day_id / "stage_f" / "paper_benchmark_comparison.json",
+        {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date},
+    )
+    account_notion = _write_json(
+        workspace / "command_runs" / state.runbook_day_id / "account_snapshot_notion.json",
+        _command_result(
+            state,
+            "account_snapshot_notion_upsert",
+            20,
+            {
+                "json": [{
+                    "account_id": ACCOUNT_ID,
+                    "external_key": f"account_snapshot:{ACCOUNT_ID}:{trade_date}",
+                    "action": "created",
+                    "source_path": str(snapshot_path),
+                    "failed_count": 0,
+                }]
+            },
+        ),
+    )
+    benchmark_notion = _write_json(
+        workspace / "command_runs" / state.runbook_day_id / "benchmark_notion.json",
+        _command_result(
+            state,
+            "benchmark_report_notion_upsert",
+            21,
+            {
+                "json": [{
+                    "account_id": ACCOUNT_ID,
+                    "external_key": f"benchmark:{ACCOUNT_ID}:{trade_date}:exploratory",
+                    "action": "created",
+                    "source_path": str(benchmark_source),
+                    "failed_count": 0,
+                }]
+            },
+        ),
+    )
+    eod_commit = _write_json(
+        workspace / "command_runs" / state.runbook_day_id / "eod_commit.json",
+        {"runner_result": "PASS"},
+    )
+    final_status = _write_json(
+        workspace / "command_runs" / state.runbook_day_id / "final_status.json",
+        {"runner_result": "PASS"},
+    )
     state = replace(
         state,
         current_stage="F",
@@ -23,8 +129,11 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
         last_completed_stage="F",
         stage_status={stage_id: "PASS" for stage_id in runbook_state.STAGE_IDS},
         artifacts={
-            "final_status_report_json": f"command_runs/{state.runbook_day_id}/final_status.json",
-            "benchmark_notion_report_json": f"command_runs/{state.runbook_day_id}/benchmark_sync.json",
+            "eod_commit_report_json": str(eod_commit.relative_to(workspace)),
+            "final_status_report_json": str(final_status.relative_to(workspace)),
+            "benchmark_report_json": str(benchmark_artifact.relative_to(workspace)),
+            "account_snapshot_notion_report_json": str(account_notion.relative_to(workspace)),
+            "benchmark_notion_report_json": str(benchmark_notion.relative_to(workspace)),
         },
     )
     path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, data_date, trade_date)
@@ -218,6 +327,7 @@ def test_repeated_preview_is_identical_and_read_only(tmp_path: Path) -> None:
     artifact.write_text('{"unchanged": true}\n', encoding="utf-8")
     before_state = state_path.read_bytes()
     before_artifact = artifact.read_bytes()
+    before_files = {path.relative_to(workspace): path.read_bytes() for path in workspace.rglob("*") if path.is_file()}
 
     first = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
     second = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
@@ -225,11 +335,7 @@ def test_repeated_preview_is_identical_and_read_only(tmp_path: Path) -> None:
     assert first == second
     assert state_path.read_bytes() == before_state
     assert artifact.read_bytes() == before_artifact
-    assert sorted(path.relative_to(workspace) for path in workspace.rglob("*")) == [
-        Path("existing_artifact.json"),
-        Path("runbook_states"),
-        Path("runbook_states") / state_path.name,
-    ]
+    assert {path.relative_to(workspace): path.read_bytes() for path in workspace.rglob("*") if path.is_file()} == before_files
 
 
 def test_cli_exit_codes_match_pass_and_blocked(tmp_path: Path, capsys) -> None:
@@ -237,11 +343,11 @@ def test_cli_exit_codes_match_pass_and_blocked(tmp_path: Path, capsys) -> None:
     workspace.mkdir()
     _complete_state(workspace, "2026-07-01", "2026-07-02")
 
-    pass_code = runbook_day_rollover.main(
+    pass_code = runbook_day_rollover_cli.main(
         ["--workspace", str(workspace), "--account-id", ACCOUNT_ID, "--confirm-paper-test"]
     )
     pass_payload = json.loads(capsys.readouterr().out)
-    blocked_code = runbook_day_rollover.main(
+    blocked_code = runbook_day_rollover_cli.main(
         ["--workspace", str(workspace), "--account-id", ACCOUNT_ID]
     )
     blocked_payload = json.loads(capsys.readouterr().out)
@@ -250,3 +356,55 @@ def test_cli_exit_codes_match_pass_and_blocked(tmp_path: Path, capsys) -> None:
     assert pass_payload["runner_result"] == "PASS"
     assert blocked_code == 2
     assert blocked_payload["reason"] == "paper_test_confirmation_required"
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    ["account_snapshot_notion_report_json", "benchmark_notion_report_json"],
+)
+def test_missing_either_notion_result_blocks_rollover(tmp_path: Path, artifact_name: str) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-07-01", "2026-07-02")
+    state = runbook_state.load_state(state_path)
+    artifacts = dict(state.artifacts)
+    artifacts.pop(artifact_name)
+    runbook_state.save_state(replace(state, artifacts=artifacts), state_path)
+
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "active_runbook_day_exists"
+
+
+@pytest.mark.parametrize("f_status", ["FAILED", "BLOCKED"])
+def test_failed_or_blocked_stage_f_blocks_rollover(tmp_path: Path, f_status: str) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-07-01", "2026-07-02")
+    state = runbook_state.load_state(state_path)
+    statuses = dict(state.stage_status)
+    statuses["F"] = f_status
+    runbook_state.save_state(
+        replace(state, current_status=f_status, stage_status=statuses, last_error={"stage_id": "F"}),
+        state_path,
+    )
+
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "active_runbook_day_exists"
+
+
+def test_missing_notion_evidence_file_blocks_rollover(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-07-01", "2026-07-02")
+    state = runbook_state.load_state(state_path)
+    evidence_path = workspace / state.artifacts["account_snapshot_notion_report_json"]
+    evidence_path.unlink()
+
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "active_runbook_day_exists"

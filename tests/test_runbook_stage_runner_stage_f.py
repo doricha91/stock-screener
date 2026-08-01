@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -141,6 +142,20 @@ def _run_stage_f(workspace: Path, **kwargs):
     )
 
 
+def _complete_stage_f(
+    workspace: Path,
+    account_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, list[list[str]]]:
+    state_path = _seed_stage_e_pass(workspace, account_root)
+    _patch_account_root(monkeypatch, account_root)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", _fake_stage_f_run(account_root, calls))
+    result = _run_stage_f(workspace)
+    assert result["runner_result"] == "PASS"
+    return state_path, calls
+
+
 def test_stage_f_blocks_before_stage_e_without_subprocess(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -272,10 +287,8 @@ def test_stage_f_already_pass_skips_all_actual_work(tmp_path: Path, monkeypatch)
     workspace = tmp_path / "workspace"
     account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
     workspace.mkdir()
-    state_path = _seed_stage_e_pass(workspace, account_root)
-    state = runbook_state.load_state(state_path)
-    state = runbook_state.complete_stage(state, "F")
-    runbook_state.save_state(state, state_path)
+    state_path, first_calls = _complete_stage_f(workspace, account_root, monkeypatch)
+    before = state_path.read_bytes()
     calls: list[list[str]] = []
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", lambda *args, **kwargs: calls.append(args))
 
@@ -284,7 +297,121 @@ def test_stage_f_already_pass_skips_all_actual_work(tmp_path: Path, monkeypatch)
     assert result["runner_result"] == "SKIPPED"
     assert result["reason"] == "stage_f_already_pass"
     assert result["rendered_commands"] == []
+    assert len(first_calls) == 3
     assert calls == []
+    assert state_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    ["account_snapshot_notion_report_json", "benchmark_notion_report_json"],
+)
+def test_stage_f_pass_missing_notion_evidence_self_heals(
+    tmp_path: Path,
+    monkeypatch,
+    artifact_name: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    workspace.mkdir()
+    state_path, _ = _complete_stage_f(workspace, account_root, monkeypatch)
+    state = runbook_state.load_state(state_path)
+    artifacts = dict(state.artifacts)
+    artifacts.pop(artifact_name)
+    runbook_state.save_state(replace(state, artifacts=artifacts), state_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", _fake_stage_f_run(account_root, calls))
+
+    result = _run_stage_f(workspace)
+
+    assert result["runner_result"] == "PASS"
+    assert result["stage_f_evidence_repair"] is True
+    assert any(artifact_name in blocker for blocker in result["stage_f_evidence_blockers"])
+    assert len(calls) == 3
+    assert not any("eod" in part for call in calls for part in call)
+    repaired = runbook_state.load_state(state_path)
+    assert repaired.stage_status["E"] == "PASS"
+    assert repaired.stage_status["F"] == "PASS"
+    assert repaired.artifacts["account_snapshot_notion_report_json"]
+    assert repaired.artifacts["benchmark_notion_report_json"]
+
+
+def test_stage_f_pass_corrupt_evidence_repairs_fail_closed(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    workspace.mkdir()
+    state_path, _ = _complete_stage_f(workspace, account_root, monkeypatch)
+    state = runbook_state.load_state(state_path)
+    evidence_path = workspace / state.artifacts["benchmark_notion_report_json"]
+    evidence_path.write_text("{not-json", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", _fake_stage_f_run(account_root, calls))
+
+    result = _run_stage_f(workspace)
+
+    assert result["runner_result"] == "PASS"
+    assert result["stage_f_evidence_repair"] is True
+    assert "benchmark_notion_report_json:artifact_json_invalid" in result["stage_f_evidence_blockers"]
+    assert len(calls) == 3
+
+
+def test_stage_f_evidence_repair_failure_preserves_stage_e(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    workspace.mkdir()
+    state_path, _ = _complete_stage_f(workspace, account_root, monkeypatch)
+    state = runbook_state.load_state(state_path)
+    commit_path = workspace / state.artifacts["eod_commit_report_json"]
+    commit_before = commit_path.read_bytes()
+    artifacts = dict(state.artifacts)
+    artifacts.pop("account_snapshot_notion_report_json")
+    runbook_state.save_state(replace(state, artifacts=artifacts), state_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        _fake_stage_f_run(account_root, calls, fail_command="account_snapshot_notion_upsert"),
+    )
+
+    result = _run_stage_f(workspace)
+
+    assert result["runner_result"] == "FAILED"
+    assert result["stage_f_evidence_repair"] is True
+    assert len(calls) == 2
+    assert not any("eod" in part for call in calls for part in call)
+    failed = runbook_state.load_state(state_path)
+    assert failed.stage_status["E"] == "PASS"
+    assert failed.stage_status["F"] == "FAILED"
+    assert failed.last_completed_stage == "E"
+    assert commit_path.read_bytes() == commit_before
+
+
+def test_stage_f_incomplete_evidence_dry_run_is_byte_read_only(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    workspace.mkdir()
+    state_path, _ = _complete_stage_f(workspace, account_root, monkeypatch)
+    state = runbook_state.load_state(state_path)
+    artifacts = dict(state.artifacts)
+    artifacts.pop("benchmark_notion_report_json")
+    runbook_state.save_state(replace(state, artifacts=artifacts), state_path)
+    before = {path.relative_to(workspace): path.read_bytes() for path in workspace.rglob("*") if path.is_file()}
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", lambda *args, **kwargs: calls.append(args))
+
+    result = _run_stage_f(workspace, dry_run=True)
+
+    after = {path.relative_to(workspace): path.read_bytes() for path in workspace.rglob("*") if path.is_file()}
+    assert result["runner_result"] == "PASS"
+    assert result["stage_f_evidence_repair"] is True
+    assert any("benchmark_notion_report_json" in item for item in result["stage_f_evidence_blockers"])
+    assert [item["command_key"] for item in result["rendered_commands"]] == [
+        "benchmark_generate",
+        "account_snapshot_notion_upsert",
+        "benchmark_report_notion_upsert",
+    ]
+    assert calls == []
+    assert after == before
 
 
 def test_legacy_state_without_f_can_run_stage_f_after_e_pass(tmp_path: Path, monkeypatch) -> None:
