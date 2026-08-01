@@ -332,6 +332,6 @@ def test_stage_e_final_status_warning_does_not_pass_stage(tmp_path: Path, monkey
         confirm_paper_test=True,
     )
 
-    assert result["runner_result"] == "WARNING"
+    assert result["runner_result"] == "BLOCKED"
     loaded = runbook_state.load_state(runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE))
     assert loaded.stage_status["E"] != "PASS"

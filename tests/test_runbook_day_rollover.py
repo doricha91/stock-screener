@@ -11,6 +11,7 @@ from core import runbook_day_rollover as rollover_core
 from core.runbook_calendar import CalendarCoverageError, load_market_calendar
 from core.runbook_day_rollover import preview_rollover
 from scripts import runbook_day_rollover as runbook_day_rollover_cli
+from scripts import runbook_stage_e_evidence
 from scripts import runbook_state
 
 
@@ -38,6 +39,8 @@ def _command_result(
     command_key: str,
     step_id: int,
     raw_payload: dict[str, object],
+    *,
+    stage_id: str = "F",
 ) -> dict[str, object]:
     timestamp = "2026-07-02T18:00:00+09:00"
     return {
@@ -51,7 +54,7 @@ def _command_result(
             "data_date": state.frozen_context.data_date,
             "trade_date": state.frozen_context.trade_date,
         },
-        "stage_id": "F",
+        "stage_id": stage_id,
         "step_id": step_id,
         "command_key": command_key,
         "command_type": "NOTION_WRITE",
@@ -73,11 +76,11 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
     )
     benchmark_source = _write_json(
         account_root / "reports" / "paper_benchmark_comparison.json",
-        {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date},
+        {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date, "run_mode": "exploratory"},
     )
     benchmark_artifact = _write_json(
         workspace / "artifacts" / state.runbook_day_id / "stage_f" / "paper_benchmark_comparison.json",
-        {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date},
+        {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date, "run_mode": "exploratory"},
     )
     account_notion = _write_json(
         workspace / "command_runs" / state.runbook_day_id / "account_snapshot_notion.json",
@@ -115,11 +118,35 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
     )
     eod_commit = _write_json(
         workspace / "command_runs" / state.runbook_day_id / "eod_commit.json",
-        {"runner_result": "PASS"},
+        {
+            "runner_result": "PASS",
+            "status": "COMMITTED",
+            "mode": "commit",
+            "account_id": ACCOUNT_ID,
+            "date": trade_date,
+            "trade_date": trade_date,
+            "failed_count": 0,
+            "blocked_count": 0,
+            "current_state_written": True,
+            "account_snapshot_written": True,
+            "position_snapshot_written": True,
+            "market_valuation_status": "success",
+        },
     )
     final_status = _write_json(
         workspace / "command_runs" / state.runbook_day_id / "final_status.json",
-        {"runner_result": "PASS"},
+        _command_result(
+            state,
+            "final_status",
+            18,
+            {
+                "overall_status": "PASS",
+                "account_id": ACCOUNT_ID,
+                "trade_date": trade_date,
+                "unresolved_error_count": 0,
+            },
+            stage_id="E",
+        ),
     )
     state = replace(
         state,
@@ -403,6 +430,178 @@ def test_missing_notion_evidence_file_blocks_rollover(tmp_path: Path) -> None:
     state = runbook_state.load_state(state_path)
     evidence_path = workspace / state.artifacts["account_snapshot_notion_report_json"]
     evidence_path.unlink()
+
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "active_runbook_day_exists"
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("runner_result", "FAILED"),
+        ("status", "PASS"),
+        ("mode", "dry_run"),
+        ("account_id", "paper_other"),
+        ("date", "2026-07-01"),
+        ("trade_date", "2026-07-01"),
+        ("failed_count", _MISSING),
+        ("failed_count", None),
+        ("failed_count", "0"),
+        ("failed_count", False),
+        ("failed_count", 1),
+        ("blocked_count", _MISSING),
+        ("blocked_count", "0"),
+        ("blocked_count", 1),
+        ("current_state_written", _MISSING),
+        ("current_state_written", False),
+        ("current_state_written", 1),
+        ("account_snapshot_written", "true"),
+        ("position_snapshot_written", False),
+        ("market_valuation_status", "failed"),
+    ],
+)
+def test_invalid_eod_commit_semantics_block_rollover(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-07-01", "2026-07-02")
+    state = runbook_state.load_state(state_path)
+    evidence_path = workspace / state.artifacts["eod_commit_report_json"]
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if value is _MISSING:
+        payload.pop(field)
+    else:
+        payload[field] = value
+    _write_json(evidence_path, payload)
+
+    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert validation["valid"] is False
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "active_runbook_day_exists"
+
+
+@pytest.mark.parametrize(
+    ("location", "field", "value"),
+    [
+        ("wrapper", "schema_version", "invalid"),
+        ("wrapper", "runner_result", "FAILED"),
+        ("wrapper", "runner_result", "BLOCKED"),
+        ("wrapper", "runner_result", "WARNING"),
+        ("wrapper", "stage_id", "F"),
+        ("wrapper", "step_id", 17),
+        ("wrapper", "command_key", "eod_commit"),
+        ("raw", "account_id", "paper_other"),
+        ("raw", "trade_date", "2026-07-01"),
+        ("raw", "unresolved_error_count", _MISSING),
+        ("raw", "unresolved_error_count", "0"),
+        ("raw", "unresolved_error_count", False),
+        ("raw", "unresolved_error_count", 1),
+        ("raw", "overall_status", "WARNING"),
+        ("raw", "overall_status", "FAILED"),
+    ],
+)
+def test_invalid_final_status_semantics_block_rollover(
+    tmp_path: Path,
+    location: str,
+    field: str,
+    value: object,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-07-01", "2026-07-02")
+    state = runbook_state.load_state(state_path)
+    evidence_path = workspace / state.artifacts["final_status_report_json"]
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    target = payload if location == "wrapper" else payload["raw_payload"]
+    if value is _MISSING:
+        target.pop(field)
+    else:
+        target[field] = value
+    _write_json(evidence_path, payload)
+
+    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert validation["valid"] is False
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "active_runbook_day_exists"
+
+
+@pytest.mark.parametrize("artifact_name", ["eod_commit_report_json", "final_status_report_json"])
+@pytest.mark.parametrize("failure", ["missing_ref", "missing_file", "outside_workspace", "invalid_json", "empty_object"])
+def test_invalid_stage_e_artifact_storage_blocks_rollover(
+    tmp_path: Path,
+    artifact_name: str,
+    failure: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-07-01", "2026-07-02")
+    state = runbook_state.load_state(state_path)
+    artifacts = dict(state.artifacts)
+    evidence_path = workspace / artifacts[artifact_name]
+    if failure == "missing_ref":
+        artifacts.pop(artifact_name)
+        state = replace(state, artifacts=artifacts)
+        runbook_state.save_state(state, state_path)
+    elif failure == "missing_file":
+        evidence_path.unlink()
+    elif failure == "outside_workspace":
+        outside = tmp_path / "outside.json"
+        _write_json(outside, {"runner_result": "PASS"})
+        artifacts[artifact_name] = str(outside)
+        state = replace(state, artifacts=artifacts)
+        runbook_state.save_state(state, state_path)
+    elif failure == "invalid_json":
+        evidence_path.write_text("{invalid", encoding="utf-8")
+    else:
+        _write_json(evidence_path, {})
+
+    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert validation["valid"] is False
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "active_runbook_day_exists"
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "field", "value"),
+    [
+        ("account_snapshot_notion_report_json", "external_key", "arbitrary"),
+        ("benchmark_notion_report_json", "external_key", "benchmark:legacy"),
+        ("account_snapshot_notion_report_json", "failed_count", _MISSING),
+        ("benchmark_notion_report_json", "failed_count", False),
+    ],
+)
+def test_strict_stage_f_evidence_blocks_rollover(
+    tmp_path: Path,
+    artifact_name: str,
+    field: str,
+    value: object,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-07-01", "2026-07-02")
+    state = runbook_state.load_state(state_path)
+    evidence_path = workspace / state.artifacts[artifact_name]
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    item = payload["raw_payload"]["json"][0]
+    if value is _MISSING:
+        item.pop(field)
+    else:
+        item[field] = value
+    _write_json(evidence_path, payload)
 
     result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
 

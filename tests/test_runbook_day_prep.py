@@ -47,7 +47,7 @@ def _complete_state(workspace: Path, data_date: str = "2026-07-01", trade_date: 
     snapshot.parent.mkdir(parents=True, exist_ok=True)
     benchmark_source.parent.mkdir(parents=True, exist_ok=True)
     snapshot.write_text(f"account_id,snapshot_date\n{ACCOUNT_ID},{trade_date}\n", encoding="utf-8")
-    benchmark_payload = {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date}
+    benchmark_payload = {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date, "run_mode": "exploratory"}
     benchmark_source.write_text(json.dumps(benchmark_payload), encoding="utf-8")
     command_dir = workspace / "command_runs" / state.runbook_day_id
     artifact_dir = workspace / "artifacts" / state.runbook_day_id / "stage_f"
@@ -55,7 +55,13 @@ def _complete_state(workspace: Path, data_date: str = "2026-07-01", trade_date: 
     artifact_dir.mkdir(parents=True, exist_ok=True)
     (artifact_dir / "benchmark.json").write_text(json.dumps(benchmark_payload), encoding="utf-8")
 
-    def notion_result(command_key: str, step_id: int, source: Path) -> dict[str, object]:
+    def command_result(
+        command_key: str,
+        step_id: int,
+        raw_payload: dict[str, object],
+        *,
+        stage_id: str = "F",
+    ) -> dict[str, object]:
         timestamp = "2026-07-02T18:00:00+09:00"
         return {
             "schema_version": "runbook_command_result.v1",
@@ -64,34 +70,69 @@ def _complete_state(workspace: Path, data_date: str = "2026-07-01", trade_date: 
             "updated_at": timestamp,
             "runbook_day_id": state.runbook_day_id,
             "frozen_context": {"account_id": ACCOUNT_ID, "data_date": data_date, "trade_date": trade_date},
-            "stage_id": "F",
+            "stage_id": stage_id,
             "step_id": step_id,
             "command_key": command_key,
             "command_type": "NOTION_WRITE",
             "process": {"executed": True, "exit_code": 0, "duration_ms": 1},
             "outputs": {"json_ref": None, "txt_ref": None, "log_ref": None, "artifact_refs": {}},
             "summary": {"title": command_key, "message": "PASS", "warnings": [], "blockers": []},
-            "raw_payload": {
-                "json": [{
-                    "account_id": ACCOUNT_ID,
-                    "external_key": f"{command_key}:{ACCOUNT_ID}:{trade_date}",
-                    "action": "created",
-                    "source_path": str(source),
-                    "failed_count": 0,
-                }]
-            },
+            "raw_payload": raw_payload,
         }
 
     account_notion = command_dir / "account_notion.json"
     benchmark_notion = command_dir / "benchmark_notion.json"
     account_notion.write_text(
-        json.dumps(notion_result("account_snapshot_notion_upsert", 20, snapshot)), encoding="utf-8"
+        json.dumps(command_result("account_snapshot_notion_upsert", 20, {"json": [{
+            "account_id": ACCOUNT_ID,
+            "external_key": f"account_snapshot:{ACCOUNT_ID}:{trade_date}",
+            "action": "created",
+            "source_path": str(snapshot),
+            "failed_count": 0,
+        }]})),
+        encoding="utf-8",
     )
     benchmark_notion.write_text(
-        json.dumps(notion_result("benchmark_report_notion_upsert", 21, benchmark_source)), encoding="utf-8"
+        json.dumps(command_result("benchmark_report_notion_upsert", 21, {"json": [{
+            "account_id": ACCOUNT_ID,
+            "external_key": f"benchmark:{ACCOUNT_ID}:{trade_date}:exploratory",
+            "action": "created",
+            "source_path": str(benchmark_source),
+            "failed_count": 0,
+        }]})),
+        encoding="utf-8",
     )
-    (command_dir / "eod_commit.json").write_text('{"runner_result":"PASS"}', encoding="utf-8")
-    (command_dir / "final_status.json").write_text('{"runner_result":"PASS"}', encoding="utf-8")
+    (command_dir / "eod_commit.json").write_text(
+        json.dumps({
+            "runner_result": "PASS",
+            "status": "COMMITTED",
+            "mode": "commit",
+            "account_id": ACCOUNT_ID,
+            "date": trade_date,
+            "trade_date": trade_date,
+            "failed_count": 0,
+            "blocked_count": 0,
+            "current_state_written": True,
+            "account_snapshot_written": True,
+            "position_snapshot_written": True,
+            "market_valuation_status": "success",
+        }),
+        encoding="utf-8",
+    )
+    (command_dir / "final_status.json").write_text(
+        json.dumps(command_result(
+            "final_status",
+            18,
+            {
+                "overall_status": "PASS",
+                "account_id": ACCOUNT_ID,
+                "trade_date": trade_date,
+                "unresolved_error_count": 0,
+            },
+            stage_id="E",
+        )),
+        encoding="utf-8",
+    )
     state = replace(
         state,
         current_stage="F",

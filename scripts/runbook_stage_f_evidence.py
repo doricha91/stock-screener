@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from core.notion_account_keys import (
+    build_account_snapshot_external_key,
+    build_benchmark_report_external_key,
+)
 from scripts import runbook_result
 from scripts.runbook_state import RunbookState
 
@@ -30,11 +34,15 @@ def _payload_validation(
     }
 
 
-def _int_payload(payload: dict[str, Any], field: str) -> int:
-    try:
-        return int(payload.get(field) or 0)
-    except (TypeError, ValueError):
-        return 0
+def _strict_zero_count(payload: dict[str, Any], field: str) -> list[str]:
+    if field not in payload:
+        return [f"{field}_missing"]
+    value = payload[field]
+    if isinstance(value, bool) or not isinstance(value, int):
+        return [f"{field}_type_invalid"]
+    if value != 0:
+        return [f"{field}_not_zero"]
+    return []
 
 
 def path_is_within(path: Path, parent: Path) -> bool:
@@ -98,10 +106,17 @@ def validate_stage_f_benchmark_payload(
         except (OSError, UnicodeError, json.JSONDecodeError):
             blockers.append("benchmark JSON must be valid")
         else:
-            if str(report_payload.get("account_id") or "").strip() != state.frozen_context.account_id:
-                blockers.append("benchmark JSON account_id must match frozen context")
-            if str(report_payload.get("latest_snapshot_date") or "").strip() != state.frozen_context.trade_date:
-                blockers.append("benchmark JSON latest_snapshot_date must match trade_date")
+            if not isinstance(report_payload, dict):
+                blockers.append("benchmark JSON must be an object")
+            else:
+                if str(report_payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+                    blockers.append("benchmark JSON account_id must match frozen context")
+                if str(report_payload.get("latest_snapshot_date") or "").strip() != state.frozen_context.trade_date:
+                    blockers.append("benchmark JSON latest_snapshot_date must match trade_date")
+                if "run_mode" not in report_payload:
+                    blockers.append("benchmark JSON run_mode is required")
+                elif not isinstance(report_payload["run_mode"], str) or not report_payload["run_mode"].strip():
+                    blockers.append("benchmark JSON run_mode must be a non-empty string")
     artifacts = {
         "benchmark_report_json": str(json_path),
         "benchmark_report_md": str(markdown_path),
@@ -129,20 +144,60 @@ def validate_stage_f_export_payload(
     item = rows[0]
     if str(item.get("account_id") or "").strip() != state.frozen_context.account_id:
         blockers.append("export account_id must match frozen context")
-    if _int_payload(item, "failed_count") != 0:
-        blockers.append("failed_count must be 0")
+    blockers.extend(_strict_zero_count(item, "failed_count"))
     if str(item.get("action") or "").strip().lower() not in {"created", "updated", "skipped"}:
         blockers.append("action must be created/updated/skipped")
-    if not str(item.get("external_key") or "").strip():
-        blockers.append("external_key is required")
     source_path = Path(str(item.get("source_path") or ""))
+    source_valid = True
     if not source_path.is_file():
         blockers.append("source_path must exist")
+        source_valid = False
     else:
         if source_path.resolve(strict=False) != expected_source.resolve(strict=False):
             blockers.append("source_path must match the frozen account source")
+            source_valid = False
         if not path_is_within(source_path, account_root.resolve(strict=False)):
             blockers.append("source_path must be under the frozen account root")
+            source_valid = False
+
+    expected_external_key: str | None = None
+    if label == "Account Snapshot":
+        expected_external_key = build_account_snapshot_external_key(
+            state.frozen_context.account_id,
+            state.frozen_context.trade_date,
+        )
+    elif label == "Benchmark Report" and source_valid:
+        try:
+            benchmark_source = json.loads(source_path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            blockers.append("benchmark_source_json_invalid")
+        else:
+            if not isinstance(benchmark_source, dict):
+                blockers.append("benchmark_source_json_must_be_object")
+            else:
+                if str(benchmark_source.get("account_id") or "").strip() != state.frozen_context.account_id:
+                    blockers.append("benchmark_source_account_id_mismatch")
+                if str(benchmark_source.get("latest_snapshot_date") or "").strip() != state.frozen_context.trade_date:
+                    blockers.append("benchmark_source_latest_snapshot_date_mismatch")
+                if "run_mode" not in benchmark_source:
+                    blockers.append("benchmark_source_run_mode_missing")
+                elif not isinstance(benchmark_source["run_mode"], str) or not benchmark_source["run_mode"].strip():
+                    blockers.append("benchmark_source_run_mode_type_invalid")
+                else:
+                    expected_external_key = build_benchmark_report_external_key(
+                        state.frozen_context.account_id,
+                        state.frozen_context.trade_date,
+                        benchmark_source["run_mode"],
+                    )
+
+    if "external_key" not in item:
+        blockers.append("external_key_missing")
+    elif not isinstance(item["external_key"], str):
+        blockers.append("external_key_type_invalid")
+    elif not item["external_key"].strip():
+        blockers.append("external_key_missing")
+    elif expected_external_key is not None and item["external_key"].strip() != expected_external_key:
+        blockers.append("external_key_mismatch")
     return _payload_validation(
         "BLOCKED" if blockers else "PASS",
         f"{label} Notion upsert is validated." if not blockers else f"{label} Notion upsert failed validation.",
@@ -164,6 +219,10 @@ def _validate_benchmark_artifact(
         blockers.append("benchmark_report_json:account_id_mismatch")
     if str(payload.get("latest_snapshot_date") or "").strip() != state.frozen_context.trade_date:
         blockers.append("benchmark_report_json:latest_snapshot_date_mismatch")
+    if "run_mode" not in payload:
+        blockers.append("benchmark_report_json:run_mode_missing")
+    elif not isinstance(payload["run_mode"], str) or not payload["run_mode"].strip():
+        blockers.append("benchmark_report_json:run_mode_type_invalid")
     return blockers
 
 

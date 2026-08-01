@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts import runbook_command_registry as registry
 from scripts import runbook_gate_checker
 from scripts import runbook_result
+from scripts import runbook_stage_e_evidence
 from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
 from scripts.runbook_no_action import (
@@ -2064,6 +2065,21 @@ def run_stage_f(
 
     evidence_repair = False
     evidence_blockers: list[str] = []
+    if precondition_error:
+        if not dry_run:
+            state = runbook_state.block_stage(state, STAGE_F_ID, precondition_error)
+            runbook_state.save_state(state, state_path)
+        return {
+            **_blocked_stage_f_payload(precondition_error, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+            "account_root": str(account_root) if account_root is not None else None,
+            "rendered_commands": [],
+            "next_required_action": "Stage E evidence requires operator recovery; Stage F did not run.",
+            "stage_f_evidence_repair": False,
+            "stage_f_evidence_blockers": [],
+        }
+
     if account_root is not None and state.stage_status.get(STAGE_F_ID, "PENDING") == "PASS":
         evidence = runbook_stage_f_evidence.validate_stage_f_completion_evidence(
             workspace,
@@ -2088,21 +2104,6 @@ def run_stage_f(
                 "stage_f_evidence_blockers": [],
             }
         evidence_repair = True
-
-    if precondition_error:
-        if not dry_run:
-            state = runbook_state.block_stage(state, STAGE_F_ID, precondition_error)
-            runbook_state.save_state(state, state_path)
-        return {
-            **_blocked_stage_f_payload(precondition_error, dry_run, confirm_paper_test),
-            "runbook_day_id": state.runbook_day_id,
-            "state_path": str(state_path),
-            "account_root": str(account_root) if account_root is not None else None,
-            "rendered_commands": [],
-            "next_required_action": "Stage E remains PASS. Fix the Stage F failure and rerun Stage F only.",
-            "stage_f_evidence_repair": evidence_repair,
-            "stage_f_evidence_blockers": evidence_blockers,
-        }
 
     stage_f_commands = get_stage_f_commands(commands)
     command_results: list[dict[str, Any]] = []
@@ -2696,16 +2697,8 @@ def _stage_e_precondition_error(
 def _stage_f_precondition_error(state: RunbookState, workspace: Path, account_root: Path) -> str | None:
     if state.stage_status.get(STAGE_E_ID) != "PASS":
         return "stage_e_not_pass"
-    commit_ref = str(state.artifacts.get("eod_commit_report_json") or "").strip()
-    if not commit_ref:
-        return "eod_commit_report_missing"
-    commit_path = _artifact_ref_path(workspace, commit_ref)
-    try:
-        commit_payload = json.loads(commit_path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return "eod_commit_report_invalid"
-    if _validate_eod_commit_report_payload(commit_payload, state):
-        return "eod_commit_report_context_or_write_flags_invalid"
+    if not runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)["valid"]:
+        return "stage_e_completion_evidence_invalid"
     if not account_root.is_dir():
         return "account_root_missing"
     return None
@@ -2736,8 +2729,7 @@ def _stage_e_final_status_retry_allowed(state: RunbookState, workspace: Path) ->
     record = state.idempotency_records.get(key)
     if not record or record.get("status") != "PASS":
         return False
-    report_ref = state.artifacts.get("eod_commit_report_json")
-    return bool(report_ref and _artifact_ref_exists(workspace, report_ref))
+    return bool(runbook_stage_e_evidence.validate_stored_eod_commit(workspace, state)["valid"])
 
 
 def _stage_d_sync_retry_allowed(state: RunbookState, workspace: Path) -> bool:
@@ -3984,21 +3976,7 @@ def _validate_review_sync_payload(payload: dict[str, Any], state: RunbookState) 
 
 
 def _validate_eod_dryrun_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
-    blockers = []
-    status = str(payload.get("runner_result") or payload.get("status") or "").upper()
-    if status != "PASS":
-        blockers.append("runner_result/status must be PASS")
-    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
-        blockers.append("account_id must match frozen context")
-    date_value = str(payload.get("date") or payload.get("trade_date") or "").strip()
-    if date_value != state.frozen_context.trade_date:
-        blockers.append("date must match trade_date")
-    if _int_payload(payload, "fail_count") != 0:
-        blockers.append("fail_count must be 0")
-    if _int_payload(payload, "blocked_count") != 0:
-        blockers.append("blocked_count must be 0")
-    if str(payload.get("commit_allowed")).lower() != "true":
-        blockers.append("commit_allowed must be true")
+    blockers = runbook_stage_e_evidence.validate_eod_dryrun_report_payload(payload, state)
     dryrun_json = str(payload.get("json_path") or payload.get("dryrun_json_path") or "").strip()
     dryrun_md = str(payload.get("markdown_path") or payload.get("dryrun_markdown_path") or "").strip()
     if not dryrun_json or not Path(dryrun_json).exists():
@@ -4021,20 +3999,7 @@ def _validate_eod_dryrun_payload(payload: dict[str, Any], state: RunbookState) -
 
 
 def _validate_eod_commit_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
-    blockers = []
-    status = str(payload.get("status") or payload.get("runner_result") or "").upper()
-    if status not in {"COMMITTED", "PASS"}:
-        blockers.append("status must be COMMITTED/PASS")
-    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
-        blockers.append("account_id must match frozen context")
-    date_value = str(payload.get("date") or payload.get("trade_date") or "").strip()
-    if date_value != state.frozen_context.trade_date:
-        blockers.append("date must match trade_date")
-    if _int_payload(payload, "failed_count") != 0:
-        blockers.append("failed_count must be 0")
-    for field in ("current_state_written", "account_snapshot_written", "position_snapshot_written"):
-        if payload.get(field) is not True:
-            blockers.append(f"{field} must be true")
+    blockers = runbook_stage_e_evidence.validate_eod_commit_report_payload(payload, state)
     commit_json = str(payload.get("json_path") or payload.get("commit_json_path") or "").strip()
     commit_md = str(payload.get("markdown_path") or payload.get("commit_markdown_path") or "").strip()
     if not commit_json or not Path(commit_json).exists():
@@ -4057,110 +4022,40 @@ def _validate_eod_commit_payload(payload: dict[str, Any], state: RunbookState) -
 
 
 def _validate_final_status_payload(payload: dict[str, Any], state: RunbookState, workspace: Path) -> dict[str, Any]:
-    blockers = []
-    warnings = []
-    status = str(
-        payload.get("runner_result")
-        or payload.get("overall_status")
-        or payload.get("workflow_status")
-        or ""
-    ).upper()
-    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
-        blockers.append("account_id must match frozen context")
-    date_value = str(payload.get("trade_date") or payload.get("date") or payload.get("target_date") or "").strip()
-    if date_value and date_value != state.frozen_context.trade_date:
-        blockers.append("date must match trade_date")
-    unresolved_count = _int_payload(payload, "unresolved_error_count")
-    if unresolved_count != 0:
-        blockers.append("unresolved_error_count must be 0")
+    blockers = runbook_stage_e_evidence.validate_final_status_payload(payload, state)
     blockers.extend(_validate_stage_e_pinned_eod_reports(state, workspace))
-    if status == "WARNING":
-        warnings.append("final_status returned WARNING")
-    elif status not in {"PASS", "OK", "READY", "DONE"}:
-        blockers.append("final_status must be PASS")
-    runner_result = "BLOCKED" if blockers else "WARNING" if warnings else "PASS"
+    runner_result = "BLOCKED" if blockers else "PASS"
     return _payload_validation(
         runner_result,
         "Final status is PASS." if runner_result == "PASS" else "Final status requires operator review.",
         {},
         blockers,
-        warnings,
     )
 
 
 def _validate_stage_e_pinned_eod_reports(state: RunbookState, workspace: Path) -> list[str]:
     blockers: list[str] = []
     dryrun_ref = state.artifacts.get("eod_dryrun_report_json")
-    commit_ref = state.artifacts.get("eod_commit_report_json")
-    if not dryrun_ref:
-        blockers.append("eod_dryrun_report_json is required")
+    dryrun, _, dryrun_error = runbook_stage_e_evidence.load_workspace_json_artifact(workspace, dryrun_ref)
+    if dryrun_error:
+        blockers.append(f"eod_dryrun_report_json:{dryrun_error}")
     else:
-        dryrun_path = _artifact_ref_path(workspace, dryrun_ref)
-        try:
-            dryrun = json.loads(dryrun_path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError) as exc:
-            blockers.append(f"eod_dryrun_report_json could not be read: {exc}")
-        else:
-            blockers.extend(_validate_eod_dryrun_report_payload(dryrun, state))
-    if not commit_ref:
-        blockers.append("eod_commit_report_json is required")
-    else:
-        commit_path = _artifact_ref_path(workspace, commit_ref)
-        try:
-            commit = json.loads(commit_path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError) as exc:
-            blockers.append(f"eod_commit_report_json could not be read: {exc}")
-        else:
-            blockers.extend(_validate_eod_commit_report_payload(commit, state))
+        blockers.extend(_validate_eod_dryrun_report_payload(dryrun, state))
+    commit = runbook_stage_e_evidence.validate_stored_eod_commit(workspace, state)
+    blockers.extend(commit["blockers"])
     return blockers
 
 
 def _validate_eod_dryrun_report_payload(payload: dict[str, Any], state: RunbookState) -> list[str]:
-    blockers: list[str] = []
-    if str(payload.get("runner_result") or "").upper() != "PASS":
-        blockers.append("EOD dry-run runner_result must be PASS.")
-    if str(payload.get("status") or "").upper() != "PASS":
-        blockers.append("EOD dry-run status must be PASS.")
-    if str(payload.get("mode") or "").lower() != "dry_run":
-        blockers.append("EOD dry-run mode must be dry_run.")
-    blockers.extend(_validate_eod_report_common(payload, state))
-    if payload.get("commit_allowed") is not True:
-        blockers.append("EOD dry-run commit_allowed must be true.")
-    for field in ("would_write_current_state", "would_write_account_snapshot", "would_write_position_snapshot"):
-        if payload.get(field) is not True:
-            blockers.append(f"EOD dry-run {field} must be true.")
-    return blockers
+    return runbook_stage_e_evidence.validate_eod_dryrun_report_payload(payload, state)
 
 
 def _validate_eod_commit_report_payload(payload: dict[str, Any], state: RunbookState) -> list[str]:
-    blockers: list[str] = []
-    if str(payload.get("runner_result") or "").upper() != "PASS":
-        blockers.append("EOD commit runner_result must be PASS.")
-    if str(payload.get("status") or "").upper() != "COMMITTED":
-        blockers.append("EOD commit status must be COMMITTED.")
-    if str(payload.get("mode") or "").lower() != "commit":
-        blockers.append("EOD commit mode must be commit.")
-    blockers.extend(_validate_eod_report_common(payload, state))
-    for field in ("current_state_written", "account_snapshot_written", "position_snapshot_written"):
-        if payload.get(field) is not True:
-            blockers.append(f"EOD commit {field} must be true.")
-    if str(payload.get("market_valuation_status") or "").lower() != "success":
-        blockers.append("EOD commit market_valuation_status must be success.")
-    return blockers
+    return runbook_stage_e_evidence.validate_eod_commit_report_payload(payload, state)
 
 
 def _validate_eod_report_common(payload: dict[str, Any], state: RunbookState) -> list[str]:
-    blockers: list[str] = []
-    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
-        blockers.append("EOD report account_id must match frozen context.")
-    for field in ("date", "trade_date"):
-        if str(payload.get(field) or "").strip() != state.frozen_context.trade_date:
-            blockers.append(f"EOD report {field} must match trade_date.")
-    if _int_payload(payload, "failed_count") != 0:
-        blockers.append("EOD report failed_count must be 0.")
-    if _int_payload(payload, "blocked_count") != 0:
-        blockers.append("EOD report blocked_count must be 0.")
-    return blockers
+    return runbook_stage_e_evidence.validate_eod_report_common(payload, state)
 
 
 def _validate_daily_review_payload(payload: dict[str, Any]) -> dict[str, Any]:

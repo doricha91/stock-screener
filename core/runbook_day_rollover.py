@@ -9,6 +9,7 @@ from typing import Any
 
 from core.paper_account_paths import build_paper_account_paths
 from core.runbook_calendar import CalendarCoverageError, MarketCalendar
+from scripts import runbook_stage_e_evidence
 from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
 
@@ -58,13 +59,8 @@ def _is_completed(workspace: Path, state: runbook_state.RunbookState) -> bool:
     )
     if not state_complete:
         return False
-    for artifact_name in ("eod_commit_report_json", "final_status_report_json"):
-        _, _, error = runbook_stage_f_evidence.load_workspace_json_artifact(
-            workspace,
-            state.artifacts.get(artifact_name),
-        )
-        if error:
-            return False
+    if not runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)["valid"]:
+        return False
     try:
         account_root = build_paper_account_paths(state.frozen_context.account_id, create=False).root
     except ValueError:

@@ -7,7 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.notion_account_keys import (
+    build_account_snapshot_external_key,
+    build_benchmark_report_external_key,
+)
 from scripts import runbook_stage_runner
+from scripts import runbook_command_registry
+from scripts import runbook_result
 from scripts import runbook_state
 
 
@@ -49,6 +55,24 @@ def _seed_stage_e_pass(workspace: Path, account_root: Path, *, omit_f: bool = Fa
         },
     )
     state = runbook_state.record_artifact(state, "eod_commit_report_json", str(commit_path), workspace)
+    final_status_path = _write_json(
+        workspace / "command_runs" / state.runbook_day_id / "final_status.json",
+        runbook_result.create_command_result(
+            state,
+            runbook_command_registry.get_command("final_status"),
+            "PASS",
+            "Final status is PASS.",
+            raw_payload={
+                "overall_status": "PASS",
+                "account_id": ACCOUNT_ID,
+                "trade_date": TRADE_DATE,
+                "unresolved_error_count": 0,
+            },
+            process={"executed": True, "exit_code": 0, "duration_ms": 1},
+            workspace=workspace,
+        ),
+    )
+    state = runbook_state.record_artifact(state, "final_status_report_json", str(final_status_path), workspace)
     state = runbook_state.complete_step(state, 18, "E")
     state = runbook_state.complete_stage(state, "E")
     state_path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
@@ -88,6 +112,7 @@ def _fake_stage_f_run(
             payload = {
                 "account_id": benchmark_account_id,
                 "latest_snapshot_date": benchmark_date,
+                "run_mode": "exploratory",
                 "availability_status": "AVAILABLE",
             }
             _write_json(report_json, payload)
@@ -521,8 +546,8 @@ def test_stage_f_export_failure_does_not_modify_legacy_snapshot_or_run_benchmark
 
 
 def test_stage_f_account_roots_and_artifacts_are_isolated(tmp_path: Path, monkeypatch) -> None:
-    account_a = "paper_A"
-    account_b = "paper_B"
+    account_a = "paper_a"
+    account_b = "paper_b"
     root_a = tmp_path / "outputs" / "paper_accounts" / account_a
     root_b = tmp_path / "outputs" / "paper_accounts" / account_b
     source_a = root_a / "paper_account_snapshot.csv"
@@ -563,3 +588,270 @@ def test_stage_f_account_roots_and_artifacts_are_isolated(tmp_path: Path, monkey
     assert valid_a["runner_result"] == "PASS"
     assert invalid_b["runner_result"] == "BLOCKED"
     assert any("account_id" in blocker or "source_path" in blocker for blocker in invalid_b["blockers"])
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize(
+    ("external_key", "expected_blocker"),
+    [
+        (_MISSING, "external_key_missing"),
+        ("", "external_key_missing"),
+        (123, "external_key_type_invalid"),
+        (f"account_snapshot:paper_other:{TRADE_DATE}", "external_key_mismatch"),
+        (f"account_snapshot:{ACCOUNT_ID}:2026-07-01", "external_key_mismatch"),
+        (f"account_snapshot:{TRADE_DATE}", "external_key_mismatch"),
+        ("arbitrary-non-empty", "external_key_mismatch"),
+    ],
+)
+def test_account_snapshot_external_key_is_exact(
+    tmp_path: Path,
+    external_key: object,
+    expected_blocker: str,
+) -> None:
+    root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    source = root / "paper_account_snapshot.csv"
+    source.parent.mkdir(parents=True)
+    source.write_text(f"account_id,snapshot_date\n{ACCOUNT_ID},{TRADE_DATE}\n", encoding="utf-8")
+    item: dict[str, object] = {
+        "account_id": ACCOUNT_ID,
+        "action": "created",
+        "source_path": str(source),
+        "failed_count": 0,
+    }
+    if external_key is not _MISSING:
+        item["external_key"] = external_key
+
+    result = runbook_stage_runner._validate_stage_f_export_payload(
+        {"json": [item]},
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        root,
+        expected_source=source,
+        label="Account Snapshot",
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert expected_blocker in result["blockers"]
+
+
+def test_account_snapshot_official_external_key_passes(tmp_path: Path) -> None:
+    root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    source = root / "paper_account_snapshot.csv"
+    source.parent.mkdir(parents=True)
+    source.write_text(f"account_id,snapshot_date\n{ACCOUNT_ID},{TRADE_DATE}\n", encoding="utf-8")
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    result = runbook_stage_runner._validate_stage_f_export_payload(
+        {"json": [{
+            "account_id": ACCOUNT_ID,
+            "external_key": build_account_snapshot_external_key(ACCOUNT_ID, TRADE_DATE),
+            "action": "created",
+            "source_path": str(source),
+            "failed_count": 0,
+        }]},
+        state,
+        root,
+        expected_source=source,
+        label="Account Snapshot",
+    )
+    assert result["runner_result"] == "PASS"
+
+
+@pytest.mark.parametrize("failed_count", [_MISSING, None, "0", "invalid", False, True, {}, [], -1, 1])
+def test_stage_f_failed_count_requires_integer_zero(tmp_path: Path, failed_count: object) -> None:
+    root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    source = root / "paper_account_snapshot.csv"
+    source.parent.mkdir(parents=True)
+    source.write_text(f"account_id,snapshot_date\n{ACCOUNT_ID},{TRADE_DATE}\n", encoding="utf-8")
+    item: dict[str, object] = {
+        "account_id": ACCOUNT_ID,
+        "external_key": build_account_snapshot_external_key(ACCOUNT_ID, TRADE_DATE),
+        "action": "created",
+        "source_path": str(source),
+    }
+    if failed_count is not _MISSING:
+        item["failed_count"] = failed_count
+
+    result = runbook_stage_runner._validate_stage_f_export_payload(
+        {"json": [item]},
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        root,
+        expected_source=source,
+        label="Account Snapshot",
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(blocker.startswith("failed_count_") for blocker in result["blockers"])
+
+
+@pytest.mark.parametrize(
+    "source_patch",
+    [
+        {"account_id": "paper_other"},
+        {"latest_snapshot_date": "2026-07-01"},
+        {"run_mode": "official"},
+        {"run_mode": _MISSING},
+        {"run_mode": 123},
+    ],
+)
+def test_benchmark_external_key_uses_validated_source(
+    tmp_path: Path,
+    source_patch: dict[str, object],
+) -> None:
+    root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    source = root / "reports" / "paper_benchmark_comparison.json"
+    source.parent.mkdir(parents=True)
+    benchmark: dict[str, object] = {
+        "account_id": ACCOUNT_ID,
+        "latest_snapshot_date": TRADE_DATE,
+        "run_mode": "exploratory",
+    }
+    for field, value in source_patch.items():
+        if value is _MISSING:
+            benchmark.pop(field, None)
+        else:
+            benchmark[field] = value
+    _write_json(source, benchmark)
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    result = runbook_stage_runner._validate_stage_f_export_payload(
+        {"json": [{
+            "account_id": ACCOUNT_ID,
+            "external_key": build_benchmark_report_external_key(ACCOUNT_ID, TRADE_DATE, "exploratory"),
+            "action": "created",
+            "source_path": str(source),
+            "failed_count": 0,
+        }]},
+        state,
+        root,
+        expected_source=source,
+        label="Benchmark Report",
+    )
+    assert result["runner_result"] == "BLOCKED"
+
+
+def test_benchmark_official_external_key_passes(tmp_path: Path) -> None:
+    root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    source = root / "reports" / "paper_benchmark_comparison.json"
+    _write_json(source, {"account_id": ACCOUNT_ID, "latest_snapshot_date": TRADE_DATE, "run_mode": "exploratory"})
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    result = runbook_stage_runner._validate_stage_f_export_payload(
+        {"json": [{
+            "account_id": ACCOUNT_ID,
+            "external_key": build_benchmark_report_external_key(ACCOUNT_ID, TRADE_DATE, "exploratory"),
+            "action": "created",
+            "source_path": str(source),
+            "failed_count": 0,
+        }]},
+        state,
+        root,
+        expected_source=source,
+        label="Benchmark Report",
+    )
+    assert result["runner_result"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    "external_key",
+    [
+        f"benchmark:{TRADE_DATE}:exploratory",
+        f"benchmark:{ACCOUNT_ID}:{TRADE_DATE}:official",
+        "arbitrary-non-empty",
+    ],
+)
+def test_benchmark_external_key_rejects_legacy_or_arbitrary_values(
+    tmp_path: Path,
+    external_key: str,
+) -> None:
+    root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    source = root / "reports" / "paper_benchmark_comparison.json"
+    _write_json(source, {"account_id": ACCOUNT_ID, "latest_snapshot_date": TRADE_DATE, "run_mode": "exploratory"})
+    result = runbook_stage_runner._validate_stage_f_export_payload(
+        {"json": [{
+            "account_id": ACCOUNT_ID,
+            "external_key": external_key,
+            "action": "created",
+            "source_path": str(source),
+            "failed_count": 0,
+        }]},
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        root,
+        expected_source=source,
+        label="Benchmark Report",
+    )
+    assert result["runner_result"] == "BLOCKED"
+    assert "external_key_mismatch" in result["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "field", "value"),
+    [
+        ("account_snapshot_notion_report_json", "external_key", "arbitrary"),
+        ("benchmark_notion_report_json", "external_key", "benchmark:legacy"),
+        ("account_snapshot_notion_report_json", "failed_count", _MISSING),
+        ("benchmark_notion_report_json", "failed_count", "0"),
+    ],
+)
+def test_strict_stage_f_evidence_mismatch_self_heals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_name: str,
+    field: str,
+    value: object,
+) -> None:
+    workspace = tmp_path / "workspace"
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    workspace.mkdir()
+    state_path, _ = _complete_stage_f(workspace, account_root, monkeypatch)
+    state = runbook_state.load_state(state_path)
+    evidence_path = workspace / state.artifacts[artifact_name]
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    item = evidence["raw_payload"]["json"][0]
+    if value is _MISSING:
+        item.pop(field)
+    else:
+        item[field] = value
+    _write_json(evidence_path, evidence)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", _fake_stage_f_run(account_root, calls))
+
+    result = _run_stage_f(workspace)
+
+    assert result["runner_result"] == "PASS"
+    assert result["stage_f_evidence_repair"] is True
+    assert len(calls) == 3
+    assert not any("eod" in part for call in calls for part in call)
+
+
+@pytest.mark.parametrize("artifact_name", ["eod_commit_report_json", "final_status_report_json"])
+def test_invalid_stage_e_evidence_blocks_stage_f_without_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_name: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    workspace.mkdir()
+    state_path, _ = _complete_stage_f(workspace, account_root, monkeypatch)
+    state = runbook_state.load_state(state_path)
+    evidence_path = workspace / state.artifacts[artifact_name]
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if artifact_name == "eod_commit_report_json":
+        evidence["current_state_written"] = False
+    else:
+        evidence["raw_payload"]["overall_status"] = "FAILED"
+    before = evidence_path.read_bytes()
+    _write_json(evidence_path, evidence)
+    before = evidence_path.read_bytes()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", lambda *args, **kwargs: calls.append(args))
+
+    result = _run_stage_f(workspace)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "stage_e_completion_evidence_invalid"
+    assert result["rendered_commands"] == []
+    assert calls == []
+    assert evidence_path.read_bytes() == before
+    blocked = runbook_state.load_state(state_path)
+    assert blocked.stage_status["E"] == "PASS"
+    assert blocked.stage_status["F"] == "BLOCKED"
