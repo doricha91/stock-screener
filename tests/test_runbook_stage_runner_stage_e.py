@@ -127,7 +127,7 @@ def _fake_stage_e_run(
     return fake_run
 
 
-def test_stage_e_success_completes_runbook_day(tmp_path: Path, monkeypatch) -> None:
+def test_stage_e_success_persists_pass_and_points_to_stage_f(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     repo_outputs = tmp_path / "repo_outputs"
     workspace.mkdir()
@@ -144,6 +144,8 @@ def test_stage_e_success_completes_runbook_day(tmp_path: Path, monkeypatch) -> N
     )
 
     assert result["runner_result"] == "PASS"
+    assert result["next_stage"] == "F"
+    assert result["next_required_action"] == "Run Stage F benchmark and Notion synchronization."
     assert [item["command_key"] for item in result["rendered_commands"]] == [
         "eod_dryrun",
         "eod_commit",
@@ -151,6 +153,7 @@ def test_stage_e_success_completes_runbook_day(tmp_path: Path, monkeypatch) -> N
     ]
     loaded = runbook_state.load_state(runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE))
     assert loaded.stage_status["E"] == "PASS"
+    assert loaded.stage_status["F"] == "PENDING"
     assert loaded.last_completed_step == 18
     assert loaded.last_completed_stage == "E"
     assert loaded.artifacts["eod_dryrun_report_json"].startswith(f"artifacts/{state.runbook_day_id}/stage_e/")
@@ -159,6 +162,7 @@ def test_stage_e_success_completes_runbook_day(tmp_path: Path, monkeypatch) -> N
     assert (workspace / "stage_runs" / state.runbook_day_id / "latest_E.json").exists()
     assert (workspace / "stage_runs" / state.runbook_day_id / "latest_D.json").exists()
     assert (workspace / "stage_runs" / state.runbook_day_id / "latest_D_PREVIEW.json").exists()
+    assert all("--include-notion-read" not in argv for argv in calls)
 
 
 def test_stage_e_blocks_when_stage_d_not_pass(tmp_path: Path) -> None:

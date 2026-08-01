@@ -17,12 +17,15 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
     state = runbook_state.create_initial_state(ACCOUNT_ID, data_date, trade_date)
     state = replace(
         state,
-        current_stage="E",
+        current_stage="F",
         current_status="PASS",
-        last_completed_step=18,
-        last_completed_stage="E",
+        last_completed_step=21,
+        last_completed_stage="F",
         stage_status={stage_id: "PASS" for stage_id in runbook_state.STAGE_IDS},
-        artifacts={"final_status_report_json": f"command_runs/{state.runbook_day_id}/final_status.json"},
+        artifacts={
+            "final_status_report_json": f"command_runs/{state.runbook_day_id}/final_status.json",
+            "benchmark_notion_report_json": f"command_runs/{state.runbook_day_id}/benchmark_sync.json",
+        },
     )
     path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, data_date, trade_date)
     runbook_state.save_state(state, path)

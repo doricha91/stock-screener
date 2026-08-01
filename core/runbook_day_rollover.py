@@ -14,7 +14,7 @@ from scripts import runbook_state
 NEXT_ACTION = "Run 6-4C to prepare the local runbook environment."
 BLOCKED_ACTION = "Resolve the blockers before preparing a new runbook day."
 RUNBOOK_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+_\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}$")
-COMPLETION_STAGES = ("A", "GATE1", "B", "C", "GATE2", "D", "E")
+COMPLETION_STAGES = ("A", "GATE1", "B", "C", "GATE2", "D", "E", "F")
 DUPLICATE_DIRS = (
     "artifacts",
     "command_runs",
@@ -44,12 +44,13 @@ def _blocked(reason: str, blockers: list[str] | None = None) -> dict[str, Any]:
 
 def _is_completed(state: runbook_state.RunbookState) -> bool:
     return (
-        state.current_stage == "E"
+        state.current_stage == "F"
         and state.current_status == "PASS"
-        and state.last_completed_step == 18
-        and state.last_completed_stage == "E"
+        and state.last_completed_step == 21
+        and state.last_completed_stage == "F"
         and all(state.stage_status.get(stage_id) == "PASS" for stage_id in COMPLETION_STAGES)
         and bool(state.artifacts.get("final_status_report_json"))
+        and bool(state.artifacts.get("benchmark_notion_report_json"))
         and state.last_error is None
     )
 

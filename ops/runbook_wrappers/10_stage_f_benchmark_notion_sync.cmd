@@ -30,22 +30,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
-"%PYTHON_EXE%" scripts\runbook_stage_runner.py stage-e ^
+"%PYTHON_EXE%" scripts\runbook_stage_runner.py stage-f ^
   --workspace "%WORKSPACE%" ^
   --account-id "%ACCOUNT_ID%" ^
   --data-date "%DATA_DATE%" ^
   --trade-date "%TRADE_DATE%" ^
   --confirm-paper-test
 
-set "STAGE_E_EXIT_CODE=%ERRORLEVEL%"
-if not "%STAGE_E_EXIT_CODE%"=="0" (
-  echo.
-  echo Stage E failed with exit code: %STAGE_E_EXIT_CODE%
-  if /I "%PAUSE_ON_EXIT%"=="1" pause
-  exit /b %STAGE_E_EXIT_CODE%
-)
-
-call "%~dp010_stage_f_benchmark_notion_sync.cmd"
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo Exit code: %EXIT_CODE%

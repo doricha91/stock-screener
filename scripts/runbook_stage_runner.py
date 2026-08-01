@@ -33,6 +33,7 @@ from scripts.runbook_no_action import (
 )
 from scripts.runbook_command_registry import RunbookCommand
 from scripts.runbook_state import RunbookState
+from core.paper_account_paths import build_paper_account_paths
 from core.paper_execution_intent import validate_daily_plan_execution_intent
 
 
@@ -42,12 +43,14 @@ STAGE_C_ID = "C"
 STAGE_D_ID = "D"
 STAGE_D_PREVIEW_ID = "D_PREVIEW"
 STAGE_E_ID = "E"
+STAGE_F_ID = "F"
 STAGE_A_STEP_IDS = tuple(range(0, 6))
 STAGE_B_STEP_IDS = (7, 8, 9)
 STAGE_C_STEP_IDS = (10, 11)
 STAGE_D_PREVIEW_STEP_IDS = (13,)
 STAGE_D_APPEND_STEP_IDS = (14, 15)
 STAGE_E_STEP_IDS = (16, 17, 18)
+STAGE_F_STEP_IDS = (19, 20, 21)
 DEFAULT_TIMEOUT_SEC = 1800
 
 
@@ -184,6 +187,17 @@ def get_stage_e_commands(commands: Sequence[RunbookCommand] | None = None) -> li
     return selected
 
 
+def get_stage_f_commands(commands: Sequence[RunbookCommand] | None = None) -> list[RunbookCommand]:
+    selected = [
+        command
+        for command in (commands or registry.list_commands())
+        if command.step_id in STAGE_F_STEP_IDS
+    ]
+    selected.sort(key=lambda command: command.step_id)
+    validate_stage_f_commands(selected)
+    return selected
+
+
 def validate_stage_a_commands(commands: Sequence[RunbookCommand]) -> None:
     step_ids = [command.step_id for command in commands]
     if step_ids != list(STAGE_A_STEP_IDS):
@@ -272,6 +286,21 @@ def validate_stage_e_commands(commands: Sequence[RunbookCommand]) -> None:
             raise ValueError(f"Stage E command cannot be a manual gate: {command.command_key}")
         if not command.argv_template:
             raise ValueError(f"Stage E command argv_template is required: {command.command_key}")
+
+
+def validate_stage_f_commands(commands: Sequence[RunbookCommand]) -> None:
+    step_ids = [command.step_id for command in commands]
+    if step_ids != list(STAGE_F_STEP_IDS):
+        raise ValueError(f"Stage F commands must cover Step 19-21 only, found {step_ids}")
+    for command in commands:
+        if command.stage_id != STAGE_F_ID:
+            raise ValueError(f"Stage F command has invalid stage_id: {command.command_key}")
+        if not command.phase1_auto_execute:
+            raise ValueError(f"Stage F command is not phase1 auto executable: {command.command_key}")
+        if command.manual_gate:
+            raise ValueError(f"Stage F command cannot be a manual gate: {command.command_key}")
+        if not command.argv_template:
+            raise ValueError(f"Stage F command argv_template is required: {command.command_key}")
 
 
 def run_stage_a(
@@ -1936,16 +1965,17 @@ def run_stage_e(
         STAGE_E_ID,
         command_results,
         next_required_action=(
-            "Runbook day complete."
+            "Run Stage F benchmark and Notion synchronization."
             if stage_result == "PASS"
             else "Inspect Stage E command result before retry."
         ),
-        next_stage=None,
+        next_stage=STAGE_F_ID if stage_result == "PASS" else None,
     )
     stage_summary["raw_payload"] = {
         "eod_dryrun_report_json": state.artifacts.get("eod_dryrun_report_json"),
         "eod_commit_report_json": state.artifacts.get("eod_commit_report_json"),
         "final_status_report_json": state.artifacts.get("final_status_report_json"),
+        "next_stage": stage_summary["summary"].get("next_stage"),
         "next_required_action": stage_summary["summary"].get("next_required_action"),
         **_stage_e_action_payload(action_context, stage_result),
     }
@@ -1977,8 +2007,186 @@ def run_stage_e(
         "eod_dryrun_report_json": state.artifacts.get("eod_dryrun_report_json"),
         "eod_commit_report_json": state.artifacts.get("eod_commit_report_json"),
         "final_status_report_json": state.artifacts.get("final_status_report_json"),
+        "next_stage": stage_summary["summary"].get("next_stage"),
         "next_required_action": stage_summary["summary"].get("next_required_action"),
         **_stage_e_action_payload(action_context, stage_result),
+    }
+
+
+def run_stage_f(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    timezone: str = "Asia/Seoul",
+    dry_run: bool = False,
+    confirm_paper_test: bool = False,
+    repo_root: Path | None = None,
+    timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+    commands: Sequence[RunbookCommand] | None = None,
+) -> dict[str, Any]:
+    workspace = Path(workspace)
+    repo_root = repo_root or Path(__file__).resolve().parents[1]
+    guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
+    if guard_error:
+        return _blocked_stage_f_payload(guard_error, dry_run, confirm_paper_test)
+
+    try:
+        _, state_path, state = runbook_state.init_state_file_for_context(
+            workspace,
+            account_id,
+            data_date,
+            trade_date,
+            timezone,
+        )
+    except ValueError as exc:
+        return _blocked_stage_f_payload(str(exc), dry_run, confirm_paper_test)
+
+    if state.stage_status.get(STAGE_F_ID, "PENDING") == "PASS":
+        return {
+            "runner_result": "SKIPPED",
+            "stage_id": STAGE_F_ID,
+            "canonical_stage_id": STAGE_F_ID,
+            "reason": "stage_f_already_pass",
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+            "rendered_commands": [],
+            "next_stage": None,
+            "next_required_action": "Runbook day complete.",
+            "paper_test_confirmed": confirm_paper_test,
+            "dry_run": dry_run,
+        }
+
+    if state.stage_status.get(STAGE_E_ID) != "PASS":
+        return {
+            **_blocked_stage_f_payload("stage_e_not_pass", dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+            "rendered_commands": [],
+            "stage_e_remains_pass": False,
+            "next_required_action": "Complete Stage E before running Stage F.",
+        }
+
+    try:
+        account_paths = build_paper_account_paths(state.frozen_context.account_id, create=False)
+    except ValueError as exc:
+        precondition_error = f"account_path_invalid:{exc}"
+        account_root = None
+    else:
+        account_root = account_paths.root
+        precondition_error = _stage_f_precondition_error(state, workspace, account_paths.root)
+
+    if precondition_error:
+        if not dry_run:
+            state = runbook_state.block_stage(state, STAGE_F_ID, precondition_error)
+            runbook_state.save_state(state, state_path)
+        return {
+            **_blocked_stage_f_payload(precondition_error, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+            "account_root": str(account_root) if account_root is not None else None,
+            "rendered_commands": [],
+            "next_required_action": "Stage E remains PASS. Fix the Stage F failure and rerun Stage F only.",
+        }
+
+    stage_f_commands = get_stage_f_commands(commands)
+    command_results: list[dict[str, Any]] = []
+    rendered_commands: list[dict[str, Any]] = []
+    stage_result = "PASS"
+    if not dry_run:
+        state = runbook_state.start_stage(state, STAGE_F_ID)
+        runbook_state.save_state(state, state_path)
+
+    for command in stage_f_commands:
+        state, command_result, rendered_argv, log_text = _execute_stage_f_step(
+            state,
+            workspace,
+            state_path,
+            repo_root,
+            account_paths.root,
+            command,
+            dry_run,
+            timeout_sec,
+        )
+        rendered_commands.append({"command_key": command.command_key, "argv": rendered_argv})
+        command_json_path, command_txt_path = _write_command_result_and_log(
+            workspace,
+            state,
+            command,
+            command_result,
+            log_text,
+        )
+        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+        command_results.append(command_result)
+        if not dry_run:
+            state = _apply_stage_f_step_result(
+                state,
+                state_path,
+                workspace,
+                command,
+                command_result,
+                command_json_path,
+                command_txt_path,
+            )
+        if command_result["runner_result"] != "PASS":
+            stage_result = "BLOCKED" if command_result["runner_result"] == "BLOCKED" else "FAILED"
+            break
+
+    if stage_result == "PASS" and not dry_run:
+        state = runbook_state.complete_stage(state, STAGE_F_ID)
+        runbook_state.save_state(state, state_path)
+
+    next_action = (
+        "Dry-run complete; Stage F state is unchanged."
+        if dry_run and stage_result == "PASS"
+        else "Runbook day complete."
+        if stage_result == "PASS"
+        else "Stage E remains PASS. Fix the Stage F failure and rerun Stage F only."
+    )
+    stage_summary = runbook_result.create_stage_summary(
+        state,
+        STAGE_F_ID,
+        command_results,
+        next_required_action=next_action,
+        next_stage=None,
+    )
+    stage_summary["raw_payload"] = {
+        "account_root": str(account_paths.root),
+        "benchmark_report_json": state.artifacts.get("benchmark_report_json"),
+        "account_snapshot_notion_report_json": state.artifacts.get("account_snapshot_notion_report_json"),
+        "benchmark_notion_report_json": state.artifacts.get("benchmark_notion_report_json"),
+        "stage_e_remains_pass": state.stage_status.get(STAGE_E_ID) == "PASS",
+        "next_required_action": next_action,
+    }
+    stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
+    stage_summary_paths = runbook_result.get_stage_summary_paths(
+        workspace,
+        state.runbook_day_id,
+        STAGE_F_ID,
+        timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
+    )
+    return {
+        "runner_result": stage_summary["runner_result"],
+        "stage_id": STAGE_F_ID,
+        "canonical_stage_id": STAGE_F_ID,
+        "runbook_day_id": state.runbook_day_id,
+        "state_path": str(state_path),
+        "stage_summary_json": str(stage_summary_json),
+        "stage_summary_txt": str(stage_summary_txt),
+        "latest_stage_summary_json": str(stage_summary_paths["latest_json"]),
+        "latest_stage_summary_txt": str(stage_summary_paths["latest_txt"]),
+        "command_results": [
+            step["result_json_ref"]
+            for step in stage_summary["steps"]
+            if step.get("result_json_ref")
+        ],
+        "rendered_commands": rendered_commands,
+        "account_root": str(account_paths.root),
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
+        "next_stage": None,
+        "next_required_action": next_action,
+        "stage_e_remains_pass": state.stage_status.get(STAGE_E_ID) == "PASS",
     }
 
 
@@ -2041,6 +2249,17 @@ def _blocked_stage_e_payload(reason: str, dry_run: bool, confirm_paper_test: boo
         "runner_result": "BLOCKED",
         "stage_id": STAGE_E_ID,
         "canonical_stage_id": STAGE_E_ID,
+        "reason": reason,
+        "dry_run": dry_run,
+        "paper_test_confirmed": confirm_paper_test,
+    }
+
+
+def _blocked_stage_f_payload(reason: str, dry_run: bool, confirm_paper_test: bool) -> dict[str, Any]:
+    return {
+        "runner_result": "BLOCKED",
+        "stage_id": STAGE_F_ID,
+        "canonical_stage_id": STAGE_F_ID,
         "reason": reason,
         "dry_run": dry_run,
         "paper_test_confirmed": confirm_paper_test,
@@ -2437,6 +2656,24 @@ def _stage_e_precondition_error(
             artifact_ref = state.artifacts.get(artifact_name)
             if not artifact_ref or not _artifact_ref_exists(workspace, artifact_ref):
                 return f"{artifact_name}_required"
+    return None
+
+
+def _stage_f_precondition_error(state: RunbookState, workspace: Path, account_root: Path) -> str | None:
+    if state.stage_status.get(STAGE_E_ID) != "PASS":
+        return "stage_e_not_pass"
+    commit_ref = str(state.artifacts.get("eod_commit_report_json") or "").strip()
+    if not commit_ref:
+        return "eod_commit_report_missing"
+    commit_path = _artifact_ref_path(workspace, commit_ref)
+    try:
+        commit_payload = json.loads(commit_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "eod_commit_report_invalid"
+    if _validate_eod_commit_report_payload(commit_payload, state):
+        return "eod_commit_report_context_or_write_flags_invalid"
+    if not account_root.is_dir():
+        return "account_root_missing"
     return None
 
 
@@ -2905,6 +3142,95 @@ def _apply_stage_d_append_step_result(
     return state
 
 
+def _execute_stage_f_step(
+    state: RunbookState,
+    workspace: Path,
+    state_path: Path,
+    repo_root: Path,
+    account_root: Path,
+    command: RunbookCommand,
+    dry_run: bool,
+    timeout_sec: int,
+) -> tuple[RunbookState, dict[str, Any], list[str], str]:
+    try:
+        command_result, log_text, rendered_argv = _run_stage_f_command(
+            state,
+            workspace,
+            repo_root,
+            account_root,
+            command,
+            dry_run,
+            timeout_sec,
+        )
+        return state, command_result, rendered_argv, log_text
+    except Exception as exc:
+        command_result = runbook_result.create_command_result(
+            state,
+            command,
+            "FAILED",
+            f"Stage F command raised {type(exc).__name__}.",
+            raw_payload={},
+            blockers=[str(exc)],
+            process={"executed": False, "exit_code": None, "duration_ms": None},
+            workspace=workspace,
+        )
+        return state, command_result, [], f"exception: {type(exc).__name__}: {exc}\n"
+
+
+def _apply_stage_f_step_result(
+    state: RunbookState,
+    state_path: Path,
+    workspace: Path,
+    command: RunbookCommand,
+    command_result: dict[str, Any],
+    command_json_path: Path,
+    command_txt_path: Path,
+) -> RunbookState:
+    runner_result = command_result["runner_result"]
+    if runner_result == "PASS":
+        artifact_refs = dict(command_result.get("outputs", {}).get("artifact_refs", {}))
+        if command.command_key == "account_snapshot_notion_upsert":
+            artifact_refs.update(
+                {
+                    "account_snapshot_notion_report_json": str(command_json_path),
+                    "account_snapshot_notion_report_md": str(command_txt_path),
+                }
+            )
+        elif command.command_key == "benchmark_report_notion_upsert":
+            artifact_refs.update(
+                {
+                    "benchmark_notion_report_json": str(command_json_path),
+                    "benchmark_notion_report_md": str(command_txt_path),
+                }
+            )
+        state = runbook_state.complete_step(
+            state,
+            command.step_id,
+            STAGE_F_ID,
+            artifact_refs,
+            workspace,
+        )
+        runbook_state.save_state(state, state_path)
+        return state
+
+    if runner_result == "BLOCKED":
+        state = runbook_state.block_stage(
+            state,
+            STAGE_F_ID,
+            f"stage_f_step_blocked:{command.command_key}",
+            {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+        )
+    else:
+        state = runbook_state.fail_stage(
+            state,
+            STAGE_F_ID,
+            f"stage_f_step_failed:{command.command_key}",
+            {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+        )
+    runbook_state.save_state(state, state_path)
+    return state
+
+
 def _execute_stage_e_step(
     state: RunbookState,
     workspace: Path,
@@ -3062,6 +3388,78 @@ def _run_stage_d_append_command(
             state.runbook_day_id,
             validation["artifact_refs"],
             "stage_d",
+        )
+    result = runbook_result.create_command_result(
+        state,
+        command,
+        validation["runner_result"],
+        validation["message"],
+        artifact_refs=validation["artifact_refs"],
+        raw_payload=raw_payload,
+        warnings=validation["warnings"],
+        blockers=validation["blockers"],
+        process=process,
+        workspace=workspace,
+    )
+    return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
+
+
+def _run_stage_f_command(
+    state: RunbookState,
+    workspace: Path,
+    repo_root: Path,
+    account_root: Path,
+    command: RunbookCommand,
+    dry_run: bool,
+    timeout_sec: int,
+) -> tuple[dict[str, Any], str, list[str]]:
+    artifact_refs = _stage_b_render_artifacts(state.artifacts, workspace)
+    rendered_argv = render_argv_template(command, state.frozen_context, artifact_refs)
+    argv = normalize_python_script_argv(rendered_argv, repo_root)
+    if dry_run:
+        process = {"executed": False, "exit_code": None, "duration_ms": None}
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "PASS",
+            "Dry-run only; command not executed.",
+            artifact_refs=_dry_run_stage_f_artifacts(command),
+            raw_payload={"expected_account_root": str(account_root)},
+            process=process,
+            workspace=workspace,
+        )
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, "", ""), rendered_argv
+
+    execution = run_allowlisted_command(argv, repo_root, timeout_sec)
+    stdout = str(execution.get("stdout") or "")
+    stderr = str(execution.get("stderr") or "")
+    raw_payload = _parse_stdout_json(stdout)
+    exit_code = execution.get("exit_code")
+    process = {
+        "executed": True,
+        "exit_code": exit_code,
+        "duration_ms": execution.get("duration_ms"),
+    }
+    if exit_code != 0:
+        result = runbook_result.create_command_result(
+            state,
+            command,
+            "FAILED",
+            "Command failed.",
+            raw_payload=raw_payload,
+            blockers=[stderr.strip() or f"exit_code={exit_code}"],
+            process=process,
+            workspace=workspace,
+        )
+        return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
+
+    validation = _validate_stage_f_payload(command.command_key, raw_payload, state, account_root)
+    if validation["artifact_refs"]:
+        validation["artifact_refs"] = _pin_artifact_refs(
+            workspace,
+            state.runbook_day_id,
+            validation["artifact_refs"],
+            "stage_f",
         )
     result = runbook_result.create_command_result(
         state,
@@ -3292,6 +3690,25 @@ def _dry_run_stage_e_artifacts(command: RunbookCommand) -> dict[str, str]:
     return {}
 
 
+def _dry_run_stage_f_artifacts(command: RunbookCommand) -> dict[str, str]:
+    if command.command_key == "benchmark_generate":
+        return {
+            "benchmark_report_json": "dry_run/paper_benchmark_comparison.json",
+            "benchmark_report_md": "dry_run/paper_benchmark_comparison.md",
+        }
+    if command.command_key == "account_snapshot_notion_upsert":
+        return {
+            "account_snapshot_notion_report_json": "dry_run/account_snapshot_notion_upsert.json",
+            "account_snapshot_notion_report_md": "dry_run/account_snapshot_notion_upsert.md",
+        }
+    if command.command_key == "benchmark_report_notion_upsert":
+        return {
+            "benchmark_notion_report_json": "dry_run/benchmark_report_notion_upsert.json",
+            "benchmark_notion_report_md": "dry_run/benchmark_report_notion_upsert.md",
+        }
+    return {}
+
+
 def _validate_stage_b_payload(command_key: str, payload: dict[str, Any]) -> dict[str, Any]:
     if command_key == "execution_preview":
         return _validate_execution_preview_payload(payload)
@@ -3347,6 +3764,118 @@ def _validate_stage_e_payload(
     if command_key == "final_status":
         return _validate_final_status_payload(payload, state, workspace)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
+
+
+def _validate_stage_f_payload(
+    command_key: str,
+    payload: dict[str, Any],
+    state: RunbookState,
+    account_root: Path,
+) -> dict[str, Any]:
+    if command_key == "benchmark_generate":
+        return _validate_stage_f_benchmark_payload(payload, state, account_root)
+    if command_key == "account_snapshot_notion_upsert":
+        return _validate_stage_f_export_payload(
+            payload,
+            state,
+            account_root,
+            expected_source=account_root / "paper_account_snapshot.csv",
+            label="Account Snapshot",
+        )
+    if command_key == "benchmark_report_notion_upsert":
+        return _validate_stage_f_export_payload(
+            payload,
+            state,
+            account_root,
+            expected_source=account_root / "reports" / "paper_benchmark_comparison.json",
+            label="Benchmark Report",
+        )
+    return _payload_validation("PASS", "Command completed successfully.", {}, [])
+
+
+def _validate_stage_f_benchmark_payload(
+    payload: dict[str, Any],
+    state: RunbookState,
+    account_root: Path,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+        blockers.append("benchmark account_id must match frozen context")
+    if str(payload.get("latest_snapshot_date") or "").strip() != state.frozen_context.trade_date:
+        blockers.append("benchmark latest_snapshot_date must match trade_date")
+    json_path = Path(str(payload.get("json_path") or ""))
+    markdown_path = Path(str(payload.get("markdown_path") or ""))
+    reports_root = (account_root / "reports").resolve(strict=False)
+    for label, path in (("benchmark json_path", json_path), ("benchmark markdown_path", markdown_path)):
+        if not str(path) or str(path) == "." or not path.is_file():
+            blockers.append(f"{label} must exist")
+        elif not _path_is_within(path, reports_root):
+            blockers.append(f"{label} must be under the account reports root")
+    if json_path.is_file():
+        try:
+            report_payload = json.loads(json_path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            blockers.append("benchmark JSON must be valid")
+        else:
+            if str(report_payload.get("account_id") or "").strip() != state.frozen_context.account_id:
+                blockers.append("benchmark JSON account_id must match frozen context")
+            if str(report_payload.get("latest_snapshot_date") or "").strip() != state.frozen_context.trade_date:
+                blockers.append("benchmark JSON latest_snapshot_date must match trade_date")
+    artifacts = {
+        "benchmark_report_json": str(json_path),
+        "benchmark_report_md": str(markdown_path),
+    }
+    return _payload_validation(
+        "BLOCKED" if blockers else "PASS",
+        "Benchmark artifacts are account/date scoped and pinned." if not blockers else "Benchmark result failed validation.",
+        artifacts if not blockers else {},
+        blockers,
+    )
+
+
+def _validate_stage_f_export_payload(
+    payload: dict[str, Any],
+    state: RunbookState,
+    account_root: Path,
+    *,
+    expected_source: Path,
+    label: str,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    rows = payload.get("json")
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return _payload_validation("FAILED", f"{label} exporter returned invalid JSON.", {}, ["one export result is required"])
+    item = rows[0]
+    if str(item.get("account_id") or "").strip() != state.frozen_context.account_id:
+        blockers.append("export account_id must match frozen context")
+    if _int_payload(item, "failed_count") != 0:
+        blockers.append("failed_count must be 0")
+    if str(item.get("action") or "").strip().lower() not in {"created", "updated", "skipped"}:
+        blockers.append("action must be created/updated/skipped")
+    if not str(item.get("external_key") or "").strip():
+        blockers.append("external_key is required")
+    source_path = Path(str(item.get("source_path") or ""))
+    if not source_path.is_file():
+        blockers.append("source_path must exist")
+    else:
+        if source_path.resolve(strict=False) != expected_source.resolve(strict=False):
+            blockers.append("source_path must match the frozen account source")
+        if not _path_is_within(source_path, account_root.resolve(strict=False)):
+            blockers.append("source_path must be under the frozen account root")
+    return _payload_validation(
+        "BLOCKED" if blockers else "PASS",
+        f"{label} Notion upsert is validated." if not blockers else f"{label} Notion upsert failed validation.",
+        {},
+        blockers,
+    )
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
 
 
 def _validate_review_preview_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
@@ -4261,6 +4790,16 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_e.add_argument("--dry-run", action="store_true")
     stage_e.add_argument("--confirm-paper-test", action="store_true")
     stage_e.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
+
+    stage_f = subparsers.add_parser("stage-f", help="Run Stage F Step 19-21 benchmark and Notion sync")
+    stage_f.add_argument("--workspace", type=Path, required=True)
+    stage_f.add_argument("--account-id", required=True)
+    stage_f.add_argument("--data-date", required=True)
+    stage_f.add_argument("--trade-date", required=True)
+    stage_f.add_argument("--timezone", default="Asia/Seoul")
+    stage_f.add_argument("--dry-run", action="store_true")
+    stage_f.add_argument("--confirm-paper-test", action="store_true")
+    stage_f.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
     return parser
 
 
@@ -4369,6 +4908,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("runner_result") == "PASS" else 1
+    if args.command == "stage-f":
+        result = run_stage_f(
+            workspace=args.workspace,
+            account_id=args.account_id,
+            data_date=args.data_date,
+            trade_date=args.trade_date,
+            timezone=args.timezone,
+            dry_run=args.dry_run,
+            confirm_paper_test=args.confirm_paper_test,
+            timeout_sec=args.timeout_sec,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("runner_result") in {"PASS", "SKIPPED"} else 1
     parser.error(f"unknown command: {args.command}")
     return 2
 

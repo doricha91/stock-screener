@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Iterable, Sequence
 
 
-STAGE_IDS = {"A", "GATE1", "B", "C", "GATE2", "D", "E"}
+STAGE_IDS = {"A", "GATE1", "B", "C", "GATE2", "D", "E", "F"}
 COMMAND_TYPES = {
     "READ_ONLY",
     "READ_ONLY_PREVIEW",
@@ -556,7 +556,6 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
             "--trade-date",
             "{trade_date}",
             "--json",
-            "--include-notion-read",
         ),
         command_type="READ_ONLY",
         phase1_auto_execute=True,
@@ -564,6 +563,74 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
         expected_outputs=("overall_status", "operator_summary"),
         success_criteria="overall_status PASS or actionable WARNING is summarized",
         failure_policy="push_final_warning_or_failed",
+    ),
+    _command(
+        command_key="benchmark_generate",
+        step_id=19,
+        stage_id="F",
+        stage_order=0,
+        display_name="Generate benchmark report",
+        argv_template=_argv(
+            "scripts\\paper.py",
+            "benchmark",
+            "--account-id",
+            "{account_id}",
+            "--json",
+        ),
+        command_type="LOCAL_ARTIFACT_WRITE",
+        phase1_auto_execute=True,
+        required_prior_artifacts=("eod_commit_report",),
+        produces_artifacts=("benchmark_report_json", "benchmark_report_md"),
+        expected_outputs=("account_id", "latest_snapshot_date", "json_path", "markdown_path"),
+        success_criteria="account/date-scoped benchmark JSON and Markdown are generated under the account reports root",
+    ),
+    _command(
+        command_key="account_snapshot_notion_upsert",
+        step_id=20,
+        stage_id="F",
+        stage_order=1,
+        display_name="Upsert Account Snapshot to Notion",
+        argv_template=_argv(
+            "scripts\\export_paper_to_notion.py",
+            "--account-snapshot",
+            "--account-id",
+            "{account_id}",
+            "--expected-date",
+            "{trade_date}",
+            "--confirm-actual",
+            "--json",
+        ),
+        command_type="NOTION_WRITE",
+        phase1_auto_execute=True,
+        required_prior_artifacts=("eod_commit_report",),
+        produces_artifacts=("account_snapshot_notion_report_json", "account_snapshot_notion_report_md"),
+        expected_outputs=("account_id", "external_key", "action", "source_path", "failed_count"),
+        success_criteria="validated account snapshot is idempotently upserted with failed_count 0",
+        duplicate_run_policy="retry_external_key_upsert_until_success",
+    ),
+    _command(
+        command_key="benchmark_report_notion_upsert",
+        step_id=21,
+        stage_id="F",
+        stage_order=2,
+        display_name="Upsert Benchmark Report to Notion",
+        argv_template=_argv(
+            "scripts\\export_paper_to_notion.py",
+            "--benchmark",
+            "--account-id",
+            "{account_id}",
+            "--expected-date",
+            "{trade_date}",
+            "--confirm-actual",
+            "--json",
+        ),
+        command_type="NOTION_WRITE",
+        phase1_auto_execute=True,
+        required_prior_artifacts=("benchmark_report_json",),
+        produces_artifacts=("benchmark_notion_report_json", "benchmark_notion_report_md"),
+        expected_outputs=("account_id", "external_key", "action", "source_path", "failed_count"),
+        success_criteria="validated benchmark report is idempotently upserted with failed_count 0",
+        duplicate_run_policy="retry_external_key_upsert_until_success",
     ),
 )
 
@@ -594,10 +661,10 @@ def validate_registry(commands: Sequence[RunbookCommand] = RUNBOOK_COMMANDS) -> 
     command_keys = [command.command_key for command in commands]
     step_ids = [command.step_id for command in commands]
 
-    if len(commands) != 19:
-        errors.append(f"expected 19 runbook commands, found {len(commands)}")
-    if sorted(step_ids) != list(range(19)):
-        errors.append(f"expected step_id coverage 0..18, found {sorted(step_ids)}")
+    if len(commands) != 22:
+        errors.append(f"expected 22 runbook commands, found {len(commands)}")
+    if sorted(step_ids) != list(range(22)):
+        errors.append(f"expected step_id coverage 0..21, found {sorted(step_ids)}")
     for duplicate in _duplicates(command_keys):
         errors.append(f"duplicate command_key: {duplicate}")
     for duplicate in _duplicates(step_ids):
@@ -635,6 +702,8 @@ def validate_registry(commands: Sequence[RunbookCommand] = RUNBOOK_COMMANDS) -> 
             errors.append(f"{command.command_key}: Stage D must map to Step 13..15")
         if command.stage_id == "E" and command.step_id not in range(16, 19):
             errors.append(f"{command.command_key}: Stage E must map to Step 16..18")
+        if command.stage_id == "F" and command.step_id not in range(19, 22):
+            errors.append(f"{command.command_key}: Stage F must map to Step 19..21")
         if command.requires_preview_artifact and not command.required_prior_artifacts:
             errors.append(f"{command.command_key}: preview artifact requirement must name required_prior_artifacts")
         if command.requires_commit_report and not command.required_prior_artifacts:

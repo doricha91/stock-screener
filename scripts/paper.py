@@ -530,7 +530,17 @@ def handle_benchmark(args: argparse.Namespace) -> int:
     print(f"  latest_snapshot_date: {summary['latest_snapshot_date']}")
     print(f"  availability_status: {summary['availability_status']}")
     if args.json:
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    **summary,
+                    "markdown_path": str(result["markdown_path"]),
+                    "json_path": str(result["json_path"]),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     return 0
 
 

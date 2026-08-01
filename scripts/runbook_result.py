@@ -171,8 +171,8 @@ def validate_command_result(result: dict[str, Any]) -> list[str]:
             if not frozen_context.get(field_name):
                 errors.append(f"frozen_context.{field_name} is required")
     step_id = result.get("step_id")
-    if not isinstance(step_id, int) or not 0 <= step_id <= 18:
-        errors.append("step_id must be 0..18")
+    if not isinstance(step_id, int) or not 0 <= step_id <= 21:
+        errors.append("step_id must be 0..21")
     if not result.get("stage_id"):
         errors.append("stage_id is required")
     if not result.get("command_key"):

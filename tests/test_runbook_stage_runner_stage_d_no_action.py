@@ -486,7 +486,7 @@ def test_no_action_stage_d_reruns_are_safely_blocked(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("position_count", [0, 2])
-def test_no_action_stage_e_executes_eod_and_completes_runbook_day(
+def test_no_action_stage_e_executes_eod_and_leaves_stage_f_pending(
     tmp_path: Path, monkeypatch, position_count: int
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -521,14 +521,14 @@ def test_no_action_stage_e_executes_eod_and_completes_runbook_day(
     assert (output_root / "paper_position_snapshot.csv").read_text(encoding="utf-8") == "snapshot_date,symbol,shares\n"
     state = runbook_state.load_state(Path(result["state_path"]))
     assert state.stage_status["E"] == "PASS"
+    assert state.stage_status["F"] == "PENDING"
     assert state.last_completed_step == 18
     assert state.last_completed_stage == "E"
     assert state.last_error is None
 
     rollover = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
-    assert rollover["runner_result"] == "PASS"
-    assert rollover["previous_runbook_day_id"] == state.runbook_day_id
-    assert rollover["next_data_date"] == TRADE_DATE
+    assert rollover["runner_result"] == "BLOCKED"
+    assert rollover["reason"] == "active_runbook_day_exists"
 
     rerun = runbook_stage_runner.run_stage_e(
         workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True

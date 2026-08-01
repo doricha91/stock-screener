@@ -70,6 +70,10 @@ def main(argv: list[str] | None = None) -> int:
     export_manual_review_template = args.manual_review_template
     if (export_benchmark or export_account_snapshot) and not args.expected_date:
         parser.error("--expected-date is required for --benchmark and --account-snapshot")
+    if (export_benchmark or export_account_snapshot) and not (args.dry_run or args.confirm_actual):
+        parser.error("--dry-run or --confirm-actual is required for --benchmark and --account-snapshot")
+    if (export_benchmark or export_account_snapshot) and args.dry_run and args.confirm_actual:
+        parser.error("--dry-run and --confirm-actual cannot be used together for --benchmark and --account-snapshot")
     if export_daily_review_summary and not args.date:
         parser.error("--date is required for --daily-review-summary")
     if export_manual_execution_template and not args.date:
@@ -298,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
             "page_id": item.page_id,
             "source_path": item.source_path,
             "dry_run": item.dry_run,
+            "failed_count": 0,
         }
         for item in results
     ]

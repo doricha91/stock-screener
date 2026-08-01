@@ -388,6 +388,8 @@ def test_benchmark_json_prints_payload(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert exit_code == 0
     assert '"schema_version": "paper_benchmark_comparison.v1"' in output
+    assert '"markdown_path": "outputs/paper_test/reports/paper_benchmark_comparison.md"' in output
+    assert '"json_path": "outputs/paper_test/reports/paper_benchmark_comparison.json"' in output
 
 
 def test_benchmark_does_not_call_writers(monkeypatch):

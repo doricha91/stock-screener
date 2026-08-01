@@ -76,7 +76,7 @@ def test_initial_state_defaults() -> None:
     assert state.current_status in {"READY", "PENDING"}
     assert state.last_completed_step is None
     assert state.last_completed_stage is None
-    assert set(state.stage_status) == {"A", "GATE1", "B", "C", "GATE2", "D", "E"}
+    assert set(state.stage_status) == {"A", "GATE1", "B", "C", "GATE2", "D", "E", "F"}
     assert all(status == "PENDING" for status in state.stage_status.values())
     assert state.idempotency_records == {}
 
@@ -95,6 +95,19 @@ def test_save_state_then_load_state_round_trips(tmp_path: Path) -> None:
     loaded = runbook_state.load_state(path)
 
     assert loaded == state
+
+
+def test_load_legacy_state_without_stage_f_treats_it_as_pending(tmp_path: Path) -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    payload = state.to_dict()
+    payload["stage_status"].pop("F")
+    path = tmp_path / "legacy_runbook_state.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = runbook_state.load_state(path)
+
+    assert loaded.stage_status["F"] == "PENDING"
+    assert runbook_state.validate_state(loaded) == []
 
 
 def test_save_load_preserves_idempotency_records(tmp_path: Path) -> None:
@@ -155,8 +168,8 @@ def test_validate_state_reports_schema_errors() -> None:
     errors = runbook_state.validate_state(broken)
 
     assert "schema_version must be runbook_state.v1" in errors
-    assert "current_stage must be one of A/GATE1/B/C/GATE2/D/E" in errors
-    assert "last_completed_step must be null or 0..18" in errors
+    assert "current_stage must be one of A/GATE1/B/C/GATE2/D/E/F" in errors
+    assert "last_completed_step must be null or 0..21" in errors
 
 
 def test_build_idempotency_key_includes_runbook_day_and_command_key() -> None:
@@ -356,7 +369,7 @@ def test_validate_state_checks_idempotency_record_shape() -> None:
     errors = runbook_state.validate_state(malformed)
 
     assert "idempotency_records.bad-key.idempotency_key must match record key" in errors
-    assert "idempotency_records.bad-key.step_id must be 0..18" in errors
+    assert "idempotency_records.bad-key.step_id must be 0..21" in errors
     assert "idempotency_records.bad-key.stage_id is invalid" in errors
     assert "idempotency_records.bad-key.status is invalid" in errors
     assert "idempotency_records.bad-key.artifact_refs must be an object" in errors

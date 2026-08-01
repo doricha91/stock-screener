@@ -19,7 +19,7 @@ STATE_DIRNAME = "runbook_states"
 # It does not replace the existing n8n runner context.json contract.
 # It shares account_id/data_date/trade_date concepts but owns controller state.
 SCHEMA_VERSION = "runbook_state.v1"
-STAGE_IDS = ("A", "GATE1", "B", "C", "GATE2", "D", "E")
+STAGE_IDS = ("A", "GATE1", "B", "C", "GATE2", "D", "E", "F")
 ALLOWED_STATUSES = {"READY", "PENDING", "RUNNING", "WAIT", "PASS", "BLOCKED", "FAILED", "DONE"}
 ALLOWED_IDEMPOTENCY_STATUSES = {
     "RESERVED",
@@ -140,6 +140,8 @@ def _state_from_dict(data: dict[str, Any]) -> RunbookState:
     frozen_context_data = data.get("frozen_context")
     if not isinstance(frozen_context_data, dict):
         frozen_context_data = {}
+    stage_status = dict(data.get("stage_status", {})) if isinstance(data.get("stage_status"), dict) else {}
+    stage_status.setdefault("F", "PENDING")
     return RunbookState(
         schema_version=str(data.get("schema_version", "")),
         runbook_day_id=str(data.get("runbook_day_id", "")),
@@ -155,7 +157,7 @@ def _state_from_dict(data: dict[str, Any]) -> RunbookState:
         current_status=str(data.get("current_status", "")),
         last_completed_step=data.get("last_completed_step"),
         last_completed_stage=data.get("last_completed_stage"),
-        stage_status=dict(data.get("stage_status", {})) if isinstance(data.get("stage_status"), dict) else {},
+        stage_status=stage_status,
         artifacts=dict(data.get("artifacts", {})) if isinstance(data.get("artifacts"), dict) else {},
         idempotency_records=(
             dict(data.get("idempotency_records", {}))
@@ -223,7 +225,7 @@ def validate_state(state: RunbookState) -> list[str]:
     except ValueError as exc:
         errors.append(str(exc))
     if state.current_stage not in STAGE_IDS:
-        errors.append("current_stage must be one of A/GATE1/B/C/GATE2/D/E")
+        errors.append("current_stage must be one of A/GATE1/B/C/GATE2/D/E/F")
     if state.current_status not in ALLOWED_STATUSES:
         errors.append("current_status is not allowed")
     missing_stage_status = [stage_id for stage_id in STAGE_IDS if stage_id not in state.stage_status]
@@ -235,10 +237,10 @@ def validate_state(state: RunbookState) -> list[str]:
         if status not in ALLOWED_STATUSES:
             errors.append(f"stage_status.{stage_id} has invalid status: {status}")
     if state.last_completed_step is not None:
-        if not isinstance(state.last_completed_step, int) or not 0 <= state.last_completed_step <= 18:
-            errors.append("last_completed_step must be null or 0..18")
+        if not isinstance(state.last_completed_step, int) or not 0 <= state.last_completed_step <= 21:
+            errors.append("last_completed_step must be null or 0..21")
     if state.last_completed_stage is not None and state.last_completed_stage not in STAGE_IDS:
-        errors.append("last_completed_stage must be null or one of A/GATE1/B/C/GATE2/D/E")
+        errors.append("last_completed_stage must be null or one of A/GATE1/B/C/GATE2/D/E/F")
     if not isinstance(state.artifacts, dict):
         errors.append("artifacts must be an object")
     if not isinstance(state.idempotency_records, dict):
@@ -255,8 +257,8 @@ def validate_state(state: RunbookState) -> list[str]:
                 if field_name not in record:
                     errors.append(f"idempotency_records.{record_key}.{field_name} is required")
             step_id = record.get("step_id")
-            if not isinstance(step_id, int) or not 0 <= step_id <= 18:
-                errors.append(f"idempotency_records.{record_key}.step_id must be 0..18")
+            if not isinstance(step_id, int) or not 0 <= step_id <= 21:
+                errors.append(f"idempotency_records.{record_key}.step_id must be 0..21")
             stage_id = record.get("stage_id")
             if stage_id not in STAGE_IDS:
                 errors.append(f"idempotency_records.{record_key}.stage_id is invalid")
@@ -516,8 +518,8 @@ def _ensure_stage_id(stage_id: str) -> None:
 
 
 def _ensure_step_id(step_id: int) -> None:
-    if not isinstance(step_id, int) or not 0 <= step_id <= 18:
-        raise ValueError("step_id must be 0..18")
+    if not isinstance(step_id, int) or not 0 <= step_id <= 21:
+        raise ValueError("step_id must be 0..21")
 
 
 def start_stage(state: RunbookState, stage_id: str) -> RunbookState:

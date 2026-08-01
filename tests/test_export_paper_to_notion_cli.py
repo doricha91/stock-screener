@@ -115,6 +115,12 @@ def test_cli_snapshot_exports_require_expected_date(target):
         export_paper_to_notion.main([target, "--dry-run"])
 
 
+@pytest.mark.parametrize("target", ["--benchmark", "--account-snapshot"])
+def test_cli_snapshot_actual_exports_require_confirmation(target):
+    with pytest.raises(SystemExit):
+        export_paper_to_notion.main([target, "--expected-date", "2026-06-15"])
+
+
 def test_cli_passes_expected_date_to_snapshot_export(monkeypatch):
     captured: dict[str, object] = {}
     monkeypatch.setattr(export_paper_to_notion, "load_notion_settings", lambda allow_missing=True: object())

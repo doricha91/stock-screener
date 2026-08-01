@@ -11,10 +11,10 @@ def test_registry_validation_passes() -> None:
     assert registry.validate_registry() == []
 
 
-def test_step_0_to_18_are_all_registered() -> None:
+def test_step_0_to_21_are_all_registered() -> None:
     commands = registry.list_commands()
 
-    assert [command.step_id for command in commands] == list(range(19))
+    assert [command.step_id for command in commands] == list(range(22))
     assert [command.command_key for command in commands] == [
         "status",
         "data_prepare",
@@ -35,6 +35,9 @@ def test_step_0_to_18_are_all_registered() -> None:
         "eod_dryrun",
         "eod_commit",
         "final_status",
+        "benchmark_generate",
+        "account_snapshot_notion_upsert",
+        "benchmark_report_notion_upsert",
     ]
 
 
@@ -57,12 +60,13 @@ def test_stage_eligibility_mapping() -> None:
     assert by_step[12].stage_id == "GATE2"
     assert {by_step[step].stage_id for step in range(13, 16)} == {"D"}
     assert {by_step[step].stage_id for step in range(16, 19)} == {"E"}
+    assert {by_step[step].stage_id for step in range(19, 22)} == {"F"}
 
 
 def test_phase1_auto_execute_and_manual_gates() -> None:
     by_step = {command.step_id: command for command in registry.list_commands()}
 
-    for step in [*range(0, 6), *range(7, 12), *range(13, 19)]:
+    for step in [*range(0, 6), *range(7, 12), *range(13, 22)]:
         assert by_step[step].phase1_auto_execute is True
         assert by_step[step].manual_gate is False
 
@@ -133,6 +137,28 @@ def test_commit_report_dependency_metadata_for_sync_steps() -> None:
 
     assert sync_review.requires_commit_report is True
     assert "review_commit_report" in sync_review.required_prior_artifacts
+
+
+def test_stage_e_final_status_is_local_and_stage_f_uses_frozen_context() -> None:
+    final_status = registry.get_command("final_status")
+    assert "--include-notion-read" not in final_status.argv_template
+
+    benchmark = registry.get_command("benchmark_generate")
+    account_sync = registry.get_command("account_snapshot_notion_upsert")
+    benchmark_sync = registry.get_command("benchmark_report_notion_upsert")
+    assert benchmark.argv_template == (
+        "scripts\\paper.py", "benchmark", "--account-id", "{account_id}", "--json"
+    )
+    for command in (account_sync, benchmark_sync):
+        assert ("--account-id", "{account_id}") == (
+            command.argv_template[command.argv_template.index("--account-id")],
+            command.argv_template[command.argv_template.index("--account-id") + 1],
+        )
+        assert ("--expected-date", "{trade_date}") == (
+            command.argv_template[command.argv_template.index("--expected-date")],
+            command.argv_template[command.argv_template.index("--expected-date") + 1],
+        )
+        assert "--confirm-actual" in command.argv_template
 
 
 def test_daily_review_dependency_metadata_uses_stage_b_verification() -> None:

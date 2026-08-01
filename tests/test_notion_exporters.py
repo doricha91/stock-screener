@@ -967,6 +967,33 @@ def test_account_snapshot_export_rejects_missing_required_columns_before_notion_
     assert client.calls == []
 
 
+def test_account_snapshot_export_rejects_duplicate_header_before_notion_call_without_mutation(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_account(root)
+    snapshot_path = root / "paper_account_snapshot.csv"
+    text = snapshot_path.read_text(encoding="utf-8")
+    snapshot_path.write_text(
+        text.replace("account_id,snapshot_date", "account_id,account_id,snapshot_date", 1),
+        encoding="utf-8",
+    )
+    before = snapshot_path.read_bytes()
+    client = FakeClient()
+
+    with pytest.raises(NotionExportError, match="reason=duplicate_header"):
+        export_latest_account_snapshot_to_notion(
+            client=client,
+            settings=_settings(),
+            mapping_root=_mapping(),
+            account_id="paper_default",
+            expected_date="2026-05-20",
+            paper_root=root,
+            dry_run=False,
+        )
+
+    assert client.calls == []
+    assert snapshot_path.read_bytes() == before
+
+
 def test_account_snapshot_default_export_uses_latest_row(tmp_path):
     root = tmp_path / "paper_test"
     _seed_account(root)
