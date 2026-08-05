@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import csv
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -8,9 +9,15 @@ from pathlib import Path
 import pytest
 
 from core import runbook_day_rollover as rollover_core
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_execution_intent import build_execution_intent
+from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
+from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
+from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
 from core.runbook_calendar import CalendarCoverageError, load_market_calendar
 from core.runbook_day_rollover import preview_rollover
 from scripts import runbook_day_rollover as runbook_day_rollover_cli
+from scripts import runbook_completion_evidence
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_state
 
@@ -70,10 +77,34 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
     account_root = workspace.parent / "outputs" / "paper_accounts" / ACCOUNT_ID
     snapshot_path = account_root / "paper_account_snapshot.csv"
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_path.write_text(
-        f"account_id,snapshot_date,total_equity\n{ACCOUNT_ID},{trade_date},100000\n",
-        encoding="utf-8",
-    )
+    (account_root / "reviews").mkdir(parents=True, exist_ok=True)
+    with snapshot_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS)
+        writer.writeheader()
+        writer.writerow({"account_id": ACCOUNT_ID, "snapshot_date": trade_date, "total_equity_market_value": 100000})
+    with (account_root / "paper_position_snapshot.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PAPER_POSITION_SNAPSHOT_COLUMNS)
+        writer.writeheader()
+        writer.writerow({"account_id": ACCOUNT_ID, "snapshot_date": trade_date, "symbol": "AAPL", "shares": 1})
+    with (account_root / "paper_execution_log.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PAPER_EXECUTION_LOG_COLUMNS)
+        writer.writeheader()
+        writer.writerow({"date": trade_date, "symbol": "AAPL", "status": "COMMITTED"})
+    with (account_root / "reviews" / "paper_manual_review_log.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS)
+        writer.writeheader()
+        writer.writerow({"review_date": trade_date, "symbol": "AAPL", "question_id": "Q1", "question_text": "review", "is_actionable": "false", "manual_answer": "done", "review_status": "reviewed", "follow_up_needed": "false"})
+    items = [{"symbol": "AAPL", "action": "BUY", "quantity": 1}]
+    plan_payload = {
+        "schema_version": "paper_daily_plan.v1", "account_id": ACCOUNT_ID,
+        "data_date": data_date, "trade_date": trade_date, "plan_date": trade_date,
+        "run_mode": "official", "official_run": True,
+        "generated_at": f"{data_date}T18:00:00+09:00", "fingerprints": {},
+        "items": items, "execution_intent": build_execution_intent(items),
+    }
+    plan_path = _write_json(workspace / "artifacts" / state.runbook_day_id / "daily_plan.json", plan_payload)
+    _write_json(account_root / f"daily_action_plan_{trade_date.replace('-', '')}.json", plan_payload)
+    state = runbook_state.record_artifact(state, "daily_plan_json", str(plan_path), workspace)
     benchmark_source = _write_json(
         account_root / "reports" / "paper_benchmark_comparison.json",
         {"account_id": ACCOUNT_ID, "latest_snapshot_date": trade_date, "run_mode": "exploratory"},
@@ -133,6 +164,12 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
             "market_valuation_status": "success",
         },
     )
+    state = runbook_state.record_artifact(state, "eod_commit_report_json", str(eod_commit), workspace)
+    state = runbook_state.complete_stage(state, "D")
+    manifest = runbook_completion_evidence.build_runbook_completion_manifest(workspace, state, account_root)
+    completion_manifest = _write_json(
+        workspace / "completion_manifests" / f"{state.runbook_day_id}.json", manifest
+    )
     final_status = _write_json(
         workspace / "command_runs" / state.runbook_day_id / "final_status.json",
         _command_result(
@@ -148,6 +185,7 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
                 "workflow_status": "REVIEW_DONE",
                 "completion_mode": "STANDARD",
                 "completion_proof": None,
+                "completion_manifest": manifest,
                 "read_only": True,
                 "write_executed": False,
                 "operation_write_executed": False,
@@ -175,7 +213,9 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
         last_completed_stage="F",
         stage_status={stage_id: "PASS" for stage_id in runbook_state.STAGE_IDS},
         artifacts={
+            "daily_plan_json": str(plan_path.relative_to(workspace)),
             "eod_commit_report_json": str(eod_commit.relative_to(workspace)),
+            "completion_manifest_json": str(completion_manifest.relative_to(workspace)),
             "final_status_report_json": str(final_status.relative_to(workspace)),
             "benchmark_report_json": str(benchmark_artifact.relative_to(workspace)),
             "account_snapshot_notion_report_json": str(account_notion.relative_to(workspace)),
@@ -283,7 +323,7 @@ def test_tied_latest_completed_days_are_blocked(tmp_path: Path) -> None:
     result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
 
     assert result["runner_result"] == "BLOCKED"
-    assert result["reason"] == "latest_completed_runbook_day_ambiguous"
+    assert result["reason"] == "active_runbook_day_exists"
 
 
 def test_calculated_data_date_cannot_move_backward(tmp_path: Path) -> None:
@@ -501,7 +541,9 @@ def test_invalid_eod_commit_semantics_block_rollover(
         payload[field] = value
     _write_json(evidence_path, payload)
 
-    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)
+    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(
+        workspace, state, workspace.parent / "outputs" / "paper_accounts" / ACCOUNT_ID
+    )
     result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
 
     assert validation["valid"] is False
@@ -548,7 +590,9 @@ def test_invalid_final_status_semantics_block_rollover(
         target[field] = value
     _write_json(evidence_path, payload)
 
-    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)
+    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(
+        workspace, state, workspace.parent / "outputs" / "paper_accounts" / ACCOUNT_ID
+    )
     result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
 
     assert validation["valid"] is False
@@ -586,7 +630,9 @@ def test_invalid_stage_e_artifact_storage_blocks_rollover(
     else:
         _write_json(evidence_path, {})
 
-    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)
+    validation = runbook_stage_e_evidence.validate_stage_e_completion_evidence(
+        workspace, state, workspace.parent / "outputs" / "paper_accounts" / ACCOUNT_ID
+    )
     result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
 
     assert validation["valid"] is False

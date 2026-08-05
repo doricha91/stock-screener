@@ -278,6 +278,12 @@ def validate_stage_f_completion_evidence(
     account_root: Path,
 ) -> dict[str, Any]:
     blockers: list[str] = []
+    from scripts import runbook_stage_e_evidence
+
+    stage_e = runbook_stage_e_evidence.validate_stage_e_completion_evidence(
+        workspace, state, account_root
+    )
+    blockers.extend(f"stage_e:{item}" for item in stage_e["blockers"])
     expected_state = {
         "E": state.stage_status.get("E") == "PASS",
         "F": state.stage_status.get("F") == "PASS",

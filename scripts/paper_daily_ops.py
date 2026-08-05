@@ -14,6 +14,10 @@ if str(ROOT) not in sys.path:
 from core.paper_account_paths import build_paper_account_paths  # noqa: E402
 from core.paper_daily_ops_orchestrator import OpsEvidencePaths, build_daily_ops_status  # noqa: E402
 from scripts import runbook_state  # noqa: E402
+from scripts.runbook_completion_evidence import (  # noqa: E402
+    build_runbook_completion_manifest,
+    resolve_workspace_ref,
+)
 from scripts.runbook_no_action import build_no_action_completion_context  # noqa: E402
 
 
@@ -69,7 +73,7 @@ def handle_status(args: argparse.Namespace) -> int:
         review_commit_report=Path(args.review_commit_report) if args.review_commit_report else None,
     )
     try:
-        completion_context = _load_completion_context(args)
+        runbook_context = _load_completion_context(args)
         payload = build_daily_ops_status(
             account_id=args.account_id,
             data_date=args.data_date,
@@ -79,8 +83,17 @@ def handle_status(args: argparse.Namespace) -> int:
             evidence_paths=evidence,
             include_notion_read=bool(args.include_notion_read),
             notion_timeout_seconds=int(args.notion_timeout_seconds),
-            completion_context=completion_context,
+            completion_context=(runbook_context or {}).get("completion_proof"),
         )
+        if runbook_context:
+            manifest = build_runbook_completion_manifest(
+                runbook_context["workspace"],
+                runbook_context["state"],
+                runbook_context["account_root"],
+            )
+            if payload.get("completion_mode") != manifest.get("completion_mode"):
+                raise ValueError("completion_mode_source_mismatch")
+            payload["completion_manifest"] = manifest
     except ValueError as exc:
         payload = {
             "schema_version": "mfu_oper9_daily_ops_status.v1",
@@ -172,7 +185,7 @@ def handle_status(args: argparse.Namespace) -> int:
     return _exit_code(payload, strict=bool(args.strict_exit))
 
 
-def _load_completion_context(args: argparse.Namespace) -> dict | None:
+def _load_completion_context(args: argparse.Namespace) -> dict[str, object] | None:
     workspace_arg = str(args.runbook_workspace or "").strip()
     state_arg = str(args.runbook_state_json or "").strip()
     if not workspace_arg and not state_arg:
@@ -180,12 +193,7 @@ def _load_completion_context(args: argparse.Namespace) -> dict | None:
     if not workspace_arg or not state_arg:
         raise ValueError("runbook_workspace_and_state_are_required_together")
     workspace = Path(workspace_arg).resolve(strict=False)
-    state_path = Path(state_arg)
-    state_path = state_path.resolve(strict=False) if state_path.is_absolute() else (workspace / state_path).resolve(strict=False)
-    try:
-        state_path.relative_to(workspace)
-    except ValueError as exc:
-        raise ValueError("runbook_state_outside_workspace") from exc
+    state_path = resolve_workspace_ref(workspace, state_arg)
     state = runbook_state.load_state(state_path)
     expected_state = runbook_state.create_initial_state(
         str(args.account_id), str(args.data_date), str(args.trade_date)
@@ -202,14 +210,20 @@ def _load_completion_context(args: argparse.Namespace) -> dict | None:
     }
     if actual != expected:
         raise ValueError("runbook_state_context_mismatch")
-    if not state.artifacts.get("stage_d_no_action_json"):
-        return None
     account_root = (
-        Path(args.account_root)
+        Path(args.account_root).resolve(strict=False)
         if args.account_root
-        else build_paper_account_paths(str(args.account_id), create=False).root
+        else build_paper_account_paths(str(args.account_id), create=False).root.resolve(strict=False)
     )
-    return build_no_action_completion_context(workspace, state, account_root=account_root)
+    completion_proof = None
+    if state.artifacts.get("stage_d_no_action_json"):
+        completion_proof = build_no_action_completion_context(workspace, state, account_root=account_root)
+    return {
+        "workspace": workspace,
+        "state": state,
+        "account_root": account_root,
+        "completion_proof": completion_proof,
+    }
 
 
 def _status_report_path(payload: dict, explicit_path: str | None) -> Path:

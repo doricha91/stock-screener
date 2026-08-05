@@ -9,6 +9,11 @@ from typing import Any
 
 from core.paper_execution_intent import validate_daily_plan_execution_intent
 from core.paper_manual_review_log_validator import load_paper_manual_review_log_rows
+from scripts.runbook_completion_evidence import (
+    CompletionEvidenceError,
+    resolve_workspace_ref,
+    validate_no_action_contradictions,
+)
 from scripts.runbook_state import RunbookState
 
 
@@ -30,35 +35,34 @@ class EvidenceError(ValueError):
 
 
 def artifact_path(workspace: Path, artifact_ref: str) -> Path:
-    path = Path(str(artifact_ref))
-    workspace_resolved = Path(workspace).resolve(strict=False)
-    resolved = path.resolve(strict=False) if path.is_absolute() else (workspace_resolved / path).resolve(strict=False)
     try:
-        resolved.relative_to(workspace_resolved)
-    except ValueError as exc:
-        raise EvidenceError("artifact_ref_outside_workspace", f"artifact is outside workspace: {resolved}") from exc
-    return resolved
+        return resolve_workspace_ref(workspace, artifact_ref)
+    except CompletionEvidenceError as exc:
+        reason = "artifact_ref_outside_workspace" if exc.reason == "workspace_ref_outside_workspace" else exc.reason
+        detail = "artifact is outside workspace" if exc.reason == "workspace_ref_outside_workspace" else exc.detail
+        raise EvidenceError(reason, detail) from exc
 
 
 def build_no_action_completion_context(
     workspace: Path,
     state: RunbookState,
     *,
-    account_root: Path | None = None,
+    account_root: Path,
 ) -> dict[str, Any]:
     if state.stage_status.get("D") != "PASS":
         raise EvidenceError("stage_d_required", "Stage D must be PASS for no-action completion")
     context = validate_no_action_through_gate2(workspace, state)
     if context.get("action_mode") != "NO_ACTION" or context.get("verified_no_action") is not True:
         raise EvidenceError("no_action_evidence_mismatch", "Verified no-action context is required")
+    try:
+        validate_no_action_contradictions(state)
+    except CompletionEvidenceError as exc:
+        raise EvidenceError(exc.reason, exc.detail) from exc
     evidence, evidence_path = load_stage_d_no_action_evidence(
         workspace,
         state,
         daily_plan_sha256=str(context.get("daily_plan_sha256") or ""),
     )
-    if any(state.artifacts.get(key) for key in ("review_preview_json", "review_append_report_json", "review_status_sync_report_json")):
-        raise EvidenceError("unexpected_review_artifact_for_no_action", "Review artifacts contradict no-action completion")
-
     eod_ref = state.artifacts.get("eod_commit_report_json")
     if not eod_ref:
         raise EvidenceError("eod_commit_report_required", "EOD commit report is not pinned")
@@ -84,12 +88,11 @@ def build_no_action_completion_context(
         if isinstance(eod.get(field), bool) or not isinstance(eod.get(field), int):
             raise EvidenceError("eod_commit_report_invalid", f"{field} must be an integer")
 
-    if account_root is not None:
-        account_plan = Path(account_root) / f"daily_action_plan_{state.frozen_context.trade_date.replace('-', '')}.json"
-        if not account_plan.is_file():
-            raise EvidenceError("account_daily_plan_required", "Account-root Daily Plan is required")
-        if sha256_file(account_plan) != context["daily_plan_sha256"]:
-            raise EvidenceError("daily_plan_hash_mismatch", "Account-root Daily Plan hash does not match proof")
+    account_plan = Path(account_root) / f"daily_action_plan_{state.frozen_context.trade_date.replace('-', '')}.json"
+    if not account_plan.is_file():
+        raise EvidenceError("account_daily_plan_required", "Account-root Daily Plan is required")
+    if sha256_file(account_plan) != context["daily_plan_sha256"]:
+        raise EvidenceError("daily_plan_hash_mismatch", "Account-root Daily Plan hash does not match proof")
 
     return {
         "schema_version": NO_ACTION_COMPLETION_SCHEMA_VERSION,

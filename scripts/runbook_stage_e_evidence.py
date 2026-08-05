@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts import runbook_result
-from scripts import runbook_no_action
+from scripts import runbook_completion_evidence
 from scripts.runbook_state import RunbookState
 
 
@@ -40,14 +40,6 @@ FINAL_STATUS_REQUIRED_FIELDS = (
 )
 
 
-def _path_is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
-    except ValueError:
-        return False
-    return True
-
-
 def load_workspace_json_artifact(
     workspace: Path,
     artifact_ref: object,
@@ -55,12 +47,15 @@ def load_workspace_json_artifact(
     cleaned = str(artifact_ref or "").strip()
     if not cleaned:
         return None, None, "artifact_ref_missing"
-    candidate = Path(cleaned)
-    path = candidate.resolve(strict=False) if candidate.is_absolute() else (workspace / candidate).resolve(strict=False)
-    if not _path_is_within(path, workspace):
-        return None, None, "artifact_ref_outside_workspace"
-    if not path.is_file():
-        return None, path, "artifact_file_missing"
+    try:
+        path = runbook_completion_evidence.resolve_workspace_ref(workspace, cleaned)
+    except runbook_completion_evidence.CompletionEvidenceError as exc:
+        reason_map = {
+            "workspace_ref_outside_workspace": "artifact_ref_outside_workspace",
+            "workspace_ref_missing": "artifact_file_missing",
+            "workspace_ref_not_file": "artifact_file_missing",
+        }
+        return None, None, reason_map.get(exc.reason, exc.reason)
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -132,6 +127,7 @@ def validate_final_status_payload(
     payload: dict[str, Any],
     state: RunbookState,
     workspace: Path | None = None,
+    account_root: Path | None = None,
 ) -> list[str]:
     blockers: list[str] = []
     for field in FINAL_STATUS_REQUIRED_FIELDS:
@@ -157,6 +153,12 @@ def validate_final_status_payload(
 
     completion_mode = payload.get("completion_mode")
     completion_proof = payload.get("completion_proof")
+    completion_manifest = payload.get("completion_manifest")
+    if workspace is not None or account_root is not None:
+        if not isinstance(completion_manifest, dict):
+            blockers.append("final_status completion_manifest must be an object")
+        elif completion_manifest.get("schema_version") != runbook_completion_evidence.MANIFEST_SCHEMA_VERSION:
+            blockers.append("final_status completion_manifest schema is invalid")
     if completion_mode == FINAL_STATUS_COMPLETION_STANDARD:
         if payload.get("workflow_status") != FINAL_STATUS_WORKFLOW_COMPLETE:
             blockers.append(f"final_status workflow_status must be {FINAL_STATUS_WORKFLOW_COMPLETE}")
@@ -167,19 +169,30 @@ def validate_final_status_payload(
             blockers.append("final_status no-action workflow_status must be a non-empty string")
         if not isinstance(completion_proof, dict):
             blockers.append("final_status no-action completion_proof must be an object")
-        elif workspace is None:
-            blockers.append("final_status no-action workspace is required")
-        else:
+    else:
+        blockers.append("final_status completion_mode is invalid")
+
+    if (workspace is None) != (account_root is None):
+        blockers.append("final_status completion source context is required")
+    elif workspace is not None and account_root is not None and isinstance(completion_manifest, dict):
+        source_validation = runbook_completion_evidence.validate_completion_sources(
+            workspace,
+            state,
+            account_root,
+            stored_payload=payload,
+            stored_manifest=completion_manifest,
+        )
+        blockers.extend(f"final_status completion source invalid:{item}" for item in source_validation["blockers"])
+        if completion_mode == FINAL_STATUS_COMPLETION_NO_ACTION and isinstance(completion_proof, dict):
             try:
-                expected_proof = runbook_no_action.build_no_action_completion_context(workspace, state)
+                from scripts.runbook_no_action import build_no_action_completion_context
+
+                expected_proof = build_no_action_completion_context(workspace, state, account_root=account_root)
             except (OSError, ValueError) as exc:
-                reason = getattr(exc, "reason", type(exc).__name__)
-                blockers.append(f"final_status no-action proof invalid:{reason}")
+                blockers.append(f"final_status no-action proof invalid:{getattr(exc, 'reason', type(exc).__name__)}")
             else:
                 if completion_proof != expected_proof:
                     blockers.append("final_status no-action completion_proof mismatch")
-    else:
-        blockers.append("final_status completion_mode is invalid")
 
     for field in ("blockers", "warnings"):
         value = payload.get(field)
@@ -236,6 +249,7 @@ def validate_stored_eod_commit(
 def validate_stored_final_status(
     workspace: Path,
     state: RunbookState,
+    account_root: Path,
 ) -> dict[str, Any]:
     payload, _, error = load_workspace_json_artifact(workspace, state.artifacts.get("final_status_report_json"))
     if error:
@@ -259,11 +273,24 @@ def validate_stored_final_status(
     if payload.get("command_key") != "final_status":
         blockers.append("final_status_report_json:command_key_mismatch")
     raw_payload = payload.get("raw_payload")
+    stored_manifest, _, manifest_error = load_workspace_json_artifact(
+        workspace, state.artifacts.get("completion_manifest_json")
+    )
+    if manifest_error:
+        blockers.append(f"completion_manifest_json:{manifest_error}")
     if isinstance(raw_payload, dict):
         blockers.extend(
             f"final_status_report_json:payload:{item}"
-            for item in validate_final_status_payload(raw_payload, state, workspace)
+            for item in validate_final_status_payload(raw_payload, state, workspace, account_root)
         )
+        source_validation = runbook_completion_evidence.validate_completion_sources(
+            workspace,
+            state,
+            account_root,
+            stored_payload=raw_payload,
+            stored_manifest=stored_manifest,
+        )
+        blockers.extend(f"final_status_report_json:sources:{item}" for item in source_validation["blockers"])
     else:
         blockers.append("final_status_report_json:raw_payload_invalid")
     return {"valid": not blockers, "blockers": blockers}
@@ -272,8 +299,9 @@ def validate_stored_final_status(
 def validate_stage_e_completion_evidence(
     workspace: Path,
     state: RunbookState,
+    account_root: Path,
 ) -> dict[str, Any]:
     commit = validate_stored_eod_commit(workspace, state)
-    final_status = validate_stored_final_status(workspace, state)
+    final_status = validate_stored_final_status(workspace, state, account_root)
     blockers = [*commit["blockers"], *final_status["blockers"]]
     return {"valid": not blockers, "blockers": blockers}

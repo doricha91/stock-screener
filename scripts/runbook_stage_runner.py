@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import runbook_command_registry as registry
+from scripts import runbook_completion_evidence
 from scripts import runbook_gate_checker
 from scripts import runbook_result
 from scripts import runbook_stage_e_evidence
@@ -317,7 +318,7 @@ def run_stage_a(
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
 ) -> dict[str, Any]:
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
     if guard_error:
@@ -509,7 +510,7 @@ def run_stage_b(
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
 ) -> dict[str, Any]:
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
     if guard_error:
@@ -558,14 +559,10 @@ def run_stage_b(
         try:
             gate1_payload, gate1_path = load_gate1_evidence(workspace, state)
             _validate_stage_b_no_action_gate(state, gate1_payload, daily_plan_path)
-            if any(
-                record.get("command_key") == "execution_commit"
-                for record in state.idempotency_records.values()
-            ):
-                raise EvidenceError(
-                    "unexpected_execution_idempotency_for_no_action",
-                    "Execution commit idempotency already exists for a no-action day.",
-                )
+            try:
+                runbook_completion_evidence.validate_no_action_contradictions(state)
+            except runbook_completion_evidence.CompletionEvidenceError as contradiction:
+                raise EvidenceError(contradiction.reason, contradiction.detail) from contradiction
         except EvidenceError as exc:
             state = runbook_state.block_stage(state, STAGE_B_ID, exc.reason, {"error": exc.detail})
             runbook_state.save_state(state, state_path)
@@ -807,7 +804,7 @@ def run_stage_c(
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
 ) -> dict[str, Any]:
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
     if guard_error:
@@ -1047,7 +1044,7 @@ def run_stage_d_preview(
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
 ) -> dict[str, Any]:
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
     if guard_error:
@@ -1244,7 +1241,7 @@ def run_stage_d_append(
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
 ) -> dict[str, Any]:
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
     if guard_error:
@@ -1713,12 +1710,10 @@ def _run_stage_d_no_action_append(
 
 
 def _unexpected_no_action_review_state(state: RunbookState) -> str | None:
-    for key in ("review_preview_json", "review_append_report_json", "review_status_sync_report_json"):
-        if state.artifacts.get(key):
-            return "unexpected_review_artifact_for_no_action"
-    for record in state.idempotency_records.values():
-        if record.get("command_key") == "review_append" and record.get("status") in {"RUNNING", "PASS"}:
-            return "unexpected_review_idempotency_for_no_action"
+    try:
+        runbook_completion_evidence.validate_no_action_contradictions(state)
+    except runbook_completion_evidence.CompletionEvidenceError as exc:
+        return exc.reason
     return None
 
 
@@ -1740,7 +1735,7 @@ def run_stage_e(
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
 ) -> dict[str, Any]:
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
     if guard_error:
@@ -2027,7 +2022,7 @@ def run_stage_f(
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
 ) -> dict[str, Any]:
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     guard_error = _paper_smoke_guard(account_id, dry_run, confirm_paper_test)
     if guard_error:
@@ -2553,24 +2548,10 @@ def _stage_c_evidence_context(state: RunbookState, workspace: Path) -> dict[str,
         state,
         daily_plan_path=daily_plan_path,
     )
-    for artifact_key in (
-        "execution_commit_report_json",
-        "execution_status_sync_report_json",
-        "execution_status_sync_report",
-    ):
-        if state.artifacts.get(artifact_key):
-            raise EvidenceError(
-                "unexpected_execution_artifact_for_no_action",
-                f"unexpected state artifact: {artifact_key}",
-            )
-    if any(
-        record.get("command_key") == "execution_commit" and record.get("status") == "PASS"
-        for record in state.idempotency_records.values()
-    ):
-        raise EvidenceError(
-            "unexpected_execution_idempotency_for_no_action",
-            "PASS execution_commit idempotency record exists",
-        )
+    try:
+        runbook_completion_evidence.validate_no_action_contradictions(state)
+    except runbook_completion_evidence.CompletionEvidenceError as contradiction:
+        raise EvidenceError(contradiction.reason, contradiction.detail) from contradiction
     if (
         verification.get("verified_no_action") is not True
         or _int_payload(verification, "committed_row_count") != 0
@@ -2669,9 +2650,10 @@ def _stage_e_precondition_error(
     if state.last_error and not _stage_e_final_status_retry_allowed(state, workspace):
         return "active_last_error"
     if action_context.get("action_mode") == "NO_ACTION":
-        unexpected = _unexpected_no_action_review_state(state)
-        if unexpected:
-            return unexpected
+        try:
+            runbook_completion_evidence.validate_no_action_contradictions(state)
+        except runbook_completion_evidence.CompletionEvidenceError as exc:
+            return exc.reason
         evidence, evidence_path = load_stage_d_no_action_evidence(
             workspace,
             state,
@@ -2697,10 +2679,10 @@ def _stage_e_precondition_error(
 def _stage_f_precondition_error(state: RunbookState, workspace: Path, account_root: Path) -> str | None:
     if state.stage_status.get(STAGE_E_ID) != "PASS":
         return "stage_e_not_pass"
-    if not runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)["valid"]:
-        return "stage_e_completion_evidence_invalid"
     if not account_root.is_dir():
         return "account_root_missing"
+    if not runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state, account_root)["valid"]:
+        return "stage_e_completion_evidence_invalid"
     return None
 
 
@@ -2783,8 +2765,9 @@ def _stage_b_verification_error(state: RunbookState, workspace: Path) -> str | N
 
 
 def _artifact_ref_path(workspace: Path, artifact_ref: str) -> Path:
-    path = Path(str(artifact_ref))
-    return path if path.is_absolute() else workspace / path
+    return runbook_completion_evidence.resolve_workspace_ref(
+        workspace, artifact_ref, require_exists=False, require_file=False
+    )
 
 
 def _artifact_ref_exists(workspace: Path, artifact_ref: str) -> bool:
@@ -3312,8 +3295,18 @@ def _apply_stage_e_step_result(
     if runner_result == "PASS":
         artifact_refs = command_result.get("outputs", {}).get("artifact_refs", {})
         if command.command_key == "final_status":
+            raw_payload = command_result.get("raw_payload")
+            manifest = raw_payload.get("completion_manifest") if isinstance(raw_payload, dict) else None
+            if not isinstance(manifest, dict):
+                raise ValueError("completion_manifest_required")
+            manifest_path = workspace / "completion_manifests" / f"{state.runbook_day_id}.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             artifact_refs = {
                 **artifact_refs,
+                "completion_manifest_json": runbook_state.canonicalize_artifact_ref(
+                    str(manifest_path), workspace
+                ),
                 "final_status_report_json": runbook_state.canonicalize_artifact_ref(str(command_json_path), workspace),
                 "final_status_report_md": runbook_state.canonicalize_artifact_ref(str(command_txt_path), workspace),
             }
@@ -3511,14 +3504,16 @@ def _run_stage_e_command(
     timeout_sec: int,
 ) -> tuple[dict[str, Any], str, list[str]]:
     artifact_refs = _stage_b_render_artifacts(state.artifacts, workspace)
+    workspace = Path(workspace).resolve(strict=False)
     artifact_refs["workspace"] = str(workspace)
-    artifact_refs["runbook_state_json"] = str(
-        runbook_state.get_state_path_for_context(
+    state_path = runbook_state.get_state_path_for_context(
             workspace,
             state.frozen_context.account_id,
             state.frozen_context.data_date,
             state.frozen_context.trade_date,
         )
+    artifact_refs["runbook_state_json"] = runbook_completion_evidence.workspace_relative_ref(
+        workspace, state_path
     )
     rendered_argv = render_argv_template(command, state.frozen_context, artifact_refs)
     argv = normalize_python_script_argv(rendered_argv, repo_root)
@@ -3560,7 +3555,13 @@ def _run_stage_e_command(
         )
         return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
-    validation = _validate_stage_e_payload(command.command_key, raw_payload, state, workspace)
+    payload_account_root = str(raw_payload.get("account_root") or "").strip()
+    account_root = (
+        Path(payload_account_root).resolve(strict=False)
+        if payload_account_root
+        else build_paper_account_paths(state.frozen_context.account_id, create=False).root.resolve(strict=False)
+    )
+    validation = _validate_stage_e_payload(command.command_key, raw_payload, state, workspace, account_root)
     if validation["artifact_refs"]:
         validation["artifact_refs"] = _pin_artifact_refs(
             workspace,
@@ -3790,13 +3791,14 @@ def _validate_stage_e_payload(
     payload: dict[str, Any],
     state: RunbookState,
     workspace: Path,
+    account_root: Path,
 ) -> dict[str, Any]:
     if command_key == "eod_dryrun":
         return _validate_eod_dryrun_payload(payload, state)
     if command_key == "eod_commit":
         return _validate_eod_commit_payload(payload, state)
     if command_key == "final_status":
-        return _validate_final_status_payload(payload, state, workspace)
+        return _validate_final_status_payload(payload, state, workspace, account_root)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
@@ -4029,8 +4031,10 @@ def _validate_eod_commit_payload(payload: dict[str, Any], state: RunbookState) -
     )
 
 
-def _validate_final_status_payload(payload: dict[str, Any], state: RunbookState, workspace: Path) -> dict[str, Any]:
-    blockers = runbook_stage_e_evidence.validate_final_status_payload(payload, state, workspace)
+def _validate_final_status_payload(
+    payload: dict[str, Any], state: RunbookState, workspace: Path, account_root: Path
+) -> dict[str, Any]:
+    blockers = runbook_stage_e_evidence.validate_final_status_payload(payload, state, workspace, account_root)
     blockers.extend(_validate_stage_e_pinned_eod_reports(state, workspace))
     runner_result = "BLOCKED" if blockers else "PASS"
     return _payload_validation(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import csv
 import io
 import json
 from pathlib import Path
@@ -9,11 +10,16 @@ import pytest
 
 from core import runbook_day_rollover as rollover_core
 from core.paper_execution_intent import build_execution_intent
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
+from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
+from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
 from core.paper_daily_ops_orchestrator import build_daily_ops_status
 from core.runbook_calendar import load_market_calendar
 from core.runbook_day_rollover import preview_rollover
 from scripts import paper_daily_ops
 from scripts import runbook_command_registry
+from scripts import runbook_completion_evidence
 from scripts import runbook_result
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_state
@@ -32,6 +38,14 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _write_csv(path: Path, columns: list[str], rows: list[dict[str, object]] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows or [])
+
+
 def _build_actual_no_action_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     workspace = tmp_path / "workspace"
     account_root = tmp_path / "paper_accounts" / ACCOUNT_ID
@@ -48,13 +62,14 @@ def _build_actual_no_action_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     daily_plan_json.write_bytes(daily_plan_source.read_bytes())
     _write(account_root / "daily_action_plan_20260702.md", "# verified no action plan\n")
     _write(account_root / "paper_current_state_20260702.json", json.dumps({"positions": {}}))
-    _write(
+    _write_csv(
         account_root / "paper_account_snapshot.csv",
-        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols\n"
-        "2026-07-02,100,100,0,0,\n",
+        PAPER_ACCOUNT_SNAPSHOT_COLUMNS,
+        [{"account_id": ACCOUNT_ID, "snapshot_date": TRADE_DATE, "cash": 100, "total_equity_market_value": 100, "unrealized_pnl": 0, "position_count": 0}],
     )
-    _write(account_root / "paper_position_snapshot.csv", "snapshot_date,symbol,shares\n")
-    _write(account_root / "paper_execution_log.csv", "date,source,symbol\n")
+    _write_csv(account_root / "paper_position_snapshot.csv", PAPER_POSITION_SNAPSHOT_COLUMNS)
+    _write_csv(account_root / "paper_execution_log.csv", PAPER_EXECUTION_LOG_COLUMNS)
+    _write_csv(account_root / "reviews" / "paper_manual_review_log.csv", PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS)
     eod_path = workspace / "artifacts" / state.runbook_day_id / "stage_e" / "eod_commit.json"
     eod_path.parent.mkdir(parents=True, exist_ok=True)
     eod_path.write_text(
@@ -132,6 +147,9 @@ def test_actual_no_action_producer_cli_wrapper_and_stored_validator_pass(tmp_pat
         legacy_root=legacy_root,
         completion_context=context,
     )
+    direct["completion_manifest"] = runbook_completion_evidence.build_runbook_completion_manifest(
+        workspace, state, account_root
+    )
     assert direct["overall_status"] == "PASS"
     assert direct["workflow_status"] == "UNKNOWN_OR_INCOMPLETE"
     assert direct["completion_mode"] == "NO_ACTION"
@@ -144,7 +162,7 @@ def test_actual_no_action_producer_cli_wrapper_and_stored_validator_pass(tmp_pat
     assert direct["reconciliation_summary"]["conflict_count"] == 0
     assert direct["operator_summary"]["terminal"] is True
     assert direct["operator_summary"]["recommended_operator_action"] == "NONE"
-    assert runbook_stage_e_evidence.validate_final_status_payload(direct, state, workspace) == []
+    assert runbook_stage_e_evidence.validate_final_status_payload(direct, state, workspace, account_root) == []
 
     stdout = io.StringIO()
     state_path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
@@ -186,7 +204,11 @@ def test_actual_no_action_producer_cli_wrapper_and_stored_validator_pass(tmp_pat
     final_path.parent.mkdir(parents=True, exist_ok=True)
     final_path.write_text(json.dumps(wrapper), encoding="utf-8")
     state = runbook_state.record_artifact(state, "final_status_report_json", str(final_path), workspace)
-    assert runbook_stage_e_evidence.validate_stored_final_status(workspace, state) == {
+    manifest_path = workspace / "completion_manifests" / f"{state.runbook_day_id}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(cli_payload["completion_manifest"]), encoding="utf-8")
+    state = runbook_state.record_artifact(state, "completion_manifest_json", str(manifest_path), workspace)
+    assert runbook_stage_e_evidence.validate_stored_final_status(workspace, state, account_root) == {
         "valid": True,
         "blockers": [],
     }
@@ -201,6 +223,11 @@ def test_actual_no_action_stage_e_stage_f_and_rollover_contract(
     workspace.mkdir()
     no_action_fixtures._complete_no_action_stage_d(workspace)
     stage_e_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        no_action_fixtures.runbook_stage_runner,
+        "build_paper_account_paths",
+        lambda account_id, create=False: type("Paths", (), {"account_id": account_id, "root": account_root})(),
+    )
     monkeypatch.setattr(
         no_action_fixtures.runbook_stage_runner,
         "run_allowlisted_command",
@@ -223,11 +250,6 @@ def test_actual_no_action_stage_e_stage_f_and_rollover_contract(
     assert final_wrapper["raw_payload"]["summary"]["terminal"] is True
 
     monkeypatch.setattr(stage_f_fixtures, "ACCOUNT_ID", ACCOUNT_ID)
-    monkeypatch.setattr(
-        no_action_fixtures.runbook_stage_runner,
-        "build_paper_account_paths",
-        lambda account_id, create=False: type("Paths", (), {"account_id": account_id, "root": account_root})(),
-    )
     monkeypatch.setattr(
         rollover_core,
         "build_paper_account_paths",

@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 
 from core.paper_execution_intent import build_execution_intent
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
 from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
+from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
 from core.runbook_calendar import load_market_calendar
 from core.runbook_day_rollover import preview_rollover
 from scripts import paper_daily_ops, runbook_stage_runner, runbook_state
@@ -224,15 +227,24 @@ def _fake_no_action_stage_e_run(
             account_snapshot = output_root / "paper_account_snapshot.csv"
             position_snapshot = output_root / "paper_position_snapshot.csv"
             current_state.write_text(json.dumps({"positions": {}}), encoding="utf-8")
-            account_snapshot.write_text("snapshot_date,position_count\n2026-07-02,%s\n" % position_count, encoding="utf-8")
-            position_snapshot.write_text("snapshot_date,symbol,shares\n", encoding="utf-8")
+            with account_snapshot.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS)
+                writer.writeheader()
+                writer.writerow({"account_id": ACCOUNT_ID, "snapshot_date": TRADE_DATE, "position_count": position_count})
+            with position_snapshot.open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(handle, fieldnames=PAPER_POSITION_SNAPSHOT_COLUMNS).writeheader()
             state = runbook_state.load_state(
                 runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
             )
             daily_plan_source = workspace / state.artifacts["daily_plan_json"]
             (output_root / "daily_action_plan_20260702.json").write_bytes(daily_plan_source.read_bytes())
             (output_root / "daily_action_plan_20260702.md").write_text("# verified no action plan\n", encoding="utf-8")
-            (output_root / "paper_execution_log.csv").write_text("date,source,symbol\n", encoding="utf-8")
+            with (output_root / "paper_execution_log.csv").open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(handle, fieldnames=PAPER_EXECUTION_LOG_COLUMNS).writeheader()
+            reviews = output_root / "reviews"
+            reviews.mkdir(exist_ok=True)
+            with (reviews / "paper_manual_review_log.csv").open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(handle, fieldnames=PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS).writeheader()
             payload = {
                 "runner_result": "PASS",
                 "status": "COMMITTED",
@@ -382,7 +394,7 @@ def test_no_action_stage_d_append_with_deleted_preview_file_is_blocked(tmp_path:
     (tmp_path / state.artifacts["stage_d_no_action_preview_json"]).unlink()
 
     _assert_append_blocked_without_progress(
-        tmp_path, monkeypatch, expected_reason="stage_d_no_action_preview_required"
+        tmp_path, monkeypatch, expected_reason="workspace_ref_missing"
     )
 
 
@@ -450,7 +462,7 @@ def test_no_action_stage_d_blocks_unexpected_review_artifact(tmp_path: Path) -> 
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
     assert result["runner_result"] == "BLOCKED"
-    assert result["reason"] == "unexpected_review_artifact_for_no_action"
+    assert result["reason"] == "no_action_write_artifact_present"
 
 
 def test_no_action_stage_d_blocks_unexpected_review_idempotency(tmp_path: Path) -> None:
@@ -463,7 +475,7 @@ def test_no_action_stage_d_blocks_unexpected_review_idempotency(tmp_path: Path) 
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
     assert result["runner_result"] == "BLOCKED"
-    assert result["reason"] == "unexpected_review_idempotency_for_no_action"
+    assert result["reason"] == "no_action_write_idempotency_present"
 
 
 def test_no_action_stage_d_blocks_hash_mismatch(tmp_path: Path) -> None:
@@ -536,7 +548,8 @@ def test_no_action_stage_e_executes_eod_and_leaves_stage_f_pending(
     assert len(calls) == 3
     assert (output_root / "paper_current_state_20260702.json").exists()
     assert (output_root / "paper_account_snapshot.csv").exists()
-    assert (output_root / "paper_position_snapshot.csv").read_text(encoding="utf-8") == "snapshot_date,symbol,shares\n"
+    with (output_root / "paper_position_snapshot.csv").open("r", encoding="utf-8", newline="") as handle:
+        assert next(csv.reader(handle)) == PAPER_POSITION_SNAPSHOT_COLUMNS
     state = runbook_state.load_state(Path(result["state_path"]))
     assert state.stage_status["E"] == "PASS"
     assert state.stage_status["F"] == "PENDING"
@@ -631,7 +644,7 @@ def test_no_action_stage_e_blocks_unexpected_review_artifact(tmp_path: Path, mon
     runbook_state.save_state(state, runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE))
 
     _assert_stage_e_blocked_without_progress(
-        workspace, monkeypatch, expected_reason="unexpected_review_artifact_for_no_action"
+        workspace, monkeypatch, expected_reason="no_action_write_artifact_present"
     )
 
 
@@ -644,7 +657,7 @@ def test_no_action_stage_e_blocks_unexpected_review_idempotency(tmp_path: Path, 
     runbook_state.save_state(state, runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE))
 
     _assert_stage_e_blocked_without_progress(
-        workspace, monkeypatch, expected_reason="unexpected_review_idempotency_for_no_action"
+        workspace, monkeypatch, expected_reason="no_action_write_idempotency_present"
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import csv
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,12 @@ from core.notion_account_keys import (
     build_account_snapshot_external_key,
     build_benchmark_report_external_key,
 )
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_execution_intent import build_execution_intent
+from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
+from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
+from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
+from scripts import runbook_completion_evidence
 from scripts import runbook_stage_runner
 from scripts import runbook_command_registry
 from scripts import runbook_result
@@ -31,12 +38,35 @@ def _write_json(path: Path, payload: object) -> Path:
 def _seed_stage_e_pass(workspace: Path, account_root: Path, *, omit_f: bool = False) -> Path:
     account_root.mkdir(parents=True, exist_ok=True)
     (account_root / "reports").mkdir(parents=True, exist_ok=True)
-    (account_root / "paper_account_snapshot.csv").write_text(
-        "account_id,snapshot_date,total_equity\n"
-        f"{ACCOUNT_ID},{TRADE_DATE},100000\n",
-        encoding="utf-8",
-    )
+    (account_root / "reviews").mkdir(parents=True, exist_ok=True)
+    with (account_root / "paper_account_snapshot.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS)
+        writer.writeheader()
+        writer.writerow({"account_id": ACCOUNT_ID, "snapshot_date": TRADE_DATE, "total_equity_market_value": 100000})
+    with (account_root / "paper_position_snapshot.csv").open("w", encoding="utf-8", newline="") as handle:
+        csv.DictWriter(handle, fieldnames=PAPER_POSITION_SNAPSHOT_COLUMNS).writeheader()
+    with (account_root / "paper_execution_log.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PAPER_EXECUTION_LOG_COLUMNS)
+        writer.writeheader()
+        writer.writerow({"date": TRADE_DATE, "symbol": "AAPL", "status": "COMMITTED"})
+    with (account_root / "reviews" / "paper_manual_review_log.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS)
+        writer.writeheader()
+        writer.writerow({"review_date": TRADE_DATE, "symbol": "AAPL", "question_id": "Q1", "question_text": "review", "is_actionable": "false", "manual_answer": "done", "review_status": "reviewed", "follow_up_needed": "false"})
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    for stage_id in ("A", "GATE1", "B", "C", "GATE2", "D"):
+        state = runbook_state.complete_stage(state, stage_id)
+    items = [{"symbol": "AAPL", "action": "BUY", "quantity": 1}]
+    plan_payload = {
+        "schema_version": "paper_daily_plan.v1", "account_id": ACCOUNT_ID,
+        "data_date": DATA_DATE, "trade_date": TRADE_DATE, "plan_date": TRADE_DATE,
+        "run_mode": "official", "official_run": True,
+        "generated_at": "2026-07-01T18:00:00+09:00", "fingerprints": {},
+        "items": items, "execution_intent": build_execution_intent(items),
+    }
+    plan_path = _write_json(workspace / "artifacts" / state.runbook_day_id / "daily_plan.json", plan_payload)
+    _write_json(account_root / "daily_action_plan_20260702.json", plan_payload)
+    state = runbook_state.record_artifact(state, "daily_plan_json", str(plan_path), workspace)
     commit_path = _write_json(
         workspace / "artifacts" / state.runbook_day_id / "stage_e" / "paper_eod_commit_20260702.json",
         {
@@ -55,6 +85,11 @@ def _seed_stage_e_pass(workspace: Path, account_root: Path, *, omit_f: bool = Fa
         },
     )
     state = runbook_state.record_artifact(state, "eod_commit_report_json", str(commit_path), workspace)
+    manifest = runbook_completion_evidence.build_runbook_completion_manifest(workspace, state, account_root)
+    manifest_path = _write_json(
+        workspace / "completion_manifests" / f"{state.runbook_day_id}.json", manifest
+    )
+    state = runbook_state.record_artifact(state, "completion_manifest_json", str(manifest_path), workspace)
     final_status_path = _write_json(
         workspace / "command_runs" / state.runbook_day_id / "final_status.json",
         runbook_result.create_command_result(
@@ -71,6 +106,7 @@ def _seed_stage_e_pass(workspace: Path, account_root: Path, *, omit_f: bool = Fa
                 "workflow_status": "REVIEW_DONE",
                 "completion_mode": "STANDARD",
                 "completion_proof": None,
+                "completion_manifest": manifest,
                 "read_only": True,
                 "write_executed": False,
                 "operation_write_executed": False,
@@ -473,7 +509,7 @@ def test_legacy_state_without_f_can_run_stage_f_after_e_pass(tmp_path: Path, mon
     assert len(calls) == 3
 
 
-def test_no_action_e_pass_state_can_run_stage_f(tmp_path: Path, monkeypatch) -> None:
+def test_partial_no_action_marker_cannot_reclassify_standard_completion(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
     workspace.mkdir()
@@ -491,8 +527,8 @@ def test_no_action_e_pass_state_can_run_stage_f(tmp_path: Path, monkeypatch) -> 
 
     result = _run_stage_f(workspace)
 
-    assert result["runner_result"] == "PASS"
-    assert len(calls) == 3
+    assert result["runner_result"] == "BLOCKED"
+    assert calls == []
 
 
 def test_stage_f_dry_run_renders_only_stage_f_commands_without_subprocess(tmp_path: Path, monkeypatch) -> None:
@@ -556,12 +592,12 @@ def test_stage_f_export_failure_does_not_modify_legacy_snapshot_or_run_benchmark
 
     result = _run_stage_f(workspace)
 
-    assert result["runner_result"] == "FAILED"
-    assert len(calls) == 2
+    assert result["runner_result"] == "BLOCKED"
+    assert calls == []
     assert snapshot_path.read_bytes() == before
     state = runbook_state.load_state(state_path)
     assert state.stage_status["E"] == "PASS"
-    assert state.stage_status["F"] == "FAILED"
+    assert state.stage_status["F"] == "BLOCKED"
 
 
 def test_stage_f_account_roots_and_artifacts_are_isolated(tmp_path: Path, monkeypatch) -> None:

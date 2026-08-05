@@ -59,11 +59,17 @@ def _is_completed(workspace: Path, state: runbook_state.RunbookState) -> bool:
     )
     if not state_complete:
         return False
-    if not runbook_stage_e_evidence.validate_stage_e_completion_evidence(workspace, state)["valid"]:
-        return False
     try:
-        account_root = build_paper_account_paths(state.frozen_context.account_id, create=False).root
+        account_root = build_paper_account_paths(
+            state.frozen_context.account_id, create=False
+        ).root.resolve(strict=False)
     except ValueError:
+        return False
+    if not account_root.is_dir():
+        return False
+    if not runbook_stage_e_evidence.validate_stage_e_completion_evidence(
+        workspace, state, account_root
+    )["valid"]:
         return False
     evidence = runbook_stage_f_evidence.validate_stage_f_completion_evidence(
         workspace,
@@ -125,7 +131,7 @@ def preview_rollover(
     *,
     confirm_paper_test: bool,
 ) -> dict[str, Any]:
-    workspace_path = Path(workspace)
+    workspace_path = Path(workspace).resolve(strict=False)
     account_id = str(account_id or "").strip()
     if not confirm_paper_test:
         return _blocked("paper_test_confirmation_required")

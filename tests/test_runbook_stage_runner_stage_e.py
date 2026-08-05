@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import json
+import csv
 from dataclasses import replace
 from pathlib import Path
 
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_execution_intent import build_execution_intent
+from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
+from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
+from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
+from scripts import runbook_completion_evidence
 from scripts import runbook_stage_runner
 from scripts import runbook_state
 
@@ -23,6 +30,24 @@ def _seed_stage_d_pass_state(workspace: Path, *, stage_d_pass: bool = True) -> r
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     for stage_id in ("A", "GATE1", "B", "C", "GATE2"):
         state = runbook_state.complete_stage(state, stage_id)
+    items = [{"symbol": "AAPL", "action": "BUY", "quantity": 1}]
+    daily_plan = _write_json(
+        workspace / "artifacts" / state.runbook_day_id / "daily_plan.json",
+        {
+            "schema_version": "paper_daily_plan.v1",
+            "account_id": ACCOUNT_ID,
+            "data_date": DATA_DATE,
+            "trade_date": TRADE_DATE,
+            "plan_date": TRADE_DATE,
+            "run_mode": "official",
+            "official_run": True,
+            "generated_at": "2026-07-01T18:00:00+09:00",
+            "fingerprints": {},
+            "items": items,
+            "execution_intent": build_execution_intent(items),
+        },
+    )
+    state = runbook_state.record_artifact(state, "daily_plan_json", daily_plan, workspace)
     verification = _write_json(
         workspace / "verification_runs" / state.runbook_day_id / "latest_stage_b_verification.json",
         {
@@ -114,6 +139,34 @@ def _fake_stage_e_run(
             commit_json.write_text(json.dumps(payload), encoding="utf-8")
             commit_md.write_text("# commit\n", encoding="utf-8")
         elif "paper_daily_ops.py" in joined and "status" in argv:
+            workspace = Path(argv[argv.index("--runbook-workspace") + 1])
+            state_ref = argv[argv.index("--runbook-state-json") + 1]
+            state = runbook_state.load_state(workspace / state_ref)
+            source_plan = workspace / state.artifacts["daily_plan_json"]
+            (repo_outputs / f"daily_action_plan_{TRADE_DATE.replace('-', '')}.json").parent.mkdir(parents=True, exist_ok=True)
+            (repo_outputs / f"daily_action_plan_{TRADE_DATE.replace('-', '')}.json").write_bytes(source_plan.read_bytes())
+            with (repo_outputs / "paper_execution_log.csv").open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=PAPER_EXECUTION_LOG_COLUMNS)
+                writer.writeheader()
+                writer.writerow({"date": TRADE_DATE, "symbol": "AAPL", "status": "COMMITTED"})
+            reviews = repo_outputs / "reviews"
+            reviews.mkdir(parents=True, exist_ok=True)
+            with (reviews / "paper_manual_review_log.csv").open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS)
+                writer.writeheader()
+                writer.writerow({
+                    "review_date": TRADE_DATE, "symbol": "AAPL", "question_id": "Q1",
+                    "question_text": "review", "is_actionable": "false", "manual_answer": "done",
+                    "review_status": "reviewed", "follow_up_needed": "false",
+                })
+            with (repo_outputs / "paper_account_snapshot.csv").open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS)
+                writer.writeheader()
+                writer.writerow({"account_id": ACCOUNT_ID, "snapshot_date": TRADE_DATE, "position_count": 1})
+            with (repo_outputs / "paper_position_snapshot.csv").open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=PAPER_POSITION_SNAPSHOT_COLUMNS)
+                writer.writeheader()
+                writer.writerow({"account_id": ACCOUNT_ID, "snapshot_date": TRADE_DATE, "symbol": "AAPL", "shares": 1})
             payload = {
                 "schema_version": "mfu_oper9_daily_ops_status.v1",
                 "overall_status": final_status,
@@ -123,6 +176,7 @@ def _fake_stage_e_run(
                 "workflow_status": "REVIEW_DONE",
                 "completion_mode": "STANDARD",
                 "completion_proof": None,
+                "account_root": str(repo_outputs),
                 "read_only": True,
                 "write_executed": False,
                 "operation_write_executed": False,
@@ -139,6 +193,9 @@ def _fake_stage_e_run(
                 "stages": [],
                 "operator_summary": {},
             }
+            payload["completion_manifest"] = runbook_completion_evidence.build_runbook_completion_manifest(
+                workspace, state, repo_outputs
+            )
         else:
             raise AssertionError(f"unexpected argv: {argv}")
         return {"exit_code": 0, "duration_ms": 10, "stdout": json.dumps(payload), "stderr": ""}
@@ -182,6 +239,29 @@ def test_stage_e_success_persists_pass_and_points_to_stage_f(tmp_path: Path, mon
     assert (workspace / "stage_runs" / state.runbook_day_id / "latest_D.json").exists()
     assert (workspace / "stage_runs" / state.runbook_day_id / "latest_D_PREVIEW.json").exists()
     assert all("--include-notion-read" not in argv for argv in calls)
+
+
+def test_relative_workspace_renders_absolute_workspace_and_relative_state_ref(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    repo_outputs = tmp_path / "repo_outputs"
+    workspace.mkdir()
+    _seed_stage_d_pass_state(workspace)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", _fake_stage_e_run(repo_outputs, calls))
+    monkeypatch.chdir(tmp_path)
+
+    result = runbook_stage_runner.run_stage_e(
+        Path("workspace"), ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+
+    assert result["runner_result"] == "PASS"
+    final_argv = calls[-1]
+    assert Path(final_argv[final_argv.index("--runbook-workspace") + 1]).is_absolute()
+    state_ref = final_argv[final_argv.index("--runbook-state-json") + 1]
+    assert state_ref == f"runbook_states/{ACCOUNT_ID}_{DATA_DATE}_{TRADE_DATE}.json"
+    assert "workspace/workspace" not in state_ref.replace("\\", "/")
 
 
 def test_stage_e_blocks_when_stage_d_not_pass(tmp_path: Path) -> None:

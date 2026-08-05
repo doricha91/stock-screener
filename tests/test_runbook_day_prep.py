@@ -15,6 +15,7 @@ from core.runbook_day_prep import (
     render_runbook_day_local,
 )
 from scripts import runbook_state
+from tests import test_runbook_day_rollover as rollover_fixtures
 
 
 ACCOUNT_ID = "paper_pilot_202606"
@@ -40,6 +41,8 @@ def _write_cmd(path: Path, lines: list[str]) -> None:
 
 
 def _complete_state(workspace: Path, data_date: str = "2026-07-01", trade_date: str = "2026-07-02") -> None:
+    rollover_fixtures._complete_state(workspace, data_date, trade_date)
+    return
     state = runbook_state.create_initial_state(ACCOUNT_ID, data_date, trade_date)
     account_root = workspace.parent / "outputs" / "paper_accounts" / ACCOUNT_ID
     snapshot = account_root / "paper_account_snapshot.csv"

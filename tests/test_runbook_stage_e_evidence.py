@@ -191,7 +191,7 @@ def _store_wrapper(workspace: Path, payload: dict[str, object]) -> runbook_state
     return runbook_state.record_artifact(state, "final_status_report_json", str(path), workspace)
 
 
-def test_actual_producer_payload_and_stored_wrapper_satisfy_validator(
+def test_actual_producer_payload_without_manifest_is_not_stored_completion(
     tmp_path: Path,
     actual_payload: dict[str, object],
 ) -> None:
@@ -199,10 +199,11 @@ def test_actual_producer_payload_and_stored_wrapper_satisfy_validator(
     assert runbook_stage_e_evidence.validate_final_status_payload(actual_payload, _state()) == []
 
     state = _store_wrapper(tmp_path / "workspace", actual_payload)
-    assert runbook_stage_e_evidence.validate_stored_final_status(tmp_path / "workspace", state) == {
-        "valid": True,
-        "blockers": [],
-    }
+    result = runbook_stage_e_evidence.validate_stored_final_status(
+        tmp_path / "workspace", state, Path(str(actual_payload["account_root"]))
+    )
+    assert result["valid"] is False
+    assert any("completion_manifest" in blocker for blocker in result["blockers"])
 
 
 def test_registry_cli_producer_wrapper_validator_contract(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -233,7 +234,9 @@ def test_registry_cli_producer_wrapper_validator_contract(tmp_path: Path, capsys
     payload = json.loads(capsys.readouterr().out)
     assert runbook_stage_e_evidence.validate_final_status_payload(payload, _state()) == []
     state = _store_wrapper(tmp_path / "workspace", payload)
-    assert runbook_stage_e_evidence.validate_stored_final_status(tmp_path / "workspace", state)["valid"] is True
+    result = runbook_stage_e_evidence.validate_stored_final_status(tmp_path / "workspace", state, root)
+    assert result["valid"] is False
+    assert any("completion_manifest" in blocker for blocker in result["blockers"])
 
 
 @pytest.mark.parametrize(
@@ -317,7 +320,9 @@ def test_wrapper_pass_cannot_hide_failed_raw_payload(tmp_path: Path, actual_payl
     payload = deepcopy(actual_payload)
     payload["overall_status"] = "FAILED"
     state = _store_wrapper(tmp_path / "workspace", payload)
-    result = runbook_stage_e_evidence.validate_stored_final_status(tmp_path / "workspace", state)
+    result = runbook_stage_e_evidence.validate_stored_final_status(
+        tmp_path / "workspace", state, Path(str(actual_payload["account_root"]))
+    )
     assert result["valid"] is False
     assert any("overall_status" in blocker for blocker in result["blockers"])
 
@@ -355,7 +360,7 @@ def test_terminal_payload_with_next_command_fails_closed(actual_payload: dict[st
     assert runbook_stage_e_evidence.validate_final_status_payload(payload, _state())
 
 
-def test_rollover_accepts_actual_producer_wrapper_without_writes(
+def test_rollover_rejects_actual_producer_wrapper_without_manifest_without_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     actual_payload: dict[str, object],
@@ -379,6 +384,6 @@ def test_rollover_accepts_actual_producer_wrapper_without_writes(
 
     result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
 
-    assert result["runner_result"] == "PASS"
-    assert result["safe_to_prepare"] is True
+    assert result["runner_result"] == "BLOCKED"
+    assert result["safe_to_prepare"] is False
     assert {path: path.read_bytes() for path in workspace.rglob("*") if path.is_file()} == before
