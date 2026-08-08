@@ -1,3 +1,4 @@
+import csv
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -8,6 +9,7 @@ import pytest
 import core.daily_plan_generator as daily_plan_generator
 import scripts.run_paper_daily_plan as run_paper_daily_plan
 from core.paper_account_paths import build_paper_account_paths
+from core.paper_account_state import build_paper_state_from_trades
 from core.paths import (
     front_daily_action_plan_path,
     paper_config_snapshot_archive_dir,
@@ -46,6 +48,65 @@ def _empty_state(cash: float = 100000.0) -> CurrentPortfolioState:
         highest_price_meta={},
         hedge_symbols=[],
     )
+
+
+def _write_account_snapshot(
+    account_paths,
+    *,
+    initial_cash: str,
+    cash: str,
+    snapshot_date: str = "2026-06-05",
+) -> None:
+    account_paths.account_snapshot_path.write_text(
+        "snapshot_date,initial_cash,cash,currency\n"
+        f"{snapshot_date},{initial_cash},{cash},USD\n",
+        encoding="utf-8",
+    )
+
+
+def _capture_non_default_provider_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    initial_cash: str,
+    cash: str,
+) -> dict:
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    account_paths.execution_log_path.write_text(
+        "trade_id,date,symbol,side,shares,price,gross_amount\n",
+        encoding="utf-8",
+    )
+    _write_account_snapshot(
+        account_paths,
+        initial_cash=initial_cash,
+        cash=cash,
+    )
+    provider_calls: dict = {}
+
+    def _fake_provider(date_str: str, **kwargs):
+        provider_calls.update({"date_str": date_str, **kwargs})
+        return _empty_state(cash=kwargs["initial_cash"])
+
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "load_official_paper_state_for_daily_plan",
+        _fake_provider,
+    )
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "generate_daily_plan",
+        lambda **kwargs: str(kwargs["output_path"]),
+    )
+
+    run_paper_daily_plan.run_paper_daily_plan(
+        "2026-06-05",
+        account_paths=account_paths,
+    )
+    return provider_calls
 
 
 def test_resolve_daily_plan_output_path_defaults_to_front_path():
@@ -217,10 +278,167 @@ def test_run_paper_daily_plan_default_account_keeps_default_state_loader(monkeyp
         "generate_daily_plan",
         lambda **kwargs: str(kwargs["output_path"]),
     )
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "_read_account_initial_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("paper_default must not read an account snapshot seed")
+        ),
+    )
 
     run_paper_daily_plan.run_paper_daily_plan("20260509")
 
     assert provider_calls == {"date_str": "2026-05-09"}
+
+
+def test_read_account_initial_snapshot_uses_initial_cash_not_post_trade_cash(tmp_path: Path):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    _write_account_snapshot(
+        account_paths,
+        initial_cash="100000.00",
+        cash="80160.55",
+    )
+
+    starting_cash, currency = run_paper_daily_plan._read_account_initial_snapshot(account_paths)
+
+    assert starting_cash == 100000.0
+    assert starting_cash != 80160.55
+    assert currency == "USD"
+
+
+def test_non_default_daily_plan_passes_initial_cash_to_full_ledger_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    provider_calls = _capture_non_default_provider_seed(
+        monkeypatch,
+        tmp_path,
+        initial_cash="100000.00",
+        cash="80160.55",
+    )
+
+    assert provider_calls["initial_cash"] == 100000.0
+
+
+def test_non_default_daily_plan_preserves_custom_initial_cash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    provider_calls = _capture_non_default_provider_seed(
+        monkeypatch,
+        tmp_path,
+        initial_cash="250000.00",
+        cash="210000.00",
+    )
+
+    assert provider_calls["initial_cash"] == 250000.0
+
+
+def test_initial_cash_full_ledger_replay_matches_expected_snapshot_and_current_state(tmp_path: Path):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    _write_account_snapshot(
+        account_paths,
+        initial_cash="1000.00",
+        cash="400.00",
+    )
+    account_paths.execution_log_path.write_text(
+        "trade_id,date,symbol,side,shares,price,gross_amount\n"
+        "t1,2026-06-05,AAA,BUY,6,100.00,600.00\n"
+        "t2,2026-06-08,BBB,BUY,5,80.00,400.00\n",
+        encoding="utf-8",
+    )
+    with account_paths.execution_log_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        trade_rows = list(csv.DictReader(handle))
+
+    starting_cash, currency = run_paper_daily_plan._read_account_initial_snapshot(account_paths)
+    state = build_paper_state_from_trades(
+        trade_rows,
+        initial_cash=starting_cash,
+        currency=currency,
+    )
+
+    assert state.cash == 0.0
+    assert sorted(state.positions) == ["AAA", "BBB"]
+    assert {symbol: position.shares for symbol, position in state.positions.items()} == {
+        "AAA": 6,
+        "BBB": 5,
+    }
+    assert len(state.applied_trade_ids) == 2
+    with pytest.raises(ValueError, match="insufficient cash for BUY"):
+        build_paper_state_from_trades(trade_rows, initial_cash=400.0, currency="USD")
+
+
+def test_non_default_snapshot_missing_initial_cash_fails_closed(tmp_path: Path):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    account_paths.account_snapshot_path.write_text(
+        "snapshot_date,cash,currency\n"
+        "2026-06-05,80160.55,USD\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        run_paper_daily_plan._read_account_initial_snapshot(account_paths)
+
+    message = str(exc_info.value)
+    assert "paper_pilot_test" in message
+    assert "paper_account_snapshot.csv" in message
+    assert "initial_cash" in message
+    assert "missing" in message
+
+
+def test_non_default_snapshot_file_missing_fails_closed(tmp_path: Path):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        run_paper_daily_plan._read_account_initial_snapshot(account_paths)
+
+    message = str(exc_info.value)
+    assert "paper_pilot_test" in message
+    assert "paper_account_snapshot.csv" in message
+    assert "initial_cash" in message
+    assert "missing" in message
+
+
+@pytest.mark.parametrize("initial_cash", ["", "not-a-number", "0", "-1", "nan", "inf"])
+def test_non_default_snapshot_invalid_initial_cash_fails_closed(
+    tmp_path: Path,
+    initial_cash: str,
+):
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / f"paper_pilot_test_{initial_cash or 'blank'}",
+        create=True,
+    )
+    _write_account_snapshot(
+        account_paths,
+        initial_cash=initial_cash,
+        cash="80160.55",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        run_paper_daily_plan._read_account_initial_snapshot(account_paths)
+
+    message = str(exc_info.value)
+    assert "paper_pilot_test" in message
+    assert "paper_account_snapshot.csv" in message
+    assert "initial_cash" in message
+    assert "missing" in message or "invalid" in message
 
 
 def test_run_paper_daily_plan_non_default_uses_account_execution_log(
@@ -237,8 +455,8 @@ def test_run_paper_daily_plan_non_default_uses_account_execution_log(
         encoding="utf-8",
     )
     account_paths.account_snapshot_path.write_text(
-        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
-        "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
+        "snapshot_date,initial_cash,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+        "2026-06-05,100000.00,100000.00,100000.00,0.00,0,,USD\n",
         encoding="utf-8",
     )
     account_paths.current_state_snapshot_path("20260605").write_text(
@@ -295,8 +513,8 @@ def test_run_paper_daily_plan_explicit_dates_use_trade_date_artifacts_and_data_d
         encoding="utf-8",
     )
     account_paths.account_snapshot_path.write_text(
-        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
-        "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
+        "snapshot_date,initial_cash,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+        "2026-06-05,100000.00,100000.00,100000.00,0.00,0,,USD\n",
         encoding="utf-8",
     )
     account_paths.current_state_snapshot_path("20260605").write_text(

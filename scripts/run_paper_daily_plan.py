@@ -1,5 +1,6 @@
 import argparse
 import csv
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -41,21 +42,51 @@ def _validate_explicit_dates(data_date: str, trade_date: str) -> tuple[str, str]
     return normalized_data_date, normalized_trade_date
 
 
-def _read_account_initial_snapshot(account_paths: PaperAccountPaths) -> tuple[float, str] | None:
+def _read_account_initial_snapshot(account_paths: PaperAccountPaths) -> tuple[float, str]:
     if not account_paths.account_snapshot_path.exists():
-        return None
+        raise ValueError(
+            "Non-default account initial_cash is missing: "
+            f"account_id={account_paths.account_id} "
+            f"snapshot={account_paths.account_snapshot_path}"
+        )
 
     with account_paths.account_snapshot_path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
 
     dated_rows = [row for row in rows if str(row.get("snapshot_date") or "").strip()]
     if not dated_rows:
-        return None
+        raise ValueError(
+            "Non-default account initial_cash is missing because no dated snapshot row exists: "
+            f"account_id={account_paths.account_id} "
+            f"snapshot={account_paths.account_snapshot_path}"
+        )
 
     initial_row = sorted(dated_rows, key=lambda row: str(row.get("snapshot_date") or ""))[0]
-    cash_raw = initial_row.get("cash") or initial_row.get("total_equity_market_value") or 100000.0
+    initial_cash_raw = str(initial_row.get("initial_cash") or "").strip()
+    if not initial_cash_raw:
+        raise ValueError(
+            "Non-default account initial_cash is missing: "
+            f"account_id={account_paths.account_id} "
+            f"snapshot={account_paths.account_snapshot_path}"
+        )
+    try:
+        initial_cash = float(initial_cash_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Non-default account initial_cash is invalid: "
+            f"account_id={account_paths.account_id} "
+            f"snapshot={account_paths.account_snapshot_path} "
+            f"value={initial_cash_raw!r}"
+        ) from exc
+    if not math.isfinite(initial_cash) or initial_cash <= 0:
+        raise ValueError(
+            "Non-default account initial_cash is invalid: "
+            f"account_id={account_paths.account_id} "
+            f"snapshot={account_paths.account_snapshot_path} "
+            f"value={initial_cash_raw!r}"
+        )
     currency = str(initial_row.get("currency") or "USD").strip() or "USD"
-    return float(cash_raw), currency
+    return initial_cash, currency
 
 
 def _account_snapshot_dates(account_paths: PaperAccountPaths) -> list[str]:
@@ -136,9 +167,7 @@ def run_paper_daily_plan(
                 f"for account_id={account_paths.account_id}"
             )
         state_log_path = account_paths.execution_log_path
-        initial_snapshot = _read_account_initial_snapshot(account_paths)
-        if initial_snapshot is not None:
-            initial_cash, currency = initial_snapshot
+        initial_cash, currency = _read_account_initial_snapshot(account_paths)
 
     state_cutoff_date = normalized_data_date or normalized_db_date
     if state_log_path is None:
