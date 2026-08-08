@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ from scripts import runbook_command_registry as registry
 from scripts import runbook_completion_evidence
 from scripts import runbook_gate_checker
 from scripts import runbook_result
+from scripts import runbook_stage_b_recovery
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
@@ -527,6 +529,27 @@ def run_stage_b(
     except ValueError as exc:
         return _blocked_stage_b_payload(str(exc), dry_run, confirm_paper_test)
 
+    if _stage_b_sync_resume_candidate(state):
+        proof = runbook_stage_b_recovery.validate_stage_b_commit_proof(state=state, workspace=workspace)
+        if not proof["valid"]:
+            return {
+                **_blocked_stage_b_payload(str(proof["reason"]), dry_run, confirm_paper_test),
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+                "rendered_commands": [],
+            }
+        return _run_stage_b_sync_only(
+            workspace=workspace,
+            state_path=state_path,
+            state=state,
+            proof=proof,
+            dry_run=dry_run,
+            confirm_paper_test=confirm_paper_test,
+            repo_root=repo_root,
+            timeout_sec=timeout_sec,
+            commands=commands,
+        )
+
     precondition_error = _stage_b_precondition_error(state)
     if precondition_error:
         state = runbook_state.block_stage(state, STAGE_B_ID, precondition_error)
@@ -602,22 +625,23 @@ def run_stage_b(
     for command in sequence:
         if command.command_key == "execution_commit" and not dry_run:
             try:
-                state, idempotency_key = runbook_state.reserve_idempotency(
-                    state,
-                    command.command_key,
-                    command.step_id,
-                    STAGE_B_ID,
-                    {
-                        "execution_preview_json": state.artifacts.get("execution_preview_json", ""),
-                        "execution_reconciliation_preview_json": state.artifacts.get(
-                            "execution_reconciliation_preview_json", ""
-                        ),
-                    },
-                    workspace,
+                logical = runbook_stage_b_recovery.build_stage_b_logical_operation(state, workspace)
+                attempt_id = uuid.uuid4().hex
+                _, preseal_ref = runbook_stage_b_recovery.write_precommit_evidence(
+                    workspace=workspace,
+                    state_path=state_path,
+                    state=state,
+                    logical=logical,
+                    attempt_id=attempt_id,
                 )
-                state = runbook_state.mark_idempotency_running(state, idempotency_key)
+                state, idempotency_key = runbook_state.reserve_stage_b_execution_attempt(
+                    state,
+                    logical_operation_id=logical["logical_operation_id"],
+                    attempt_id=attempt_id,
+                    precommit_evidence_ref=preseal_ref,
+                )
                 runbook_state.save_state(state, state_path)
-            except ValueError as exc:
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
                 command_result = _blocked_command_result(
                     state,
                     workspace,
@@ -713,11 +737,19 @@ def run_stage_b(
             continue
 
         if command.command_key == "execution_commit" and idempotency_key:
-            state = runbook_state.mark_idempotency_failed(
-                state,
-                idempotency_key,
-                f"execution_commit_{runner_result.lower()}",
-            )
+            process = command_result.get("process") if isinstance(command_result.get("process"), dict) else {}
+            if process.get("timed_out") is True or process.get("exit_code") == 124:
+                state = runbook_state.mark_idempotency_unknown_after_crash(
+                    state,
+                    idempotency_key,
+                    "execution_commit_ambiguous_outcome",
+                )
+            else:
+                state = runbook_state.mark_idempotency_failed(
+                    state,
+                    idempotency_key,
+                    f"execution_commit_{runner_result.lower()}",
+                )
         if runner_result == "BLOCKED":
             stage_result = "BLOCKED"
             state = runbook_state.block_stage(
@@ -789,6 +821,150 @@ def run_stage_b(
         "dry_run": dry_run,
         "action_mode": "EXECUTION",
         "execution_required": True,
+    }
+
+
+def _run_stage_b_sync_only(
+    *,
+    workspace: Path,
+    state_path: Path,
+    state: RunbookState,
+    proof: dict[str, Any],
+    dry_run: bool,
+    confirm_paper_test: bool,
+    repo_root: Path,
+    timeout_sec: int,
+    commands: Sequence[RunbookCommand] | None,
+) -> dict[str, Any]:
+    command_by_key = {command.command_key: command for command in get_stage_b_commands(commands)}
+    sync_command = command_by_key["sync_execution_status"]
+    rendered_commands = [
+        {"command_key": "execution_preview", "argv": []},
+        {"command_key": "execution_reconciliation_preview", "argv": []},
+        {"command_key": "execution_commit", "argv": []},
+    ]
+    command_results: list[dict[str, Any]] = []
+    state = runbook_state.start_stage(state, STAGE_B_ID)
+    runbook_state.save_state(state, state_path)
+    try:
+        command_result, log_text, rendered_argv = _run_stage_b_command(
+            state,
+            workspace,
+            repo_root,
+            sync_command,
+            dry_run,
+            timeout_sec,
+        )
+        rendered_commands.append({"command_key": sync_command.command_key, "argv": rendered_argv})
+        command_json_path, command_txt_path = _write_command_result_and_log(
+            workspace,
+            state,
+            sync_command,
+            command_result,
+            log_text,
+        )
+        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+        command_results.append(command_result)
+    except Exception as exc:
+        rendered_commands.append({"command_key": sync_command.command_key, "argv": []})
+        command_result = runbook_result.create_command_result(
+            state,
+            sync_command,
+            "FAILED",
+            f"Stage B sync-only command raised {type(exc).__name__}.",
+            raw_payload={},
+            blockers=[str(exc)],
+            process={"executed": False, "exit_code": None, "duration_ms": None},
+            workspace=workspace,
+        )
+        command_json_path, command_txt_path = _write_command_result_and_log(
+            workspace,
+            state,
+            sync_command,
+            command_result,
+            f"exception: {type(exc).__name__}: {exc}\n",
+        )
+        command_result = json.loads(command_json_path.read_text(encoding="utf-8"))
+        command_results.append(command_result)
+
+    runner_result = command_result["runner_result"]
+    if runner_result == "PASS":
+        state = runbook_state.complete_step(
+            state,
+            sync_command.step_id,
+            STAGE_B_ID,
+            command_result.get("outputs", {}).get("artifact_refs", {}),
+            workspace,
+        )
+        state = runbook_state.complete_stage(state, STAGE_B_ID)
+        stage_result = "PASS"
+    elif runner_result == "BLOCKED":
+        state = runbook_state.block_stage(
+            state,
+            STAGE_B_ID,
+            "stage_b_step_blocked:sync_execution_status",
+            {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+        )
+        stage_result = "BLOCKED"
+    else:
+        state = runbook_state.fail_stage(
+            state,
+            STAGE_B_ID,
+            "stage_b_step_failed:sync_execution_status",
+            {"command_result_json": str(command_json_path), "command_result_txt": str(command_txt_path)},
+        )
+        stage_result = "FAILED"
+    runbook_state.save_state(state, state_path)
+
+    stage_summary = runbook_result.create_stage_summary(
+        state,
+        STAGE_B_ID,
+        command_results,
+        next_required_action=(
+            "Proceed to Stage B Verify, then Stage C review prep."
+            if stage_result == "PASS"
+            else "Inspect Stage B sync result; execution commit remains immutable."
+        ),
+        next_stage="GATE2" if stage_result == "PASS" else None,
+    )
+    stage_summary["raw_payload"] = {
+        "action_mode": "EXECUTION",
+        "execution_required": True,
+        "sync_only_resume": True,
+        "execution_commit_report_json": state.artifacts.get("execution_commit_report_json"),
+        "execution_status_sync_report": state.artifacts.get("execution_status_sync_report"),
+        "execution_status_sync_report_json": state.artifacts.get("execution_status_sync_report_json"),
+        "commit_proof": {
+            "report_sha256": proof.get("report_sha256"),
+            "committed_row_count": proof.get("committed_row_count"),
+            "logical_operation_id": proof.get("logical_operation_id"),
+        },
+    }
+    stage_summary_json, stage_summary_txt = runbook_result.write_stage_summary(workspace, state, stage_summary)
+    stage_summary_paths = runbook_result.get_stage_summary_paths(
+        workspace,
+        state.runbook_day_id,
+        STAGE_B_ID,
+        timestamp=Path(stage_summary_json).name.rsplit("_", 1)[0],
+    )
+    return {
+        "runner_result": stage_summary["runner_result"],
+        "stage_id": STAGE_B_ID,
+        "runbook_day_id": state.runbook_day_id,
+        "state_path": str(state_path),
+        "stage_summary_json": str(stage_summary_json),
+        "stage_summary_txt": str(stage_summary_txt),
+        "latest_stage_summary_json": str(stage_summary_paths["latest_json"]),
+        "latest_stage_summary_txt": str(stage_summary_paths["latest_txt"]),
+        "command_results": [
+            step["result_json_ref"] for step in stage_summary["steps"] if step.get("result_json_ref")
+        ],
+        "rendered_commands": rendered_commands,
+        "paper_test_confirmed": confirm_paper_test,
+        "dry_run": dry_run,
+        "action_mode": "EXECUTION",
+        "execution_required": True,
+        "sync_only_resume": True,
     }
 
 
@@ -2444,10 +2620,32 @@ def _stage_b_precondition_error(state: RunbookState) -> str | None:
         return "active_last_error"
     if state.stage_status.get(STAGE_B_ID) == "PASS":
         return "stage_b_already_pass"
+    failed_execution = any(
+        isinstance(record, dict)
+        and record.get("command_key") == "execution_commit"
+        and record.get("status") == "FAILED"
+        for record in state.idempotency_records.values()
+    )
+    if failed_execution and not runbook_state.active_stage_b_recovery_authorization(state):
+        return "stage_b_retry_authorization_required"
     for record in state.idempotency_records.values():
         if record.get("command_key") == "execution_commit" and record.get("status") == "PASS":
             return "execution_commit_already_recorded"
     return None
+
+
+def _stage_b_sync_resume_candidate(state: RunbookState) -> bool:
+    reason = ""
+    if isinstance(state.last_error, dict):
+        reason = str(state.last_error.get("reason") or "")
+    if "sync_execution_status" not in reason or state.stage_status.get(STAGE_B_ID) == "PASS":
+        return False
+    return any(
+        isinstance(record, dict)
+        and record.get("command_key") == "execution_commit"
+        and record.get("status") == "PASS"
+        for record in state.idempotency_records.values()
+    )
 
 
 def _stage_c_precondition_error(state: RunbookState, workspace: Path) -> str | None:
@@ -2782,6 +2980,12 @@ def _recover_stale_stage_b_running(state: RunbookState) -> tuple[RunbookState, s
     for record in state.idempotency_records.values():
         if record.get("command_key") == "execution_commit" and record.get("status") == "PASS":
             return state, "stage_b_running_with_committed_idempotency"
+        if (
+            record.get("command_key") == "execution_commit"
+            and record.get("logical_operation_id")
+            and record.get("status") in {"RESERVED", "RUNNING", "UNKNOWN_AFTER_CRASH", "BLOCKED"}
+        ):
+            return state, "stage_b_running_with_ambiguous_strict_write"
     timestamp = _next_recovery_timestamp(state)
     stage_status = dict(state.stage_status)
     stage_status[STAGE_B_ID] = "PENDING"
@@ -2877,6 +3081,7 @@ def _run_stage_b_command(
         "executed": True,
         "exit_code": exit_code,
         "duration_ms": execution.get("duration_ms"),
+        "timed_out": execution.get("timed_out") is True,
     }
     if exit_code != 0:
         result = runbook_result.create_command_result(

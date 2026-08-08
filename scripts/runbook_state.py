@@ -56,6 +56,7 @@ class RunbookState:
     stage_status: dict[str, str]
     artifacts: dict[str, Any] = field(default_factory=dict)
     idempotency_records: dict[str, Any] = field(default_factory=dict)
+    recovery_authorizations: dict[str, Any] = field(default_factory=dict)
     last_error: dict[str, Any] | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
 
@@ -131,6 +132,7 @@ def create_initial_state(
         stage_status={stage_id: "PENDING" for stage_id in STAGE_IDS},
         artifacts={},
         idempotency_records={},
+        recovery_authorizations={},
         last_error=None,
         history=[],
     )
@@ -162,6 +164,11 @@ def _state_from_dict(data: dict[str, Any]) -> RunbookState:
         idempotency_records=(
             dict(data.get("idempotency_records", {}))
             if isinstance(data.get("idempotency_records", {}), dict)
+            else {}
+        ),
+        recovery_authorizations=(
+            dict(data.get("recovery_authorizations", {}))
+            if isinstance(data.get("recovery_authorizations", {}), dict)
             else {}
         ),
         last_error=data.get("last_error") if isinstance(data.get("last_error"), dict) or data.get("last_error") is None else {"value": data.get("last_error")},
@@ -268,6 +275,35 @@ def validate_state(state: RunbookState) -> list[str]:
             artifact_refs = record.get("artifact_refs", {})
             if artifact_refs is not None and not isinstance(artifact_refs, dict):
                 errors.append(f"idempotency_records.{record_key}.artifact_refs must be an object")
+    if not isinstance(state.recovery_authorizations, dict):
+        errors.append("recovery_authorizations must be an object")
+    else:
+        for authorization_id, authorization in state.recovery_authorizations.items():
+            prefix = f"recovery_authorizations.{authorization_id}"
+            if not isinstance(authorization, dict):
+                errors.append(f"{prefix} must be an object")
+                continue
+            if authorization.get("authorization_id") != authorization_id:
+                errors.append(f"{prefix}.authorization_id must match record key")
+            for field_name in (
+                "authorization_id",
+                "stage_id",
+                "logical_operation_id",
+                "failed_idempotency_key",
+                "assessment_path",
+                "assessment_sha256",
+                "state_before_sha256",
+                "operator",
+                "reason",
+                "issued_at",
+                "status",
+            ):
+                if field_name not in authorization:
+                    errors.append(f"{prefix}.{field_name} is required")
+            if authorization.get("stage_id") != "B":
+                errors.append(f"{prefix}.stage_id must be B")
+            if authorization.get("status") not in {"AUTHORIZED", "CONSUMED", "INVALIDATED"}:
+                errors.append(f"{prefix}.status is invalid")
     if not isinstance(state.history, list):
         errors.append("history must be a list")
     return errors
@@ -479,6 +515,14 @@ def mark_idempotency_blocked(
     return update_idempotency_record(state, idempotency_key, "BLOCKED", notes=reason)
 
 
+def mark_idempotency_unknown_after_crash(
+    state: RunbookState,
+    idempotency_key: str,
+    reason: str,
+) -> RunbookState:
+    return update_idempotency_record(state, idempotency_key, "UNKNOWN_AFTER_CRASH", notes=reason)
+
+
 def consume_idempotency_record(state: RunbookState, idempotency_key: str) -> RunbookState:
     return update_idempotency_record(state, idempotency_key, "CONSUMED")
 
@@ -510,6 +554,248 @@ def block_idempotency_record(
 
 def _append_history(state: RunbookState, event: dict[str, Any]) -> list[dict[str, Any]]:
     return [*state.history, event]
+
+
+def active_stage_b_recovery_authorization(state: RunbookState) -> dict[str, Any] | None:
+    active = [
+        authorization
+        for authorization in state.recovery_authorizations.values()
+        if isinstance(authorization, dict)
+        and authorization.get("stage_id") == "B"
+        and authorization.get("status") == "AUTHORIZED"
+    ]
+    if len(active) > 1:
+        raise ValueError("multiple_active_stage_b_recovery_authorizations")
+    return dict(active[0]) if active else None
+
+
+def authorize_stage_b_retry(
+    state: RunbookState,
+    *,
+    authorization_id: str,
+    logical_operation_id: str,
+    failed_idempotency_key: str,
+    assessment_path: str,
+    assessment_sha256: str,
+    state_before_sha256: str,
+    operator: str,
+    reason: str,
+) -> RunbookState:
+    if state.stage_status.get("A") != "PASS" or state.stage_status.get("GATE1") != "PASS":
+        raise ValueError("stage_b_recovery_prerequisites_not_pass")
+    if state.current_stage != "B" or state.current_status != "FAILED" or state.stage_status.get("B") != "FAILED":
+        raise ValueError("stage_b_failed_state_required")
+    failed_record = state.idempotency_records.get(failed_idempotency_key)
+    if not isinstance(failed_record, dict) or failed_record.get("status") != "FAILED":
+        raise ValueError("failed_idempotency_record_required")
+    if failed_record.get("stage_id") != "B" or failed_record.get("step_id") != 8:
+        raise ValueError("failed_idempotency_record_context_mismatch")
+    if failed_record.get("command_key") != "execution_commit":
+        raise ValueError("failed_idempotency_record_context_mismatch")
+    if not all(
+        str(value or "").strip()
+        for value in (
+            authorization_id,
+            logical_operation_id,
+            assessment_path,
+            assessment_sha256,
+            state_before_sha256,
+            operator,
+            reason,
+        )
+    ):
+        raise ValueError("stage_b_recovery_authorization_fields_required")
+    if authorization_id in state.recovery_authorizations:
+        raise ValueError("duplicate_recovery_authorization_id")
+    if active_stage_b_recovery_authorization(state):
+        raise ValueError("active_recovery_authorization_exists")
+    if any(
+        isinstance(item, dict) and item.get("assessment_sha256") == assessment_sha256
+        for item in state.recovery_authorizations.values()
+    ):
+        raise ValueError("assessment_already_authorized")
+    if any(
+        isinstance(record, dict)
+        and record.get("command_key") == "execution_commit"
+        and record.get("logical_operation_id") == logical_operation_id
+        and record.get("status") in {"PASS", "RUNNING", "RESERVED", "UNKNOWN_AFTER_CRASH", "BLOCKED"}
+        for record in state.idempotency_records.values()
+    ):
+        raise ValueError("logical_operation_not_recoverable")
+
+    timestamp = _next_updated_at(state)
+    authorization = {
+        "authorization_id": authorization_id,
+        "stage_id": "B",
+        "logical_operation_id": logical_operation_id,
+        "failed_idempotency_key": failed_idempotency_key,
+        "assessment_path": assessment_path,
+        "assessment_sha256": assessment_sha256,
+        "state_before_sha256": state_before_sha256,
+        "operator": operator,
+        "reason": reason,
+        "issued_at": timestamp,
+        "consumed_at": None,
+        "status": "AUTHORIZED",
+    }
+    authorizations = dict(state.recovery_authorizations)
+    authorizations[authorization_id] = authorization
+    stage_status = dict(state.stage_status)
+    stage_status["B"] = "PENDING"
+    common_event = {
+        "stage_id": "B",
+        "step_id": 8,
+        "logical_operation_id": logical_operation_id,
+        "failed_idempotency_key": failed_idempotency_key,
+        "authorization_id": authorization_id,
+        "assessment_sha256": assessment_sha256,
+        "operator": operator,
+        "reason": reason,
+        "created_at": timestamp,
+    }
+    return replace(
+        state,
+        updated_at=timestamp,
+        current_stage="B",
+        current_status="PENDING",
+        stage_status=stage_status,
+        recovery_authorizations=authorizations,
+        last_error=None,
+        history=[
+            *state.history,
+            {**common_event, "event_type": "stage_b_recovery_assessed", "status": "PASS"},
+            {**common_event, "event_type": "stage_b_retry_authorized", "status": "AUTHORIZED"},
+        ],
+    )
+
+
+def reserve_stage_b_execution_attempt(
+    state: RunbookState,
+    *,
+    logical_operation_id: str,
+    attempt_id: str,
+    precommit_evidence_ref: str,
+) -> tuple[RunbookState, str]:
+    logical_operation_id = str(logical_operation_id or "").strip()
+    attempt_id = str(attempt_id or "").strip()
+    if not logical_operation_id.startswith("sha256:") or len(logical_operation_id) != 71:
+        raise ValueError("invalid_logical_operation_id")
+    if not attempt_id or not precommit_evidence_ref:
+        raise ValueError("stage_b_attempt_evidence_required")
+    logical_sha = logical_operation_id.split(":", 1)[1]
+    related_records = [
+        record
+        for record in state.idempotency_records.values()
+        if isinstance(record, dict)
+        and record.get("command_key") == "execution_commit"
+        and record.get("logical_operation_id") == logical_operation_id
+    ]
+    if any(record.get("status") == "PASS" for record in related_records):
+        raise ValueError("duplicate_logical_execution_operation")
+    if any(
+        record.get("status") in {"RESERVED", "RUNNING", "UNKNOWN_AFTER_CRASH", "BLOCKED"}
+        for record in related_records
+    ):
+        raise ValueError("logical_execution_operation_needs_recovery")
+
+    authorization = active_stage_b_recovery_authorization(state)
+    failed_related = [record for record in related_records if record.get("status") == "FAILED"]
+    has_any_failed_execution = any(
+        isinstance(record, dict)
+        and record.get("command_key") == "execution_commit"
+        and record.get("status") == "FAILED"
+        for record in state.idempotency_records.values()
+    )
+    if failed_related or has_any_failed_execution:
+        if not authorization:
+            raise ValueError("stage_b_retry_authorization_required")
+        if authorization.get("logical_operation_id") != logical_operation_id:
+            raise ValueError("recovery_authorization_logical_operation_mismatch")
+        failed_key = str(authorization.get("failed_idempotency_key") or "")
+        failed_record = state.idempotency_records.get(failed_key)
+        if not isinstance(failed_record, dict) or failed_record.get("status") != "FAILED":
+            raise ValueError("authorized_failed_idempotency_record_changed")
+    elif authorization:
+        if authorization.get("logical_operation_id") != logical_operation_id:
+            raise ValueError("recovery_authorization_logical_operation_mismatch")
+
+    idempotency_key = (
+        f"{state.runbook_day_id}:execution_commit:"
+        f"logical_operation_sha256={logical_sha}:attempt_id={_safe_id_part(attempt_id)}"
+    )
+    assert_not_duplicate(state, idempotency_key)
+    timestamp = _next_updated_at(state)
+    authorization_id = str(authorization.get("authorization_id")) if authorization else None
+    record = {
+        "idempotency_key": idempotency_key,
+        "command_key": "execution_commit",
+        "step_id": 8,
+        "stage_id": "B",
+        "status": "RUNNING",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "artifact_refs": {
+            "logical_operation_sha256": logical_sha,
+            "precommit_evidence_json": precommit_evidence_ref,
+        },
+        "result_ref": None,
+        "notes": "Stage B logical execution attempt reserved and running.",
+        "logical_operation_id": logical_operation_id,
+        "attempt_id": attempt_id,
+        "recovery_authorization_id": authorization_id,
+    }
+    records = dict(state.idempotency_records)
+    records[idempotency_key] = record
+    artifacts = dict(state.artifacts)
+    artifacts["stage_b_execution_commit_preseal_json"] = precommit_evidence_ref
+    authorizations = dict(state.recovery_authorizations)
+    history = list(state.history)
+    if authorization:
+        consumed = dict(authorization)
+        consumed["status"] = "CONSUMED"
+        consumed["consumed_at"] = timestamp
+        authorizations[authorization_id] = consumed
+        history.append(
+            {
+                "event_type": "stage_b_retry_authorization_consumed",
+                "stage_id": "B",
+                "step_id": 8,
+                "status": "CONSUMED",
+                "reason": authorization.get("reason"),
+                "created_at": timestamp,
+                "authorization_id": authorization_id,
+                "logical_operation_id": logical_operation_id,
+                "failed_idempotency_key": authorization.get("failed_idempotency_key"),
+                "assessment_sha256": authorization.get("assessment_sha256"),
+                "operator": authorization.get("operator"),
+            }
+        )
+    history.append(
+        {
+            "event_type": "idempotency_running",
+            "stage_id": "B",
+            "step_id": 8,
+            "status": "RUNNING",
+            "reason": None,
+            "created_at": timestamp,
+            "idempotency_key": idempotency_key,
+            "logical_operation_id": logical_operation_id,
+            "attempt_id": attempt_id,
+            "authorization_id": authorization_id,
+            "precommit_evidence_json": precommit_evidence_ref,
+        }
+    )
+    return (
+        replace(
+            state,
+            updated_at=timestamp,
+            artifacts=artifacts,
+            idempotency_records=records,
+            recovery_authorizations=authorizations,
+            history=history,
+        ),
+        idempotency_key,
+    )
 
 
 def _ensure_stage_id(stage_id: str) -> None:
