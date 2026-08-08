@@ -199,11 +199,13 @@ def commit_manual_execution_preview(
             source_execution_log=str(log_path),
             source_current_state=str(current_state_path),
             market_valuation=market_valuation,
+            account_id=resolved_account_id,
         )
         position_snapshot_rows = build_paper_position_snapshot_rows(
             committed_state,
             market_valuation,
             execution_date,
+            account_id=resolved_account_id,
         )
         save_paper_current_state(
             committed_state,

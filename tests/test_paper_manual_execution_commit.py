@@ -321,6 +321,12 @@ def test_warning_preview_commits_with_allow_warnings(commit_env):
     current_state = json.loads(commit_env["current_state_path"].read_text(encoding="utf-8"))
     assert current_state["absolute_cash"] == 900.0
     assert commit_env["current_state_dates"] == ["2026-05-25"]
+    with commit_env["account_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        account_snapshot_rows = list(csv.DictReader(handle))
+    with commit_env["position_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        position_snapshot_rows = list(csv.DictReader(handle))
+    assert {row["account_id"] for row in account_snapshot_rows} == {"paper_default"}
+    assert {row["account_id"] for row in position_snapshot_rows} == {"paper_default"}
     sidecar = json.loads(Path(result.commit_json_path).read_text(encoding="utf-8"))
     assert sidecar["account_id"] == "paper_default"
     assert sidecar["committed_rows"][0]["account_id"] == "paper_default"
@@ -525,6 +531,28 @@ def test_non_default_preview_commit_writes_under_account_root(tmp_path, monkeypa
     )
 
     assert result.account_id == "paper_growth"
+    assert result.committed_row_count > 0
+    expected_paths = [
+        account_paths.execution_log_path,
+        account_paths.account_snapshot_path,
+        account_paths.position_snapshot_path,
+        account_paths.current_state_snapshot_path("20260525"),
+    ]
+    assert all(path.exists() for path in expected_paths)
+    assert all(path.resolve().is_relative_to(account_paths.root.resolve()) for path in expected_paths)
+
+    with account_paths.account_snapshot_path.open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
+        account_snapshot_rows = list(csv.DictReader(handle))
+    with account_paths.position_snapshot_path.open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as handle:
+        position_snapshot_rows = list(csv.DictReader(handle))
+    assert {row["account_id"] for row in account_snapshot_rows} == {"paper_growth"}
+    assert position_snapshot_rows
+    assert {row["account_id"] for row in position_snapshot_rows} == {"paper_growth"}
+
     sidecar = json.loads(Path(result.commit_json_path).read_text(encoding="utf-8"))
     row = sidecar["committed_rows"][0]
     assert row["account_id"] == "paper_growth"

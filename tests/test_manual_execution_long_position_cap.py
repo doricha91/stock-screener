@@ -19,6 +19,7 @@ from core.notion_manual_execution_importer import (
     build_manual_execution_preview,
 )
 from core.notion_settings import NotionSettings
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
 from core.paper_account_paths import build_paper_account_paths
 from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS, build_paper_trade_id
 from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
@@ -26,6 +27,7 @@ from core.paper_manual_execution_commit import (
     ManualExecutionCommitError,
     commit_manual_execution_preview,
 )
+from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
 
 
 EXECUTION_DATE = "2026-07-17"
@@ -335,12 +337,24 @@ def _commit_env(tmp_path: Path, candidates: list[dict], holdings_count: int):
         create=True,
     )
     _write_csv(paths.execution_log_path, PAPER_EXECUTION_LOG_COLUMNS, [_execution_row(symbol) for symbol in _symbols(holdings_count)])
-    _write_csv(
-        paths.account_snapshot_path,
-        ["snapshot_date", "initial_cash", "cash", "currency"],
-        [{"snapshot_date": "2026-07-16", "initial_cash": "100000", "cash": "99500", "currency": "USD"}],
+    legacy_account_columns = [
+        column for column in PAPER_ACCOUNT_SNAPSHOT_COLUMNS if column != "account_id"
+    ]
+    legacy_account_row = {column: "" for column in legacy_account_columns}
+    legacy_account_row.update(
+        {
+            "snapshot_date": "2026-07-16",
+            "initial_cash": "100000",
+            "cash": "99500",
+            "currency": "USD",
+        }
     )
-    _write_csv(paths.position_snapshot_path, ["snapshot_date", "symbol", "shares"], [])
+    _write_csv(paths.account_snapshot_path, legacy_account_columns, [legacy_account_row])
+    _write_csv(
+        paths.position_snapshot_path,
+        [column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "account_id"],
+        [],
+    )
     preview_path = tmp_path / "preview.json"
     preview_path.write_text(
         json.dumps(
