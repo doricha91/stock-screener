@@ -9,7 +9,7 @@ from scripts import runbook_state
 from scripts.runbook_no_action import sha256_file
 
 
-ACCOUNT_ID = "paper_A"
+ACCOUNT_ID = "paper_a"
 DATA_DATE = "2026-06-12"
 TRADE_DATE = "2026-06-15"
 
@@ -57,6 +57,11 @@ def _seed_stage_b_verified_state(
         },
     )
     state = runbook_state.record_artifact(state, "daily_plan_json", str(daily_plan), workspace)
+    current_state = _write_json(
+        workspace / "artifacts" / state.runbook_day_id / "stage_b" / "paper_current_state_20260615.json",
+        {"current_symbols": [], "shares": {}},
+    )
+    state = runbook_state.record_artifact(state, "paper_current_state_json", str(current_state), workspace)
     if action_mode == "NO_ACTION":
         gate1 = _write_json(
             workspace / "gate_runs" / state.runbook_day_id / "gate1.json",
@@ -106,9 +111,27 @@ def _seed_stage_b_verified_state(
     if include_commit_report is None:
         include_commit_report = action_mode == "EXECUTION"
     if include_commit_report:
+        trade_ids = ["trade-abc", "trade-xyz"]
+        committed_rows = [
+            {
+                "account_id": ACCOUNT_ID,
+                "canonical_key": f"manual_execution:{ACCOUNT_ID}:{TRADE_DATE}:{symbol}:BUY:01",
+                "symbol": symbol,
+                "commit_status": "COMMITTED",
+                "committed_trade_id": trade_id,
+            }
+            for symbol, trade_id in zip(("ABC", "XYZ"), trade_ids)
+        ]
         commit_report = _write_json(
             workspace / "artifacts" / state.runbook_day_id / "stage_b" / "commit.json",
-            {"status": "COMMITTED"},
+            {
+                "status": "COMMITTED",
+                "account_id": ACCOUNT_ID,
+                "execution_date": TRADE_DATE,
+                "committed_row_count": 2,
+                "committed_trade_ids": trade_ids,
+                "committed_rows": committed_rows,
+            },
         )
         state = runbook_state.record_artifact(state, "execution_commit_report_json", str(commit_report), workspace)
     if verified_no_action is None:
@@ -151,6 +174,8 @@ def _fake_review_prep_run(repo_outputs: Path, calls: list[list[str]], *, step11_
         calls.append(argv)
         joined = " ".join(argv)
         if "paper.py" in joined and "review" in argv:
+            scope_path = Path(argv[argv.index("--scope-manifest") + 1])
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
             for path, text in (
                 (review_report_md, "review"),
                 (report_index_md, "index"),
@@ -172,19 +197,28 @@ def _fake_review_prep_run(repo_outputs: Path, calls: list[list[str]], *, step11_
                 "manual_review_template_md": str(template_md),
                 "validation_report_md": str(validation_report),
                 "validation_issues_csv": str(validation_issues),
+                "manual_review_scope_sha256": scope["scope_sha256"],
+                "manual_review_scope_count": scope["counts"]["total"],
+                "manual_review_scope_canonical_keys": scope["canonical_keys"],
             }
         elif "export_paper_to_notion.py" in joined and "--manual-review-template" in argv:
             assert any("review_prep" in part and template_csv.name in part for part in argv) is False
+            scope_path = next(
+                Path(part) for part in calls[0] if str(part).endswith("manual_review_scope_20260615.json")
+            )
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+            candidate_count = scope["counts"]["total"]
             payload = {
                 "target": "manual_review_template",
                 "account_id": ACCOUNT_ID,
                 "review_date": TRADE_DATE,
-                "candidate_count": 2,
-                "create_count": 0 if update_only else 2,
-                "update_count": 2 if update_only else 0,
+                "candidate_count": candidate_count,
+                "create_count": 0 if update_only else candidate_count,
+                "update_count": candidate_count if update_only else 0,
                 "skip_count": 0,
                 "failed_count": step11_failed_count,
                 "source_template_path": str(template_csv),
+                "candidates": [{"external_key": key} for key in scope["canonical_keys"]],
             }
         else:
             raise AssertionError(f"unexpected argv: {argv}")
@@ -497,7 +531,7 @@ def test_stage_c_no_action_blocks_unexpected_execution_artifact(tmp_path: Path) 
 
     assert (
         runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
-        == "unexpected_execution_artifact_for_no_action"
+        == "no_action_write_artifact_present"
     )
 
 
@@ -510,7 +544,7 @@ def test_stage_c_no_action_blocks_execution_commit_pass_idempotency(tmp_path: Pa
 
     assert (
         runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
-        == "unexpected_execution_idempotency_for_no_action"
+        == "no_action_write_idempotency_present"
     )
 
 
@@ -559,3 +593,44 @@ def test_stage_b_review_alias_reports_canonical_stage_c(tmp_path: Path) -> None:
     assert result["stage_id"] == "C"
     assert result["canonical_stage_id"] == "C"
     assert result["deprecated_alias"] == "stage-b-review"
+
+
+def test_stage_c_rebuild_is_allowed_only_while_gate2_and_downstream_are_pending(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.complete_stage(state, "C")
+    runbook_state.save_state(state, state_path)
+    assert runbook_stage_runner._stage_c_precondition_error(state, tmp_path) is None
+
+
+def test_stage_c_rebuild_is_forbidden_after_gate2_pass(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.complete_stage(state, "C")
+    state = runbook_state.complete_stage(state, "GATE2")
+    runbook_state.save_state(state, state_path)
+    assert (
+        runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
+        == "stage_c_rebuild_forbidden_after_gate2_pass"
+    )
+
+
+def test_stage_c_rebuild_requires_explicit_authorization_flag(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.complete_stage(state, "C")
+    runbook_state.save_state(state, state_path)
+    blocked = runbook_stage_runner.run_stage_c(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, dry_run=True, confirm_paper_test=True
+    )
+    assert blocked["reason"] == "stage_c_rebuild_authorization_required"
+    allowed = runbook_stage_runner.run_stage_c(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        dry_run=True,
+        confirm_paper_test=True,
+        allow_rebuild=True,
+    )
+    assert allowed["runner_result"] == "PASS"

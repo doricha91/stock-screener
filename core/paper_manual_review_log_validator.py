@@ -38,6 +38,7 @@ ALLOWED_REVIEW_TAGS = {
     "risk_management",
     "data_quality",
     "execution_quality",
+    "position_follow_up",
     "signal_quality",
     "psychology",
     "other",

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 from scripts import runbook_stage_runner
 from scripts import runbook_state
+from core.notion_account_keys import build_manual_review_canonical_key
 
 
 ACCOUNT_ID = "paper_pilot_202606"
@@ -42,6 +44,32 @@ def _seed_gate2_pass_state(
     template_csv.write_text("review_date,symbol,question_id,manual_answer,review_status\n", encoding="utf-8")
     state = runbook_state.record_artifact(state, "stage_b_verification_json", verification, workspace)
     state = runbook_state.record_artifact(state, "manual_review_template_csv", str(template_csv), workspace)
+    symbols = ["A", "B", "C", "D", "E"]
+    scope_rows = [
+        {
+            "account_id": ACCOUNT_ID, "review_date": TRADE_DATE, "symbol": symbol,
+            "question_id": "execution_review_1", "question_text": "Review execution.",
+            "question_category": "execution_review", "review_tag": "execution_quality",
+            "canonical_key": build_manual_review_canonical_key(ACCOUNT_ID, TRADE_DATE, symbol, "execution_review_1"),
+        }
+        for symbol in symbols
+    ]
+    basis = {
+        "schema_version": "paper_daily_manual_review_scope.v1",
+        "frozen_context": {"runbook_day_id": state.runbook_day_id, "account_id": ACCOUNT_ID,
+                           "data_date": DATA_DATE, "trade_date": TRADE_DATE},
+        "action_mode": "EXECUTION", "sources": {}, "manual_review_symbols": [],
+        "current_open_symbols": [], "position_symbols": [], "execution_symbols": symbols,
+        "canonical_keys": [row["canonical_key"] for row in scope_rows], "rows": scope_rows,
+    }
+    scope_sha = hashlib.sha256(
+        json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    scope_path = _write_json(
+        workspace / "artifacts" / state.runbook_day_id / "stage_c" / "manual_review_scope.json",
+        {**basis, "generated_at": "2026-07-02T00:00:00", "counts": {"total": 5}, "scope_sha256": scope_sha},
+    )
+    state = runbook_state.record_artifact(state, "manual_review_scope_json", scope_path, workspace)
     state = runbook_state.complete_stage(state, "C")
     if gate2_pass:
         state = runbook_state.complete_step(state, 12, "GATE2")
@@ -53,6 +81,7 @@ def _seed_gate2_pass_state(
                 "schema_version": "gate2_review_readiness.v1",
                 "runner_result": "PASS" if gate2_pass else "WAIT",
                 "gate_id": "GATE2",
+                "manual_review_scope_sha256": scope_sha,
             },
         )
         state = runbook_state.record_artifact(state, "gate2_readiness_json", gate2, workspace)
@@ -81,6 +110,14 @@ def _fake_review_preview_run(repo_outputs: Path, calls: list[list[str]], *, fail
             "append_allowed": "false" if fail_count else "true",
             "json_path": str(json_path),
             "markdown_path": str(md_path),
+            "candidates": [
+                {
+                    "canonical_key": build_manual_review_canonical_key(
+                        ACCOUNT_ID, TRADE_DATE, symbol, "execution_review_1"
+                    )
+                }
+                for symbol in ["A", "B", "C", "D", "E"]
+            ],
         }
         return {
             "exit_code": 0,
@@ -132,6 +169,37 @@ def test_stage_d_preview_pins_review_preview_artifacts(tmp_path: Path, monkeypat
     assert latest_payload["stage_id"] == "D_PREVIEW"
     assert latest_payload["canonical_stage_id"] == "D"
     assert "Review preview artifact" in result["next_required_action"]
+
+
+def test_stage_d_preview_blocks_extra_stale_canonical_key(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = _seed_gate2_pass_state(workspace)
+    json_path = tmp_path / "preview.json"
+    md_path = tmp_path / "preview.md"
+    json_path.write_text("{}", encoding="utf-8")
+    md_path.write_text("# preview", encoding="utf-8")
+    candidates = [
+        {"canonical_key": build_manual_review_canonical_key(ACCOUNT_ID, TRADE_DATE, symbol, "execution_review_1")}
+        for symbol in ["A", "B", "C", "D", "E", "STALE"]
+    ]
+    validation = runbook_stage_runner._validate_review_preview_payload(
+        {
+            "account_id": ACCOUNT_ID,
+            "review_date": TRADE_DATE,
+            "candidate_count": 6,
+            "fail_count": 0,
+            "blocked_count": 0,
+            "append_allowed": "true",
+            "json_path": str(json_path),
+            "markdown_path": str(md_path),
+            "candidates": candidates,
+        },
+        state,
+        workspace,
+    )
+    assert validation["runner_result"] == "BLOCKED"
+    assert any("extra canonical keys" in blocker for blocker in validation["blockers"])
 
 
 def test_stage_d_preview_blocks_when_gate2_not_pass(tmp_path: Path) -> None:

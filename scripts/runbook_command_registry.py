@@ -351,6 +351,8 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
             "{account_id}",
             "--date",
             "{trade_date}",
+            "--scope-manifest",
+            "{manual_review_scope_json}",
             "--json",
         ),
         command_type="LOCAL_ARTIFACT_WRITE",

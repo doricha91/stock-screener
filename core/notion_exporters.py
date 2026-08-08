@@ -814,9 +814,39 @@ def build_manual_review_template_properties(
         resolve_notion_property_name(mapping, "manual_answer"): notion_rich_text(""),
         resolve_notion_property_name(mapping, "review_status"): notion_select("pending"),
         resolve_notion_property_name(mapping, "follow_up_needed"): notion_select("false"),
+        resolve_notion_property_name(mapping, "review_tag"): notion_select(
+            str(row.get("review_tag") or "").strip()
+        ),
         resolve_notion_property_name(mapping, "reviewer_note"): notion_rich_text(""),
         resolve_notion_property_name(mapping, "source_template_key"): notion_rich_text(source_template_key),
         resolve_notion_property_name(mapping, "import_status"): notion_select(MANUAL_REVIEW_TEMPLATE_IMPORT_STATUS),
+    }
+
+
+def build_manual_review_template_update_properties(
+    row: dict[str, str],
+    mapping: dict[str, str],
+    *,
+    account_id: str,
+    review_date: str,
+    external_key: str,
+) -> dict[str, Any]:
+    """Update generated identity/question fields without replacing operator-owned review progress."""
+    symbol = str(row.get("symbol") or "").strip().upper()
+    question_id = str(row.get("question_id") or "").strip()
+    question = str(row.get("question_text") or "").strip()
+    source_template_key = str(row.get("source_worksheet_path") or "").strip()
+    return {
+        resolve_notion_property_name(mapping, "name"): notion_title(
+            f"{review_date} {account_id} {symbol} {question_id}"
+        ),
+        resolve_notion_property_name(mapping, "external_key"): notion_rich_text(external_key),
+        resolve_notion_property_name(mapping, "account_id"): notion_select(account_id),
+        resolve_notion_property_name(mapping, "review_date"): notion_date(review_date),
+        resolve_notion_property_name(mapping, "symbol"): notion_rich_text(symbol),
+        resolve_notion_property_name(mapping, "question_id"): notion_rich_text(question_id),
+        resolve_notion_property_name(mapping, "question"): notion_rich_text(question),
+        resolve_notion_property_name(mapping, "source_template_key"): notion_rich_text(source_template_key),
     }
 
 
@@ -1895,7 +1925,16 @@ def export_manual_review_template_to_notion(
                 external_key=external_key,
             )
             if page_id:
-                client.update_page(page_id, properties)
+                client.update_page(
+                    page_id,
+                    build_manual_review_template_update_properties(
+                        row,
+                        mapping,
+                        account_id=resolved_account_id,
+                        review_date=normalized_review_date,
+                        external_key=external_key,
+                    ),
+                )
             else:
                 created = client.create_page(data_source_id, properties)
                 candidate = _manual_review_template_candidate_from_row(

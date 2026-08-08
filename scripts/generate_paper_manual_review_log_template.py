@@ -13,6 +13,7 @@ from core.paper_manual_review_log_template import (  # noqa: E402
     REQUIRED_BUCKET_COLUMNS,
     REQUIRED_WORKSHEET_COLUMNS,
     build_paper_manual_review_log_template,
+    build_paper_manual_review_log_template_from_scope,
     load_csv_rows,
     render_paper_manual_review_log_template_markdown,
     summarize_paper_manual_review_log_template,
@@ -20,6 +21,7 @@ from core.paper_manual_review_log_template import (  # noqa: E402
     write_paper_manual_review_log_template_csv,
 )
 from core.paths import paper_reports_dir, paper_reviews_dir  # noqa: E402
+from core.paper_daily_review_scope import load_scope_manifest  # noqa: E402
 
 
 def _latest_execution_trade_date(execution_log_path: Path) -> str | None:
@@ -34,6 +36,7 @@ def _latest_execution_trade_date(execution_log_path: Path) -> str | None:
 def generate_paper_manual_review_log_template(
     account_paths: PaperAccountPaths | None = None,
     review_date: str | None = None,
+    scope_manifest_path: Path | None = None,
 ) -> dict:
     if account_paths is not None and account_paths.account_id != "paper_default":
         reports_dir = account_paths.reports_dir
@@ -50,24 +53,35 @@ def generate_paper_manual_review_log_template(
     csv_output_path = reviews_dir / "paper_manual_review_log_template.csv"
     markdown_output_path = reviews_dir / "paper_manual_review_log_template.md"
 
-    worksheet_rows = load_csv_rows(
-        worksheet_csv_path,
-        REQUIRED_WORKSHEET_COLUMNS,
-        "paper_symbol_review_worksheet.csv",
-        allowed_root=allowed_root,
-    )
-    review_bucket_rows = load_csv_rows(
-        review_bucket_csv_path,
-        REQUIRED_BUCKET_COLUMNS,
-        "paper_symbol_review_buckets.csv",
-        allowed_root=allowed_root,
-    )
-    output_rows, summary_data, warnings = build_paper_manual_review_log_template(
-        worksheet_rows,
-        review_bucket_rows,
-        source_worksheet_path=worksheet_csv_path,
-        review_date=review_date or (_latest_execution_trade_date(execution_log_path) if execution_log_path else None),
-    )
+    if scope_manifest_path is not None:
+        manifest = load_scope_manifest(
+            scope_manifest_path,
+            account_id=account_paths.account_id if account_paths is not None else "paper_default",
+            trade_date=review_date,
+        )
+        output_rows, summary_data, warnings = build_paper_manual_review_log_template_from_scope(
+            manifest,
+            source_scope_path=scope_manifest_path,
+        )
+    else:
+        worksheet_rows = load_csv_rows(
+            worksheet_csv_path,
+            REQUIRED_WORKSHEET_COLUMNS,
+            "paper_symbol_review_worksheet.csv",
+            allowed_root=allowed_root,
+        )
+        review_bucket_rows = load_csv_rows(
+            review_bucket_csv_path,
+            REQUIRED_BUCKET_COLUMNS,
+            "paper_symbol_review_buckets.csv",
+            allowed_root=allowed_root,
+        )
+        output_rows, summary_data, warnings = build_paper_manual_review_log_template(
+            worksheet_rows,
+            review_bucket_rows,
+            source_worksheet_path=worksheet_csv_path,
+            review_date=review_date or (_latest_execution_trade_date(execution_log_path) if execution_log_path else None),
+        )
     write_paper_manual_review_log_template_csv(output_rows, csv_output_path, allowed_root=allowed_root)
     summary = summarize_paper_manual_review_log_template(
         summary_data,
@@ -89,6 +103,7 @@ def generate_paper_manual_review_log_template(
         "markdown_output_path": markdown_output_path,
         "summary": summary,
         "output_rows": output_rows,
+        "scope_manifest_path": scope_manifest_path,
     }
 
 

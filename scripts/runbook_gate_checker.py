@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -27,6 +28,8 @@ from core.notion_settings import (
     load_notion_settings,
 )
 from core.paper_manual_review_log_validator import load_paper_manual_review_log_rows
+from core.notion_account_keys import build_manual_review_canonical_key
+from core.paper_daily_review_scope import DailyReviewScopeError, load_scope_manifest
 from scripts import runbook_state
 from scripts.runbook_no_action import (
     EvidenceError,
@@ -266,6 +269,24 @@ def check_gate2_readiness(
                 "No Manual Review input is required.",
                 evidence_context=evidence_context,
             )
+        state, gate_json, gate_txt = _write_gate2_result_and_save(workspace, state_path, state, result)
+        return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
+
+    scope_mismatch = _gate2_scope_mismatch(rows, evidence_context)
+    if scope_mismatch:
+        state = runbook_state.block_stage(
+            state,
+            GATE2_ID,
+            "manual_review_scope_mismatch",
+            scope_mismatch,
+        )
+        result = create_gate2_result(
+            state,
+            "BLOCKED",
+            rows,
+            "Active Manual Review rows must exactly match the pinned canonical scope.",
+            evidence_context=evidence_context,
+        )
         state, gate_json, gate_txt = _write_gate2_result_and_save(workspace, state_path, state, result)
         return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
 
@@ -818,11 +839,32 @@ def _gate2_evidence_context(state: RunbookState, workspace: Path) -> dict[str, A
     if action_mode == "EXECUTION":
         if verification.get("verified_no_action") is not False:
             raise EvidenceError("stage_b_verification_required", "Execution verification is inconsistent")
+        scope_ref = state.artifacts.get("manual_review_scope_json")
+        if not scope_ref:
+            raise EvidenceError("manual_review_scope_required", "manual_review_scope_json is not pinned")
+        try:
+            scope = load_scope_manifest(
+                _artifact_ref_path(workspace, str(scope_ref)),
+                account_id=state.frozen_context.account_id,
+                data_date=state.frozen_context.data_date,
+                trade_date=state.frozen_context.trade_date,
+            )
+        except DailyReviewScopeError as exc:
+            raise EvidenceError("manual_review_scope_invalid", str(exc)) from exc
+        if (
+            stage_c_raw.get("manual_review_scope_sha256") != scope["scope_sha256"]
+            or stage_c_raw.get("manual_review_scope_count") != scope["counts"]["total"]
+        ):
+            raise EvidenceError("stage_c_scope_evidence_mismatch", "Stage C summary does not match pinned scope")
         return {
             "action_mode": "EXECUTION",
             "execution_required": True,
             "candidate_execution_count": intent["candidate_execution_count"],
             "verified_no_action": False,
+            "manual_review_scope_json": str(scope_ref),
+            "manual_review_scope_sha256": scope["scope_sha256"],
+            "manual_review_scope_count": scope["counts"]["total"],
+            "manual_review_scope_canonical_keys": scope["canonical_keys"],
         }
 
     if (
@@ -874,6 +916,55 @@ def _gate2_row_missing_reasons(row: dict[str, Any], account_id: str, review_date
     if row.get("import_status") != "READY":
         missing.append("import_status_READY")
     return missing
+
+
+def _gate2_scope_mismatch(rows: list[dict[str, Any]], evidence_context: dict[str, Any]) -> dict[str, Any]:
+    desired = [str(key) for key in evidence_context.get("manual_review_scope_canonical_keys") or []]
+    desired_set = set(desired)
+    actual: list[str] = []
+    invalid: list[dict[str, Any]] = []
+    for row in rows:
+        account_id = str(row.get("account_id") or "")
+        review_date = str(row.get("review_date") or "")
+        symbol = str(row.get("symbol") or "")
+        question_id = str(row.get("question_id") or "")
+        computed = (
+            build_manual_review_canonical_key(account_id, review_date, symbol, question_id)
+            if all((account_id, review_date, symbol, question_id))
+            else ""
+        )
+        external_key = str(row.get("external_key") or "")
+        if not computed or external_key != computed:
+            invalid.append(
+                {
+                    "page_id": row.get("page_id"),
+                    "external_key": external_key,
+                    "computed_canonical_key": computed,
+                }
+            )
+        actual.append(external_key or computed)
+    counts = Counter(actual)
+    duplicates = sorted(key for key, count in counts.items() if key and count > 1)
+    actual_set = {key for key in actual if key}
+    missing = [key for key in desired if key not in actual_set]
+    extra = sorted(actual_set - desired_set)
+    if not (invalid or duplicates or missing or extra or len(actual) != len(desired)):
+        return {}
+    duplicate_set = set(duplicates)
+    extra_set = set(extra)
+    for row, key in zip(rows, actual):
+        if key in duplicate_set or key in extra_set or any(item.get("page_id") == row.get("page_id") for item in invalid):
+            row["missing"] = [*row.get("missing", []), "canonical_scope_mismatch"]
+            row["blocked"] = True
+            row["ready"] = False
+    return {
+        "desired_count": len(desired),
+        "actual_count": len(actual),
+        "missing_keys": missing,
+        "extra_keys": extra,
+        "duplicate_keys": duplicates,
+        "invalid_identity_rows": invalid,
+    }
 
 
 def _gate2_row_has_blocking_mismatch(missing: list[str]) -> bool:

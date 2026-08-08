@@ -9,6 +9,7 @@ from typing import Any
 from core.paper_account_guard import assert_path_under_account_root
 from core.paper_safety import assert_paper_path
 from core.paths import PAPER_TEST_DIR
+from core.paper_daily_review_scope import validate_scope_manifest
 
 
 PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS = [
@@ -187,6 +188,70 @@ def build_paper_manual_review_log_template(
         "source_worksheet_path": str(source_worksheet_path),
     }
     return output_rows, summary_data, warnings
+
+
+def build_paper_manual_review_log_template_from_scope(
+    scope_manifest: dict[str, Any],
+    source_scope_path: Path,
+    created_at: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    manifest = validate_scope_manifest(scope_manifest)
+    created_at_value = created_at or datetime.now().isoformat(timespec="seconds")
+    rows: list[dict[str, Any]] = []
+    for scope_row in manifest["rows"]:
+        category = str(scope_row["question_category"])
+        symbol = str(scope_row["symbol"])
+        if category == "position_review":
+            review_bucket, priority, sample_flag, symbol_status = (
+                "position_review", "high", "not_applicable", "open_manual_review",
+            )
+        elif category == "execution_review":
+            review_bucket, priority, sample_flag, symbol_status = (
+                "execution_review", "medium", "not_applicable", "committed_execution",
+            )
+        else:
+            review_bucket, priority, sample_flag, symbol_status = (
+                "account_review", "medium", "not_applicable", "account",
+            )
+        rows.append(
+            {
+                "review_date": scope_row["review_date"],
+                "symbol": symbol,
+                "review_bucket": review_bucket,
+                "review_priority": priority,
+                "sample_size_flag": sample_flag,
+                "symbol_status": symbol_status,
+                "question_id": scope_row["question_id"],
+                "question_text": scope_row["question_text"],
+                "question_category": category,
+                "is_actionable": "false",
+                "manual_answer": "",
+                "review_status": "pending",
+                "follow_up_needed": "false",
+                "review_tag": scope_row["review_tag"],
+                "reviewer_note": "",
+                "source_worksheet_path": str(source_scope_path),
+                "created_at": created_at_value,
+            }
+        )
+    summary_data = {
+        "review_template_row_count": len(rows),
+        "symbol_count": len({row["symbol"] for row in rows if row["symbol"] != "ACCOUNT"}),
+        "account_question_count": sum(1 for row in rows if row["symbol"] == "ACCOUNT"),
+        "position_question_count": sum(1 for row in rows if row["question_category"] == "position_review"),
+        "execution_question_count": sum(1 for row in rows if row["question_category"] == "execution_review"),
+        "symbol_question_policy": "canonical_operational_scope",
+        "bucket_counts": dict(Counter(row["review_bucket"] for row in rows)),
+        "priority_counts": dict(Counter(row["review_priority"] for row in rows)),
+        "high_priority_symbols": [row["symbol"] for row in rows if row["review_priority"] == "high"],
+        "is_actionable": "false",
+        "review_date": manifest["frozen_context"]["trade_date"],
+        "source_worksheet_path": str(source_scope_path),
+        "scope_manifest_path": str(source_scope_path),
+        "scope_sha256": manifest["scope_sha256"],
+        "canonical_keys": manifest["canonical_keys"],
+    }
+    return rows, summary_data, []
 
 
 def write_paper_manual_review_log_template_csv(

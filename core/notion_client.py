@@ -199,6 +199,13 @@ class NotionClient:
             json_payload={"properties": properties},
         )
 
+    def archive_page(self, page_id: str) -> dict[str, Any]:
+        return self._request_json(
+            "PATCH",
+            f"/pages/{page_id}",
+            json_payload={"archived": True},
+        )
+
     def list_block_children(self, block_id: str) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         cursor: str | None = None

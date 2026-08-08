@@ -39,6 +39,12 @@ from scripts.runbook_no_action import (
 from scripts.runbook_command_registry import RunbookCommand
 from scripts.runbook_state import RunbookState
 from core.paper_account_paths import build_paper_account_paths
+from core.paper_daily_review_scope import (
+    DailyReviewScopeError,
+    build_daily_manual_review_scope,
+    load_scope_manifest,
+    write_scope_manifest,
+)
 from core.paper_execution_intent import validate_daily_plan_execution_intent
 
 
@@ -979,6 +985,7 @@ def run_stage_c(
     repo_root: Path | None = None,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
+    allow_rebuild: bool = False,
 ) -> dict[str, Any]:
     workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
@@ -998,6 +1005,8 @@ def run_stage_c(
         return _blocked_stage_c_payload(str(exc), dry_run, confirm_paper_test)
 
     precondition_error, evidence_context = _stage_c_precondition(state, workspace)
+    if not precondition_error and state.stage_status.get(STAGE_C_ID) == "PASS" and not allow_rebuild:
+        precondition_error = "stage_c_rebuild_authorization_required"
     if precondition_error:
         return {
             **_blocked_stage_c_payload(precondition_error, dry_run, confirm_paper_test),
@@ -1005,6 +1014,23 @@ def run_stage_c(
             "state_path": str(state_path),
         }
     assert evidence_context is not None
+    if not dry_run:
+        try:
+            scope_path, scope_manifest = _build_and_write_stage_c_scope(workspace, state)
+        except (DailyReviewScopeError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return {
+                **_blocked_stage_c_payload(f"manual_review_scope_invalid:{exc}", dry_run, confirm_paper_test),
+                "runbook_day_id": state.runbook_day_id,
+                "state_path": str(state_path),
+            }
+        state = runbook_state.record_artifact(state, "manual_review_scope_json", str(scope_path), workspace)
+        runbook_state.save_state(state, state_path)
+        evidence_context = {
+            **evidence_context,
+            "manual_review_scope_json": state.artifacts.get("manual_review_scope_json"),
+            "manual_review_scope_sha256": scope_manifest["scope_sha256"],
+            "manual_review_scope_count": scope_manifest["counts"]["total"],
+        }
     pass_next_action = (
         "No Manual Review input is required. Run Gate 2 to validate the pinned no-action review state."
         if evidence_context["action_mode"] == "NO_ACTION"
@@ -2665,11 +2691,90 @@ def _stage_c_precondition(
         return "stage_b_not_pass", None
     if state.last_error:
         return "active_last_error", None
+    if state.stage_status.get(STAGE_C_ID) == "PASS":
+        if state.stage_status.get("GATE2") == "PASS":
+            return "stage_c_rebuild_forbidden_after_gate2_pass", None
+        if any(state.stage_status.get(stage_id) != "PENDING" for stage_id in ("GATE2", "D", "E", "F")):
+            return "stage_c_rebuild_lifecycle_mismatch", None
+        if any(
+            state.artifacts.get(name)
+            for name in (
+                "gate2_readiness_json",
+                "review_preview_json",
+                "review_append_report_json",
+                "review_status_sync_report_json",
+            )
+        ):
+            return "stage_c_rebuild_downstream_evidence_exists", None
     try:
         evidence_context = _stage_c_evidence_context(state, workspace)
     except EvidenceError as exc:
         return exc.reason, None
     return None, evidence_context
+
+
+def _build_and_write_stage_c_scope(
+    workspace: Path,
+    state: RunbookState,
+) -> tuple[Path, dict[str, Any]]:
+    manifest = _build_stage_c_scope(workspace, state)
+    output_path = (
+        Path(workspace)
+        / "artifacts"
+        / state.runbook_day_id
+        / "stage_c"
+        / f"manual_review_scope_{state.frozen_context.trade_date.replace('-', '')}.json"
+    )
+    write_scope_manifest(manifest, output_path)
+    return output_path, manifest
+
+
+def _build_stage_c_scope(workspace: Path, state: RunbookState) -> dict[str, Any]:
+    daily_plan_ref = state.artifacts.get("daily_plan_json")
+    verification_ref = state.artifacts.get("stage_b_verification_json")
+    if not daily_plan_ref or not verification_ref:
+        raise DailyReviewScopeError("Daily Plan and Stage B verification must be pinned")
+    daily_plan_path = _artifact_ref_path(workspace, daily_plan_ref)
+    verification_path = _artifact_ref_path(workspace, verification_ref)
+    daily_plan = json.loads(daily_plan_path.read_text(encoding="utf-8"))
+    verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    markdown_ref = state.artifacts.get("daily_plan_markdown")
+    markdown_path = _artifact_ref_path(workspace, markdown_ref) if markdown_ref else None
+    action_mode = str((daily_plan.get("execution_intent") or {}).get("action_mode") or "").upper()
+    current_state: dict[str, Any] | None = None
+    current_state_path: Path | None = None
+    commit_report: dict[str, Any] | None = None
+    commit_path: Path | None = None
+    if action_mode == "EXECUTION":
+        current_state_ref = state.artifacts.get("paper_current_state_json")
+        if current_state_ref:
+            current_state_path = _artifact_ref_path(workspace, current_state_ref)
+        else:
+            account_paths = build_paper_account_paths(state.frozen_context.account_id, create=False)
+            current_state_path = account_paths.current_state_snapshot_path(state.frozen_context.trade_date)
+        if not current_state_path.exists():
+            raise DailyReviewScopeError(f"Post-Stage-B current state not found: {current_state_path}")
+        current_state = json.loads(current_state_path.read_text(encoding="utf-8"))
+        commit_ref = state.artifacts.get("execution_commit_report_json")
+        if not commit_ref:
+            raise DailyReviewScopeError("execution_commit_report_json is not pinned")
+        commit_path = _artifact_ref_path(workspace, commit_ref)
+        commit_report = json.loads(commit_path.read_text(encoding="utf-8"))
+    return build_daily_manual_review_scope(
+        runbook_day_id=state.runbook_day_id,
+        account_id=state.frozen_context.account_id,
+        data_date=state.frozen_context.data_date,
+        trade_date=state.frozen_context.trade_date,
+        daily_plan=daily_plan,
+        current_state=current_state,
+        stage_b_verification=verification,
+        execution_commit_report=commit_report,
+        daily_plan_path=daily_plan_path,
+        daily_plan_markdown_path=markdown_path,
+        current_state_path=current_state_path,
+        stage_b_verification_path=verification_path,
+        execution_commit_report_path=commit_path,
+    )
 
 
 def _stage_c_evidence_context(state: RunbookState, workspace: Path) -> dict[str, Any]:
@@ -3127,6 +3232,8 @@ def _run_stage_c_command(
 ) -> tuple[dict[str, Any], str, list[str]]:
     artifact_refs = _stage_b_render_artifacts(state.artifacts, workspace)
     artifact_refs["workspace"] = str(workspace)
+    if dry_run:
+        artifact_refs.setdefault("manual_review_scope_json", "dry_run/manual_review_scope.json")
     rendered_argv = render_argv_template(command, state.frozen_context, artifact_refs)
     argv = normalize_python_script_argv(rendered_argv, repo_root)
     if dry_run:
@@ -3167,7 +3274,7 @@ def _run_stage_c_command(
         )
         return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
-    validation = _validate_stage_c_payload(command.command_key, raw_payload)
+    validation = _validate_stage_c_payload(command.command_key, raw_payload, state, workspace)
     if validation["artifact_refs"]:
         validation["artifact_refs"] = _pin_artifact_refs(
             workspace,
@@ -3239,7 +3346,7 @@ def _run_stage_d_preview_command(
         )
         return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
-    validation = _validate_stage_d_preview_payload(command.command_key, raw_payload, state)
+    validation = _validate_stage_d_preview_payload(command.command_key, raw_payload, state, workspace)
     if validation["artifact_refs"]:
         validation["artifact_refs"] = _pin_artifact_refs(
             workspace,
@@ -3961,11 +4068,16 @@ def _validate_stage_b_payload(command_key: str, payload: dict[str, Any]) -> dict
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
-def _validate_stage_c_payload(command_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _validate_stage_c_payload(
+    command_key: str,
+    payload: dict[str, Any],
+    state: RunbookState | None = None,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
     if command_key == "daily_review":
-        return _validate_daily_review_payload(payload)
+        return _validate_daily_review_payload(payload, state, workspace)
     if command_key == "export_review_template":
-        return _validate_export_review_template_payload(payload)
+        return _validate_export_review_template_payload(payload, state, workspace)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
@@ -3973,9 +4085,10 @@ def _validate_stage_d_preview_payload(
     command_key: str,
     payload: dict[str, Any],
     state: RunbookState,
+    workspace: Path | None = None,
 ) -> dict[str, Any]:
     if command_key == "review_preview":
-        return _validate_review_preview_payload(payload, state)
+        return _validate_review_preview_payload(payload, state, workspace)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
@@ -4067,7 +4180,11 @@ def _path_is_within(path: Path, parent: Path) -> bool:
     return True
 
 
-def _validate_review_preview_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+def _validate_review_preview_payload(
+    payload: dict[str, Any],
+    state: RunbookState,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
     blockers = []
     warnings = []
     account_id = str(payload.get("account_id") or "").strip()
@@ -4087,6 +4204,29 @@ def _validate_review_preview_payload(payload: dict[str, Any], state: RunbookStat
         blockers.append("append_allowed must not be false")
     elif append_allowed == "true_with_warnings":
         warnings.append("append_allowed is true_with_warnings")
+    if workspace is not None:
+        try:
+            scope = _load_state_review_scope(state, workspace)
+        except DailyReviewScopeError as exc:
+            blockers.append(str(exc))
+        else:
+            desired = list(scope["canonical_keys"])
+            actual = [
+                str(candidate.get("canonical_key") or "")
+                for candidate in payload.get("candidates") or []
+                if isinstance(candidate, dict)
+            ]
+            duplicate_keys = sorted({key for key in actual if key and actual.count(key) > 1})
+            missing_keys = [key for key in desired if key not in set(actual)]
+            extra_keys = sorted(set(actual) - set(desired))
+            if duplicate_keys:
+                blockers.append(f"review preview duplicate canonical keys: {','.join(duplicate_keys)}")
+            if missing_keys:
+                blockers.append(f"review preview missing canonical keys: {','.join(missing_keys)}")
+            if extra_keys:
+                blockers.append(f"review preview extra canonical keys: {','.join(extra_keys)}")
+            if len(actual) != len(desired):
+                blockers.append("review preview candidate count must exactly match pinned scope")
     json_path = str(payload.get("json_path") or payload.get("preview_json_path") or "").strip()
     markdown_path = str(payload.get("markdown_path") or payload.get("preview_markdown_path") or "").strip()
     if not json_path or not Path(json_path).exists():
@@ -4275,7 +4415,11 @@ def _validate_eod_report_common(payload: dict[str, Any], state: RunbookState) ->
     return runbook_stage_e_evidence.validate_eod_report_common(payload, state)
 
 
-def _validate_daily_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _validate_daily_review_payload(
+    payload: dict[str, Any],
+    state: RunbookState | None = None,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
     blockers = []
     status = str(payload.get("status") or "").upper()
     validation_result = str(payload.get("validation_result") or "").upper()
@@ -4289,6 +4433,16 @@ def _validate_daily_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
         blockers.append("manual_review_template_csv must exist")
     if not template_md or not Path(template_md).exists():
         blockers.append("manual_review_template_md must exist")
+    if state is not None and workspace is not None:
+        try:
+            scope = _load_state_review_scope(state, workspace)
+        except DailyReviewScopeError as exc:
+            blockers.append(str(exc))
+        else:
+            if payload.get("manual_review_scope_sha256") != scope["scope_sha256"]:
+                blockers.append("manual_review_scope_sha256 must match pinned scope")
+            if _int_payload(payload, "manual_review_scope_count") != scope["counts"]["total"]:
+                blockers.append("manual_review_scope_count must match pinned scope")
     artifacts = _existing_artifacts_from_payload(
         payload,
         {
@@ -4308,10 +4462,20 @@ def _validate_daily_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _validate_export_review_template_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _validate_export_review_template_payload(
+    payload: dict[str, Any],
+    state: RunbookState | None = None,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
     blockers = []
     candidate_count = _int_payload(payload, "candidate_count")
-    if candidate_count <= 0:
+    scope: dict[str, Any] | None = None
+    if state is not None and workspace is not None:
+        try:
+            scope = _load_state_review_scope(state, workspace)
+        except DailyReviewScopeError as exc:
+            blockers.append(str(exc))
+    if candidate_count <= 0 and not (scope and scope.get("action_mode") == "NO_ACTION"):
         blockers.append("candidate_count must be greater than 0")
     if _int_payload(payload, "failed_count") != 0:
         blockers.append("failed_count must be 0")
@@ -4325,6 +4489,14 @@ def _validate_export_review_template_payload(payload: dict[str, Any]) -> dict[st
     source_template_path = str(payload.get("source_template_path") or "").strip()
     if source_template_path and not Path(source_template_path).exists():
         blockers.append("source_template_path must exist")
+    if scope is not None:
+        candidate_keys = [
+            str(candidate.get("external_key") or "")
+            for candidate in payload.get("candidates") or []
+            if isinstance(candidate, dict)
+        ]
+        if candidate_keys != scope["canonical_keys"]:
+            blockers.append("Notion export candidates must exactly match pinned manual review scope")
     artifacts = _existing_artifacts_from_payload(
         payload,
         {
@@ -4340,6 +4512,18 @@ def _validate_export_review_template_payload(payload: dict[str, Any]) -> dict[st
         "Manual review template was exported to Notion." if not blockers else "Manual review template export failed validation.",
         artifacts if not blockers else {},
         blockers,
+    )
+
+
+def _load_state_review_scope(state: RunbookState, workspace: Path) -> dict[str, Any]:
+    scope_ref = state.artifacts.get("manual_review_scope_json")
+    if not scope_ref:
+        raise DailyReviewScopeError("manual_review_scope_json is not pinned")
+    return load_scope_manifest(
+        _artifact_ref_path(workspace, scope_ref),
+        account_id=state.frozen_context.account_id,
+        data_date=state.frozen_context.data_date,
+        trade_date=state.frozen_context.trade_date,
     )
 
 
@@ -4836,6 +5020,11 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_c.add_argument("--dry-run", action="store_true")
     stage_c.add_argument("--confirm-paper-test", action="store_true")
     stage_c.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
+    stage_c.add_argument(
+        "--allow-stage-c-rebuild",
+        action="store_true",
+        help="Explicitly authorize the guarded same-runbook Stage C rebuild before Gate2",
+    )
 
     stage_b_review = subparsers.add_parser("stage-b-review", help="Deprecated alias for stage-c")
     stage_b_review.add_argument("--workspace", type=Path, required=True)
@@ -4936,6 +5125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             confirm_paper_test=args.confirm_paper_test,
             timeout_sec=args.timeout_sec,
+            allow_rebuild=args.allow_stage_c_rebuild,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("runner_result") == "PASS" else 1

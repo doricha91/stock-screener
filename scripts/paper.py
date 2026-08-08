@@ -336,11 +336,14 @@ def run_review_shortcut(
     allow_warnings: bool,
     account_id: str | None = None,
     review_date: str | None = None,
+    scope_manifest_path: Path | None = None,
 ) -> int:
     reports_result = handle_reports(argparse.Namespace(strict=not allow_warnings, account_id=account_id))
     if reports_result != 0:
         return reports_result
-    template_result = handle_review_template(argparse.Namespace(account_id=account_id, date=review_date))
+    template_result = handle_review_template(
+        argparse.Namespace(account_id=account_id, date=review_date, scope_manifest=scope_manifest_path)
+    )
     if template_result != 0:
         return template_result
     return handle_review_validate(argparse.Namespace(account_id=account_id))
@@ -377,14 +380,25 @@ def handle_review(args: argparse.Namespace) -> int:
         allow_warnings=args.allow_warnings,
         account_id=args.account_id,
         review_date=review_date,
+        scope_manifest_path=Path(args.scope_manifest) if getattr(args, "scope_manifest", None) else None,
     )
     if args.json:
-        summary = _review_shortcut_json_summary(args.account_id, review_date, exit_code)
+        summary = _review_shortcut_json_summary(
+            args.account_id,
+            review_date,
+            exit_code,
+            Path(args.scope_manifest) if getattr(args, "scope_manifest", None) else None,
+        )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     return exit_code
 
 
-def _review_shortcut_json_summary(account_id: str | None, review_date: str | None, exit_code: int) -> dict[str, object]:
+def _review_shortcut_json_summary(
+    account_id: str | None,
+    review_date: str | None,
+    exit_code: int,
+    scope_manifest_path: Path | None = None,
+) -> dict[str, object]:
     account_paths = build_paper_account_paths(account_id, create=False)
     reviews_dir = account_paths.reviews_dir
     reports_dir = account_paths.reports_dir
@@ -396,6 +410,23 @@ def _review_shortcut_json_summary(account_id: str | None, review_date: str | Non
     report_index_md = reports_dir / "paper_report_index.md"
     template_exists = template_csv.exists() and template_md.exists()
     validation_failed = exit_code != 0
+    scope_payload: dict[str, object] = {}
+    if scope_manifest_path is not None:
+        try:
+            from core.paper_daily_review_scope import load_scope_manifest
+
+            manifest = load_scope_manifest(
+                scope_manifest_path,
+                account_id=account_paths.account_id,
+                trade_date=review_date,
+            )
+            scope_payload = {
+                "manual_review_scope_sha256": manifest["scope_sha256"],
+                "manual_review_scope_count": manifest["counts"]["total"],
+                "manual_review_scope_canonical_keys": manifest["canonical_keys"],
+            }
+        except ValueError:
+            scope_payload = {"manual_review_scope_error": "invalid_scope_manifest"}
     return {
         "status": "PASS" if exit_code == 0 else "FAIL",
         "account_id": account_paths.account_id,
@@ -408,6 +439,8 @@ def _review_shortcut_json_summary(account_id: str | None, review_date: str | Non
         "validation_report_md": str(validation_report),
         "validation_issues_csv": str(validation_issues),
         "manual_review_template_exists": template_exists,
+        "manual_review_scope_json": str(scope_manifest_path) if scope_manifest_path else "",
+        **scope_payload,
     }
 
 
@@ -786,7 +819,13 @@ def handle_review_template(args: argparse.Namespace) -> int:
     if summary["result"] == "FAIL":
         print("Paper review-template aborted because preflight failed.")
         return 1
-    result = generate_paper_manual_review_log_template(account_paths=account_paths, review_date=review_date)
+    scope_manifest_path = (
+        Path(args.scope_manifest) if getattr(args, "scope_manifest", None) else None
+    )
+    template_kwargs = {"account_paths": account_paths, "review_date": review_date}
+    if scope_manifest_path is not None:
+        template_kwargs["scope_manifest_path"] = scope_manifest_path
+    result = generate_paper_manual_review_log_template(**template_kwargs)
     print("PAPER REVIEW TEMPLATE")
     print(f"  csv_output_path: {result['csv_output_path']}")
     print(f"  markdown_output_path: {result['markdown_output_path']}")
@@ -999,6 +1038,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--allow-warnings", action="store_true", help="Allow PASS_WITH_WARNINGS during reports preflight")
     review_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     review_parser.add_argument("--date", help="Review date / trade date (YYYYMMDD or YYYY-MM-DD)")
+    review_parser.add_argument("--scope-manifest", help="Pinned canonical Daily Manual Review scope JSON")
     review_parser.add_argument("--json", action="store_true", help="Print machine-readable review shortcut summary")
     review_parser.set_defaults(handler=handle_review)
 
@@ -1008,6 +1048,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review_template_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
     review_template_parser.add_argument("--date", help="Review date / trade date (YYYYMMDD or YYYY-MM-DD)")
+    review_template_parser.add_argument("--scope-manifest", help="Pinned canonical Daily Manual Review scope JSON")
     review_template_parser.set_defaults(handler=handle_review_template)
 
     review_validate_parser = subparsers.add_parser(

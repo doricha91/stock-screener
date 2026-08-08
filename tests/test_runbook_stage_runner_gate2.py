@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import csv
+import hashlib
 from pathlib import Path
 
 from core.paper_execution_intent import build_execution_intent
+from core.notion_account_keys import build_manual_review_canonical_key
 from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
 from scripts import runbook_gate_checker
 from scripts import runbook_stage_runner
@@ -23,7 +25,12 @@ def _write_json(path: Path, payload: dict) -> str:
     return str(path)
 
 
-def _seed_stage_c_pass_state(tmp_path: Path, *, stage_c_pass: bool = True) -> runbook_state.RunbookState:
+def _seed_stage_c_pass_state(
+    tmp_path: Path,
+    *,
+    stage_c_pass: bool = True,
+    scope_rows: list[tuple[str, str]] | None = None,
+) -> runbook_state.RunbookState:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
@@ -67,6 +74,45 @@ def _seed_stage_c_pass_state(tmp_path: Path, *, stage_c_pass: bool = True) -> ru
     state = runbook_state.record_artifact(state, "daily_plan_json", daily_plan, tmp_path)
     state = runbook_state.record_artifact(state, "stage_b_verification_json", verification, tmp_path)
     state = runbook_state.record_artifact(state, "manual_review_template_csv", str(template_csv), tmp_path)
+    scope_pairs = scope_rows if scope_rows is not None else [("TDY", "execution_review_1")]
+    scope_data_rows = [
+        {
+            "account_id": ACCOUNT_ID,
+            "review_date": TRADE_DATE,
+            "symbol": symbol,
+            "question_id": question_id,
+            "question_text": "Review execution.",
+            "question_category": "execution_review",
+            "review_tag": "execution_quality",
+            "canonical_key": build_manual_review_canonical_key(ACCOUNT_ID, TRADE_DATE, symbol, question_id),
+        }
+        for symbol, question_id in scope_pairs
+    ]
+    basis = {
+        "schema_version": "paper_daily_manual_review_scope.v1",
+        "frozen_context": {
+            "runbook_day_id": state.runbook_day_id,
+            "account_id": ACCOUNT_ID,
+            "data_date": DATA_DATE,
+            "trade_date": TRADE_DATE,
+        },
+        "action_mode": "EXECUTION",
+        "sources": {},
+        "manual_review_symbols": [],
+        "current_open_symbols": [],
+        "position_symbols": [],
+        "execution_symbols": [symbol for symbol, _ in scope_pairs],
+        "canonical_keys": [row["canonical_key"] for row in scope_data_rows],
+        "rows": scope_data_rows,
+    }
+    scope_sha = hashlib.sha256(
+        json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    scope_path = _write_json(
+        tmp_path / "artifacts" / state.runbook_day_id / "stage_c" / "manual_review_scope.json",
+        {**basis, "generated_at": "2026-07-02T00:00:00", "counts": {"total": len(scope_data_rows)}, "scope_sha256": scope_sha},
+    )
+    state = runbook_state.record_artifact(state, "manual_review_scope_json", scope_path, tmp_path)
     if stage_c_pass:
         state = runbook_state.complete_stage(state, "C")
         stage_c_summary = _write_json(
@@ -84,6 +130,8 @@ def _seed_stage_c_pass_state(tmp_path: Path, *, stage_c_pass: bool = True) -> ru
                 "raw_payload": {
                     "action_mode": "EXECUTION",
                     "verified_no_action": False,
+                    "manual_review_scope_sha256": scope_sha,
+                    "manual_review_scope_count": len(scope_data_rows),
                 },
             },
         )
@@ -200,7 +248,7 @@ def _seed_no_action_stage_c_state(tmp_path: Path) -> runbook_state.RunbookState:
 
 def _row(
     symbol: str = "TDY",
-    question_id: str = "review_entry_rule",
+    question_id: str = "execution_review_1",
     *,
     account_id: str = ACCOUNT_ID,
     review_date: str = TRADE_DATE,
@@ -224,14 +272,17 @@ def _row(
 
 
 def test_gate2_passes_when_manual_review_rows_are_ready(tmp_path: Path) -> None:
-    state = _seed_stage_c_pass_state(tmp_path)
+    state = _seed_stage_c_pass_state(
+        tmp_path,
+        scope_rows=[("TDY", "execution_review_1"), ("CMG", "execution_review_1")],
+    )
 
     result = runbook_gate_checker.check_gate2_readiness(
         tmp_path,
         ACCOUNT_ID,
         DATA_DATE,
         TRADE_DATE,
-        row_fetcher=lambda state: [_row("TDY"), _row("CMG", "review_exit_rule")],
+        row_fetcher=lambda state: [_row("TDY"), _row("CMG")],
     )
 
     assert result["runner_result"] == "PASS"
@@ -249,14 +300,14 @@ def test_gate2_passes_when_manual_review_rows_are_ready(tmp_path: Path) -> None:
     assert payload["ready_count"] == 2
 
 
-def test_gate2_execution_without_review_rows_waits(tmp_path: Path) -> None:
+def test_gate2_execution_without_review_rows_blocks_on_missing_scope(tmp_path: Path) -> None:
     _seed_stage_c_pass_state(tmp_path)
 
     result = runbook_gate_checker.check_gate2_readiness(
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: []
     )
 
-    assert result["runner_result"] == "WAIT"
+    assert result["runner_result"] == "BLOCKED"
     assert result["action_mode"] == "EXECUTION"
 
 
@@ -515,7 +566,7 @@ def test_gate2_blocks_on_duplicate_ready_rows(tmp_path: Path) -> None:
     payload = json.loads(Path(result["gate_result_json"]).read_text(encoding="utf-8"))
     assert result["runner_result"] == "BLOCKED"
     assert payload["blocked_count"] == 2
-    assert all("duplicate_ready_row" in row["missing"] for row in payload["rows"])
+    assert all("canonical_scope_mismatch" in row["missing"] for row in payload["rows"])
 
 
 def test_stage_runner_gate2_requires_paper_confirmation(tmp_path: Path) -> None:
