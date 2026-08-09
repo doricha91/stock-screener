@@ -244,7 +244,7 @@ class NotionClient:
         return self._request_json(
             "PATCH",
             f"/pages/{page_id}",
-            json_payload={"archived": True},
+            json_payload={"in_trash": True},
         )
 
     def list_block_children(self, block_id: str) -> list[dict[str, Any]]:

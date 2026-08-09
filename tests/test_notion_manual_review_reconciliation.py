@@ -191,3 +191,101 @@ def test_partial_archive_failure_is_reported(tmp_path: Path) -> None:
     )
     assert result["runner_result"] == "FAILED"
     assert result["archived_count"] == 1 and result["archive_failed_count"] == 1
+
+
+def test_current_shaped_retry_creates_none_and_archives_only_13_stale_rows(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    canonical_rows = [
+        _row_from_key(key, index)
+        for index, key in enumerate(manifest["canonical_keys"])
+    ]
+    stale_symbols = [
+        "AMCR", "GPN", "PAYX", "INVH", "AON", "CCL", "AVB",
+        "TDY", "AMT", "BF-B", "SW", "PLD", "CCI",
+    ]
+    stale_rows = [
+        _row_from_key(
+            f"manual_review:{ACCOUNT}:{DATE}:{symbol}:execution_review_1",
+            100 + index,
+        )
+        for index, symbol in enumerate(stale_symbols)
+    ]
+    rows = [*canonical_rows, *stale_rows]
+    created: list[str] = []
+    archived: list[str] = []
+
+    result = apply_manual_review_reconciliation(
+        existing_rows=rows,
+        scope_manifest=manifest,
+        confirmed_scope_sha256=manifest["scope_sha256"],
+        create_row=lambda row: created.append(row["canonical_key"]) or "unexpected",
+        archive_page=archived.append,
+        fetch_rows=lambda: rows,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert (result["desired_count"], result["active_existing_count"]) == (14, 27)
+    assert (result["overlap_count"], result["missing_count"], result["stale_count"]) == (14, 0, 13)
+    assert result["duplicate_count"] == 0
+    assert created == []
+    assert archived == [row["page_id"] for row in stale_rows]
+    assert not set(archived).intersection(row["page_id"] for row in canonical_rows)
+    assert result["archived_count"] == 13
+    assert result["archive_failed_count"] == 0
+    assert result["hard_deleted_count"] == 0
+
+
+def test_partial_trash_retry_targets_only_remaining_active_stale_rows(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    canonical_rows = [
+        _row_from_key(key, index)
+        for index, key in enumerate(manifest["canonical_keys"])
+    ]
+    stale_rows = [
+        _row_from_key(f"manual_review:{ACCOUNT}:{DATE}:STALE{index}:execution_review_1", 90 + index)
+        for index in range(1, 6)
+    ]
+    live_rows = [*canonical_rows, *stale_rows]
+    first_calls: list[str] = []
+
+    def partial_archive(page_id: str) -> None:
+        first_calls.append(page_id)
+        if page_id == stale_rows[2]["page_id"]:
+            raise RuntimeError("trash failed")
+        live_rows[:] = [row for row in live_rows if row["page_id"] != page_id]
+
+    first = apply_manual_review_reconciliation(
+        existing_rows=list(live_rows),
+        scope_manifest=manifest,
+        confirmed_scope_sha256=manifest["scope_sha256"],
+        create_row=lambda row: "unexpected",
+        archive_page=partial_archive,
+        fetch_rows=lambda: list(live_rows),
+    )
+
+    assert first["runner_result"] == "FAILED"
+    assert first["archived_count"] == 4
+    assert first["archive_failed_count"] == 1
+    assert [row["page_id"] for row in live_rows if row not in canonical_rows] == [stale_rows[2]["page_id"]]
+
+    retry_calls: list[str] = []
+
+    def retry_archive(page_id: str) -> None:
+        retry_calls.append(page_id)
+        live_rows[:] = [row for row in live_rows if row["page_id"] != page_id]
+
+    second = apply_manual_review_reconciliation(
+        existing_rows=list(live_rows),
+        scope_manifest=manifest,
+        confirmed_scope_sha256=manifest["scope_sha256"],
+        create_row=lambda row: "unexpected",
+        archive_page=retry_archive,
+        fetch_rows=lambda: list(live_rows),
+    )
+
+    assert second["runner_result"] == "PASS"
+    assert second["missing_count"] == 0
+    assert second["stale_count"] == 1
+    assert retry_calls == [stale_rows[2]["page_id"]]
+    assert all(row in live_rows for row in canonical_rows)
+    assert len(live_rows) == 14

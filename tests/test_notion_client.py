@@ -262,6 +262,19 @@ def test_update_page_sends_properties_payload():
     assert session.calls[0]["json"] == {"properties": payload}
 
 
+def test_archive_page_uses_current_notion_trash_contract():
+    session = FakeSession([FakeResponse(200, {"id": "page-1", "in_trash": True})])
+    client = NotionClient("secret-token", session=session)
+
+    result = client.archive_page("page-1")
+
+    assert result == {"id": "page-1", "in_trash": True}
+    assert session.calls[0]["method"] == "PATCH"
+    assert session.calls[0]["url"].endswith("/pages/page-1")
+    assert session.calls[0]["json"] == {"in_trash": True}
+    assert "archived" not in session.calls[0]["json"]
+
+
 def test_update_data_source_properties_sends_only_explicit_schema_patch():
     session = FakeSession([FakeResponse(200, {"id": "ds1"})])
     client = NotionClient("secret-token", session=session)
