@@ -33,6 +33,10 @@ from core.notion_exporters import (
     export_weekly_report_to_notion,
 )
 from core.notion_settings import NotionSettings
+from core.notion_manual_review_schema import (
+    MANUAL_REVIEW_OPTION_CONTRACTS,
+    MANUAL_REVIEW_PROPERTY_TYPES,
+)
 
 
 def _write(path: Path, text: str) -> None:
@@ -564,6 +568,24 @@ class FakeManualReviewTemplateClient:
 
     def get_data_source_schema(self, data_source_id):
         return self.schema or {}
+
+
+def _manual_review_live_schema() -> dict:
+    mapping = _mapping()["manual_reviews"]
+    properties = {}
+    for logical, property_type in MANUAL_REVIEW_PROPERTY_TYPES.items():
+        payload = {}
+        if property_type in {"select", "multi_select"}:
+            payload["options"] = [
+                {"id": f"{logical}-{index}", "name": option}
+                for index, option in enumerate(MANUAL_REVIEW_OPTION_CONTRACTS.get(logical, ()))
+            ]
+        properties[mapping[logical]] = {
+            "id": f"id-{logical}",
+            "type": property_type,
+            property_type: payload,
+        }
+    return {"id": "manual-reviews", "properties": properties}
 
 
 def test_weekly_external_key_is_generated():
@@ -1408,6 +1430,63 @@ def test_manual_review_template_export_marks_existing_external_key_as_update(tmp
     update_candidate = [item for item in summary["candidates"] if item["action"] == "update"][0]
     assert update_candidate["external_key"] == existing_key
     assert update_candidate["page_id"] == "page-existing"
+
+
+def test_manual_review_actual_retry_reuses_existing_and_creates_only_missing(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_manual_review_template(root, date="2026-06-05", count=2)
+    existing_key = "manual_review:paper_default:2026-06-05:MAA:Q001"
+    client = FakeManualReviewTemplateClient(
+        existing_keys={existing_key: "page-existing"},
+        schema=_manual_review_live_schema(),
+    )
+
+    summary = export_manual_review_template_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_default",
+        paper_root=root,
+        review_date="2026-06-05",
+        dry_run=False,
+    )
+
+    assert summary["updated_count"] == 1
+    assert summary["created_count"] == 1
+    assert len(client.update_calls) == 1
+    assert len(client.create_calls) == 1
+    human_properties = {
+        "Manual Answer", "Review Status", "Follow-up Needed", "Review Tag", "Reviewer Note", "Import Status"
+    }
+    assert human_properties.isdisjoint(client.update_calls[0][1])
+
+
+def test_manual_review_duplicate_preflight_fails_before_any_write(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_manual_review_template(root, date="2026-06-05", count=2)
+
+    class DuplicateClient(FakeManualReviewTemplateClient):
+        def query_by_external_key(self, data_source_id, external_key, external_key_property_name):
+            self.query_calls.append(external_key)
+            if external_key.endswith(":MAA:Q001"):
+                return [{"id": "duplicate-1"}, {"id": "duplicate-2"}]
+            return []
+
+    client = DuplicateClient(schema=_manual_review_live_schema())
+    summary = export_manual_review_template_to_notion(
+        client=client,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        account_id="paper_default",
+        paper_root=root,
+        review_date="2026-06-05",
+        dry_run=False,
+    )
+
+    assert summary["failed_count"] == 1
+    assert summary["would_write"] is False
+    assert client.create_calls == []
+    assert client.update_calls == []
 
 
 def test_non_default_manual_review_template_missing_account_template_does_not_fallback(tmp_path, monkeypatch):

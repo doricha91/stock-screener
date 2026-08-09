@@ -2710,6 +2710,42 @@ def _stage_c_precondition(
         evidence_context = _stage_c_evidence_context(state, workspace)
     except EvidenceError as exc:
         return exc.reason, None
+    if state.stage_status.get(STAGE_C_ID) == "PASS":
+        scope_ref = state.artifacts.get("manual_review_scope_json")
+        if not scope_ref:
+            return "manual_review_scope_required", None
+        try:
+            pinned_scope = load_scope_manifest(
+                _artifact_ref_path(workspace, scope_ref),
+                account_id=state.frozen_context.account_id,
+                data_date=state.frozen_context.data_date,
+                trade_date=state.frozen_context.trade_date,
+            )
+            rebuilt_scope = _build_stage_c_scope(workspace, state)
+        except (DailyReviewScopeError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return f"manual_review_scope_invalid:{exc}", None
+        if pinned_scope["scope_sha256"] != rebuilt_scope["scope_sha256"]:
+            return "stage_c_rebuild_scope_drift", None
+
+        failed_ref = state.artifacts.get("stage_c_error_result_json")
+        if failed_ref:
+            try:
+                failed_result = json.loads(
+                    _artifact_ref_path(workspace, failed_ref).read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return "stage_c_failed_evidence_invalid", None
+            if (
+                failed_result.get("stage_id") != STAGE_C_ID
+                or failed_result.get("runner_result") not in {"FAILED", "BLOCKED"}
+                or failed_result.get("frozen_context")
+                != {
+                    "account_id": state.frozen_context.account_id,
+                    "data_date": state.frozen_context.data_date,
+                    "trade_date": state.frozen_context.trade_date,
+                }
+            ):
+                return "stage_c_failed_evidence_invalid", None
     return None, evidence_context
 
 

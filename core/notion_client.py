@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,33 @@ class NotionAPIError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
+
+
+def _redact_secret_text(value: Any) -> str:
+    normalized = " ".join(str(value or "").split())
+    normalized = re.sub(r"(?i)bearer\s+[^\s,;]+", "Bearer [REDACTED]", normalized)
+    return re.sub(
+        r"(?i)(authorization|token|secret)(\s*[:=]\s*)[^\s,;]+",
+        r"\1\2[REDACTED]",
+        normalized,
+    )
+
+
+def _safe_notion_error_details(body: str, *, limit: int = 400) -> str:
+    """Return bounded operator-facing response details without echoing credentials."""
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        normalized = _redact_secret_text(body)
+        return f"body={normalized[:limit]}" if normalized else ""
+    if not isinstance(payload, dict):
+        return ""
+    details: list[str] = []
+    for key in ("code", "message", "request_id"):
+        value = payload.get(key)
+        if value is not None:
+            details.append(f"{key}={_redact_secret_text(value)[:limit]}")
+    return " ".join(details)
 
 
 class NotionDuplicateExternalKeyError(RuntimeError):
@@ -67,8 +95,10 @@ class NotionClient:
             ) from exc
         if response.status_code >= 400:
             body = response.text
+            details = _safe_notion_error_details(body)
+            suffix = f" {details}" if details else ""
             raise NotionAPIError(
-                f"Notion API request failed: {method} {path} -> HTTP {response.status_code}",
+                f"Notion API request failed: {method} {path} -> HTTP {response.status_code}{suffix}",
                 status_code=response.status_code,
                 response_body=body,
             )
@@ -87,6 +117,17 @@ class NotionClient:
 
     def get_data_source_schema(self, data_source_id: str) -> dict[str, Any]:
         return self.retrieve_data_source(data_source_id)
+
+    def update_data_source_properties(
+        self,
+        data_source_id: str,
+        properties: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._request_json(
+            "PATCH",
+            f"/data_sources/{data_source_id}",
+            json_payload={"properties": properties},
+        )
 
     def _translate_data_source_error(
         self,
@@ -302,6 +343,16 @@ def notion_rich_text(value: str) -> dict[str, Any]:
 
 def notion_select(value: str) -> dict[str, Any]:
     return {"select": {"name": value}}
+
+
+def notion_multi_select(values: list[str] | tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "multi_select": [
+            {"name": str(value).strip()}
+            for value in values
+            if str(value).strip()
+        ]
+    }
 
 
 def notion_date(value: str) -> dict[str, Any]:

@@ -30,10 +30,15 @@ from core.notion_client import (
     NotionClient,
     NotionDuplicateExternalKeyError,
     notion_date,
+    notion_multi_select,
     notion_number,
     notion_rich_text,
     notion_select,
     notion_title,
+)
+from core.notion_manual_review_schema import (
+    assess_manual_review_schema,
+    validate_manual_review_create_payload,
 )
 from core.notion_mapping import get_mapping_section, resolve_notion_property_name
 from core.notion_settings import NotionSettings, get_notion_data_source_id
@@ -814,8 +819,8 @@ def build_manual_review_template_properties(
         resolve_notion_property_name(mapping, "manual_answer"): notion_rich_text(""),
         resolve_notion_property_name(mapping, "review_status"): notion_select("pending"),
         resolve_notion_property_name(mapping, "follow_up_needed"): notion_select("false"),
-        resolve_notion_property_name(mapping, "review_tag"): notion_select(
-            str(row.get("review_tag") or "").strip()
+        resolve_notion_property_name(mapping, "review_tag"): notion_multi_select(
+            [str(row.get("review_tag") or "").strip()]
         ),
         resolve_notion_property_name(mapping, "reviewer_note"): notion_rich_text(""),
         resolve_notion_property_name(mapping, "source_template_key"): notion_rich_text(source_template_key),
@@ -1865,8 +1870,21 @@ def export_manual_review_template_to_notion(
     )
     external_key_property = resolve_notion_property_name(mapping, "external_key")
 
+    live_schema: dict[str, Any] | None = None
+    if not dry_run:
+        if client is None:
+            raise NotionExportError("Notion client is required for actual manual review template export.")
+        live_schema = client.get_data_source_schema(data_source_id)
+        schema_assessment = assess_manual_review_schema(live_schema, mapping)
+        if schema_assessment["runner_result"] != "PASS":
+            raise NotionExportError(
+                "Manual Reviews schema is not compatible; run the read-only schema assess and "
+                "explicit additive migration before export."
+            )
+
     candidates: list[ManualReviewTemplateExportCandidate] = []
     failed: list[dict[str, str]] = []
+    planned: list[tuple[dict[str, str], str, str | None]] = []
     for row in rows:
         symbol = str(row.get("symbol") or "").strip().upper()
         question_id = str(row.get("question_id") or "").strip()
@@ -1913,10 +1931,36 @@ def export_manual_review_template_to_notion(
             page_id=page_id,
         )
         candidates.append(candidate)
+        planned.append((row, external_key, page_id))
 
-        if not dry_run:
-            if client is None:
-                raise NotionExportError("Notion client is required for actual manual review template export.")
+    if failed and not dry_run:
+        return {
+            "target": MANUAL_REVIEW_TEMPLATE_TARGET,
+            "account_id": resolved_account_id,
+            "review_date": normalized_review_date,
+            "candidate_count": len(candidates),
+            "create_count": sum(1 for candidate in candidates if candidate.action == "create"),
+            "update_count": sum(1 for candidate in candidates if candidate.action == "update"),
+            "created_count": 0,
+            "updated_count": 0,
+            "skip_count": 0,
+            "failed_count": len(failed),
+            "source_template_path": _relative_to_project(template_path),
+            "dry_run": False,
+            "would_write": False,
+            "data_source_key": "manual_reviews",
+            "data_source_id": data_source_id,
+            "initial_import_status": MANUAL_REVIEW_TEMPLATE_IMPORT_STATUS,
+            "initial_review_status": "pending",
+            "candidates": [candidate.to_dict() for candidate in candidates],
+            "failed": failed,
+        }
+
+    if not dry_run:
+        assert client is not None
+        assert live_schema is not None
+        payloads: list[dict[str, Any]] = []
+        for row, external_key, _ in planned:
             properties = build_manual_review_template_properties(
                 row,
                 mapping,
@@ -1924,6 +1968,15 @@ def export_manual_review_template_to_notion(
                 review_date=normalized_review_date,
                 external_key=external_key,
             )
+            payload_errors = validate_manual_review_create_payload(properties, live_schema)
+            if payload_errors:
+                raise NotionExportError(
+                    "Manual Review create payload is incompatible with live schema: "
+                    + ", ".join(payload_errors)
+                )
+            payloads.append(properties)
+
+        for index, ((row, external_key, page_id), properties) in enumerate(zip(planned, payloads)):
             if page_id:
                 client.update_page(
                     page_id,
@@ -1944,7 +1997,7 @@ def export_manual_review_template_to_notion(
                     action="create",
                     page_id=str(created.get("id") or "").strip(),
                 )
-                candidates[-1] = candidate
+                candidates[index] = candidate
 
     create_count = sum(1 for candidate in candidates if candidate.action == "create")
     update_count = sum(1 for candidate in candidates if candidate.action == "update")

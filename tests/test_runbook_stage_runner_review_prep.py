@@ -162,6 +162,17 @@ def _seed_stage_b_verified_state(
     return state_path
 
 
+def _pin_stage_c_scope(workspace: Path, state_path: Path) -> None:
+    state = runbook_state.load_state(state_path)
+    scope = runbook_stage_runner._build_stage_c_scope(workspace, state)
+    scope_path = _write_json(
+        workspace / "artifacts" / state.runbook_day_id / "stage_c" / "manual_review_scope.json",
+        scope,
+    )
+    state = runbook_state.record_artifact(state, "manual_review_scope_json", str(scope_path), workspace)
+    runbook_state.save_state(state, state_path)
+
+
 def _fake_review_prep_run(repo_outputs: Path, calls: list[list[str]], *, step11_failed_count: int = 0, update_only: bool = False):
     review_report_md = repo_outputs / "reports" / "paper_daily_review_summary.md"
     report_index_md = repo_outputs / "reports" / "paper_report_index.md"
@@ -597,6 +608,7 @@ def test_stage_b_review_alias_reports_canonical_stage_c(tmp_path: Path) -> None:
 
 def test_stage_c_rebuild_is_allowed_only_while_gate2_and_downstream_are_pending(tmp_path: Path) -> None:
     state_path = _seed_stage_b_verified_state(tmp_path)
+    _pin_stage_c_scope(tmp_path, state_path)
     state = runbook_state.load_state(state_path)
     state = runbook_state.complete_stage(state, "C")
     runbook_state.save_state(state, state_path)
@@ -605,6 +617,7 @@ def test_stage_c_rebuild_is_allowed_only_while_gate2_and_downstream_are_pending(
 
 def test_stage_c_rebuild_is_forbidden_after_gate2_pass(tmp_path: Path) -> None:
     state_path = _seed_stage_b_verified_state(tmp_path)
+    _pin_stage_c_scope(tmp_path, state_path)
     state = runbook_state.load_state(state_path)
     state = runbook_state.complete_stage(state, "C")
     state = runbook_state.complete_stage(state, "GATE2")
@@ -617,6 +630,7 @@ def test_stage_c_rebuild_is_forbidden_after_gate2_pass(tmp_path: Path) -> None:
 
 def test_stage_c_rebuild_requires_explicit_authorization_flag(tmp_path: Path) -> None:
     state_path = _seed_stage_b_verified_state(tmp_path)
+    _pin_stage_c_scope(tmp_path, state_path)
     state = runbook_state.load_state(state_path)
     state = runbook_state.complete_stage(state, "C")
     runbook_state.save_state(state, state_path)
@@ -634,3 +648,127 @@ def test_stage_c_rebuild_requires_explicit_authorization_flag(tmp_path: Path) ->
         allow_rebuild=True,
     )
     assert allowed["runner_result"] == "PASS"
+
+
+def test_failed_stage_c_export_evidence_allows_authorized_retry_without_state_edit(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path)
+    _pin_stage_c_scope(tmp_path, state_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.complete_stage(state, "C")
+    failed = _write_json(
+        tmp_path / "command_runs" / state.runbook_day_id / "failed_stage_c.json",
+        {
+            "runner_result": "FAILED",
+            "stage_id": "C",
+            "frozen_context": {
+                "account_id": ACCOUNT_ID,
+                "data_date": DATA_DATE,
+                "trade_date": TRADE_DATE,
+            },
+        },
+    )
+    state = runbook_state.record_artifact(state, "stage_c_error_result_json", str(failed), tmp_path)
+    runbook_state.save_state(state, state_path)
+
+    result = runbook_stage_runner.run_stage_c(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        dry_run=True,
+        confirm_paper_test=True,
+        allow_rebuild=True,
+    )
+    assert result["runner_result"] == "PASS"
+
+
+def test_failed_stage_c_rebuild_can_be_retried_by_official_flag(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _seed_stage_b_verified_state(workspace)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        _fake_review_prep_run(tmp_path / "initial", calls),
+    )
+    initial = runbook_stage_runner.run_stage_c(
+        workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+    assert initial["runner_result"] == "PASS"
+
+    calls.clear()
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        _fake_review_prep_run(tmp_path / "failed", calls, step11_failed_count=1),
+    )
+    failed = runbook_stage_runner.run_stage_c(
+        workspace,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+        allow_rebuild=True,
+    )
+    assert failed["runner_result"] == "FAILED"
+
+    calls.clear()
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        _fake_review_prep_run(tmp_path / "retry", calls),
+    )
+    retried = runbook_stage_runner.run_stage_c(
+        workspace,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+        allow_rebuild=True,
+    )
+    assert retried["runner_result"] == "PASS"
+    assert len(calls) == 2
+
+
+def test_stage_c_retry_blocks_wrong_failure_context(tmp_path: Path) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path)
+    _pin_stage_c_scope(tmp_path, state_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.complete_stage(state, "C")
+    failed = _write_json(
+        tmp_path / "failed_stage_c.json",
+        {
+            "runner_result": "FAILED",
+            "stage_id": "C",
+            "frozen_context": {
+                "account_id": "wrong-account",
+                "data_date": DATA_DATE,
+                "trade_date": TRADE_DATE,
+            },
+        },
+    )
+    state = runbook_state.record_artifact(state, "stage_c_error_result_json", str(failed), tmp_path)
+    runbook_state.save_state(state, state_path)
+    assert (
+        runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
+        == "stage_c_failed_evidence_invalid"
+    )
+
+
+def test_stage_c_retry_blocks_logical_scope_drift(tmp_path: Path, monkeypatch) -> None:
+    state_path = _seed_stage_b_verified_state(tmp_path)
+    _pin_stage_c_scope(tmp_path, state_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.complete_stage(state, "C")
+    original = runbook_stage_runner._build_stage_c_scope
+
+    def drifted(workspace, current_state):
+        result = original(workspace, current_state)
+        return {**result, "scope_sha256": "0" * 64}
+
+    monkeypatch.setattr(runbook_stage_runner, "_build_stage_c_scope", drifted)
+    assert (
+        runbook_stage_runner._stage_c_precondition_error(state, tmp_path)
+        == "stage_c_rebuild_scope_drift"
+    )

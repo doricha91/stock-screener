@@ -193,8 +193,8 @@ def _mapping() -> dict[str, dict[str, str]]:
 
 def _property(name: str, property_type: str, *, options: list[str] | None = None) -> dict:
     payload = {"id": f"id-{name}", "name": name, "type": property_type}
-    if property_type == "select":
-        payload["select"] = {
+    if property_type in {"select", "multi_select"}:
+        payload[property_type] = {
             "options": [{"name": option} for option in (options or [])]
         }
     else:
@@ -303,14 +303,22 @@ def _daily_review_schema(*, review_options=None, availability_options=None, sync
     }
 
 
-def _manual_review_schema(*, follow_up_type="select", review_tag_type="select", import_options=None) -> dict:
+def _manual_review_schema(*, follow_up_type="select", review_tag_type="multi_select", import_options=None) -> dict:
     follow_up_property = (
         _property("Follow-up Needed", "checkbox")
         if follow_up_type == "checkbox"
         else _property("Follow-up Needed", "select", options=["true", "false"])
     )
     review_tag_property = (
-        _property("Review Tag", "multi_select")
+        _property(
+            "Review Tag",
+            "multi_select",
+            options=[
+                "exit_rule", "entry_rule", "position_sizing", "market_regime", "risk_management",
+                "data_quality", "execution_quality", "signal_quality", "psychology", "other",
+                "position_follow_up",
+            ],
+        )
         if review_tag_type == "multi_select"
         else _property("Review Tag", "select", options=["entry_rule", "other"])
     )
@@ -642,14 +650,15 @@ def test_manual_review_account_id_missing_is_warning():
     assert any(issue.property_name == "Account ID" for issue in result.issues)
 
 
-def test_manual_review_optional_types_accept_checkbox_and_multi_select():
+def test_manual_review_follow_up_checkbox_is_rejected_but_multi_select_tag_is_accepted():
     result = validate_data_source_schema(
         target="manual_reviews",
         data_source_id="ds-manual-review",
         actual_schema=_manual_review_schema(follow_up_type="checkbox", review_tag_type="multi_select"),
         mapping_root=_mapping(),
     )
-    assert result.status == PASS
+    assert result.status == FAIL
+    assert any(issue.property_name == "Follow-up Needed" for issue in result.issues)
 
 
 def test_manual_review_missing_required_property_is_fail():

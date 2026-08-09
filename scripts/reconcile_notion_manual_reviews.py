@@ -22,6 +22,10 @@ from core.notion_mapping import (  # noqa: E402
     load_notion_property_mapping,
     resolve_notion_property_name,
 )
+from core.notion_manual_review_schema import (  # noqa: E402
+    assess_manual_review_schema,
+    validate_manual_review_create_payload,
+)
 from core.notion_settings import (  # noqa: E402
     get_notion_data_source_id,
     get_notion_token,
@@ -85,6 +89,14 @@ def reconcile(
         env_override="NOTION_MANUAL_REVIEWS_DATA_SOURCE_ID",
     )
     notion = client or NotionClient(get_notion_token(settings))
+    live_schema: dict[str, Any] | None = None
+    if apply:
+        live_schema = notion.get_data_source_schema(data_source_id)
+        schema_assessment = assess_manual_review_schema(live_schema, mapping)
+        if schema_assessment["runner_result"] != "PASS":
+            raise ManualReviewReconciliationError(
+                "Manual Reviews schema must pass compatibility assess before reconciliation apply"
+            )
 
     def fetch_rows() -> list[dict[str, Any]]:
         filter_payload = {
@@ -129,6 +141,13 @@ def reconcile(
             review_date=trade_date,
             external_key=scope_row["canonical_key"],
         )
+        assert live_schema is not None
+        payload_errors = validate_manual_review_create_payload(properties, live_schema)
+        if payload_errors:
+            raise ManualReviewReconciliationError(
+                "Manual Review create payload is incompatible with live schema: "
+                + ", ".join(payload_errors)
+            )
         created = notion.create_page(data_source_id, properties)
         page_id = str(created.get("id") or "")
         if not page_id:

@@ -118,6 +118,7 @@ def test_normal_update_properties_preserve_all_human_progress_fields() -> None:
     human_fields = {"manual_answer", "review_status", "follow_up_needed", "review_tag", "reviewer_note", "import_status"}
     assert human_fields.isdisjoint(update)
     assert human_fields.issubset(create)
+    assert create["review_tag"] == {"multi_select": [{"name": "execution_quality"}]}
 
 
 def test_explicit_apply_creates_before_archive_and_never_hard_deletes(tmp_path: Path) -> None:

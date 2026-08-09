@@ -195,12 +195,31 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(
                 manual_review,
                 "follow_up_needed",
-                ("select", "checkbox"),
+                "select",
                 required=False,
                 select_options=("true", "false"),
                 check_options=False,
             ),
-            _expected(manual_review, "review_tag", ("select", "multi_select", "rich_text"), required=False),
+            _expected(
+                manual_review,
+                "review_tag",
+                "multi_select",
+                required=False,
+                select_options=(
+                    "exit_rule",
+                    "entry_rule",
+                    "position_sizing",
+                    "market_regime",
+                    "risk_management",
+                    "data_quality",
+                    "execution_quality",
+                    "signal_quality",
+                    "psychology",
+                    "other",
+                    "position_follow_up",
+                ),
+                check_options=True,
+            ),
             _expected(manual_review, "reviewer_note", "rich_text", required=False),
             _expected(manual_review, "source_template_key", "rich_text", required=False),
             _expected(
@@ -380,7 +399,7 @@ def validate_data_source_schema(
                 )
             )
             continue
-        if actual_type == "select" and expected.check_options and expected.select_options:
+        if actual_type in {"select", "multi_select"} and expected.check_options and expected.select_options:
             available = _extract_select_options(actual)
             missing = [option for option in expected.select_options if option not in available]
             if missing:
@@ -390,7 +409,7 @@ def validate_data_source_schema(
                         property_name=property_name,
                         code="missing_select_options",
                         message=(
-                            f"{property_name} is a select property but missing recommended options: "
+                            f"{property_name} is a {actual_type} property but missing recommended options: "
                             + ", ".join(missing)
                         ),
                     )
@@ -543,7 +562,8 @@ def _extract_actual_properties(actual_schema: dict[str, Any]) -> dict[str, dict[
 
 
 def _extract_select_options(property_schema: dict[str, Any]) -> set[str]:
-    select_payload = property_schema.get("select") or {}
+    property_type = str(property_schema.get("type") or "select")
+    select_payload = property_schema.get(property_type) or {}
     options = select_payload.get("options") or []
     extracted: set[str] = set()
     for option in options:
