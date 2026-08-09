@@ -39,6 +39,12 @@ SCHEMA_VERSION = "mfu_oper9_daily_ops_status.v1"
 COMPLETION_MODE_STANDARD = "STANDARD"
 COMPLETION_MODE_NO_ACTION = "NO_ACTION"
 NO_ACTION_COMPLETION_SCHEMA_VERSION = "runbook_no_action_completion.v1"
+STANDARD_COMPLETION_SCHEMA_VERSION = "runbook_standard_completion.v1"
+STANDARD_AUTHORITATIVE_STAGES = {
+    "DAILY_PLAN_NOTION_EXPORT",
+    "MANUAL_EXECUTION_TEMPLATE",
+    "MANUAL_REVIEW_TEMPLATE",
+}
 
 DONE = "DONE"
 READY = "READY"
@@ -108,11 +114,21 @@ def build_daily_ops_status(
     normalized_trade_date = _normalize_date(trade_date, "trade_date")
     data_dt = datetime.strptime(normalized_data_date, "%Y-%m-%d").date()
     trade_dt = datetime.strptime(normalized_trade_date, "%Y-%m-%d").date()
-    no_action_completion = _validate_no_action_completion_context(
+    validated_completion = _validate_completion_context(
         completion_context,
         account_id=normalized_account_id,
         data_date=normalized_data_date,
         trade_date=normalized_trade_date,
+    )
+    no_action_completion = (
+        validated_completion
+        if validated_completion and validated_completion.get("action_mode") == "NO_ACTION"
+        else None
+    )
+    standard_completion = (
+        validated_completion
+        if validated_completion and validated_completion.get("action_mode") == "STANDARD"
+        else None
     )
     if trade_dt <= data_dt:
         blockers.append(f"trade_date {normalized_trade_date} must be after data_date {normalized_data_date}.")
@@ -192,6 +208,8 @@ def build_daily_ops_status(
     completion_mode = COMPLETION_MODE_NO_ACTION if no_action_completion else COMPLETION_MODE_STANDARD
     if no_action_completion:
         _apply_verified_no_action_completion(stages)
+    elif standard_completion:
+        _apply_verified_standard_completion(stages)
     terminal = _is_terminal_workflow(workflow_status, stages, completion_mode=completion_mode)
     if terminal:
         for stage in stages:
@@ -222,6 +240,7 @@ def build_daily_ops_status(
         "workflow_status": workflow_status,
         "completion_mode": completion_mode,
         "completion_proof": no_action_completion,
+        "runbook_completion_evidence": standard_completion,
         "read_only": True,
         "write_executed": False,
         "operation_write_executed": False,
@@ -257,7 +276,7 @@ def build_daily_ops_status(
     return payload
 
 
-def _validate_no_action_completion_context(
+def _validate_completion_context(
     context: dict[str, Any] | None,
     *,
     account_id: str,
@@ -268,6 +287,31 @@ def _validate_no_action_completion_context(
         return None
     if not isinstance(context, dict):
         raise ValueError("completion_context_must_be_object")
+    action_mode = context.get("action_mode")
+    if action_mode == "STANDARD":
+        return _validate_standard_completion_context(
+            context,
+            account_id=account_id,
+            data_date=data_date,
+            trade_date=trade_date,
+        )
+    if action_mode != "NO_ACTION":
+        raise ValueError("completion_context_action_mode_invalid")
+    return _validate_no_action_completion_context(
+        context,
+        account_id=account_id,
+        data_date=data_date,
+        trade_date=trade_date,
+    )
+
+
+def _validate_no_action_completion_context(
+    context: dict[str, Any],
+    *,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+) -> dict[str, Any]:
     expected = {
         "schema_version": NO_ACTION_COMPLETION_SCHEMA_VERSION,
         "account_id": account_id,
@@ -309,6 +353,42 @@ def _validate_no_action_completion_context(
     return dict(context)
 
 
+def _validate_standard_completion_context(
+    context: dict[str, Any],
+    *,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+) -> dict[str, Any]:
+    expected = {
+        "schema_version": STANDARD_COMPLETION_SCHEMA_VERSION,
+        "runbook_day_id": f"{account_id}_{data_date}_{trade_date}",
+        "account_id": account_id,
+        "data_date": data_date,
+        "trade_date": trade_date,
+        "action_mode": "STANDARD",
+    }
+    mismatches = [field for field, expected_value in expected.items() if context.get(field) != expected_value]
+    if mismatches:
+        raise ValueError(f"standard_completion_context_mismatch:{','.join(mismatches)}")
+    stages = context.get("authoritative_stages")
+    if not isinstance(stages, dict) or set(stages) != STANDARD_AUTHORITATIVE_STAGES:
+        raise ValueError("standard_completion_authoritative_stages_mismatch")
+    for stage_name, evidence in stages.items():
+        if not isinstance(evidence, dict):
+            raise ValueError(f"standard_completion_evidence_invalid:{stage_name}")
+        for field in ("stage_id", "command_key", "summary_ref", "result_ref"):
+            if not isinstance(evidence.get(field), str) or not evidence[field].strip():
+                raise ValueError(f"standard_completion_evidence_invalid:{stage_name}:{field}")
+        if isinstance(evidence.get("step_id"), bool) or not isinstance(evidence.get("step_id"), int):
+            raise ValueError(f"standard_completion_evidence_invalid:{stage_name}:step_id")
+        for field in ("summary_sha256", "result_sha256"):
+            value = evidence.get(field)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"standard_completion_evidence_invalid:{stage_name}:{field}")
+    return dict(context)
+
+
 def _apply_verified_no_action_completion(stages: list[dict[str, Any]]) -> None:
     for stage in stages:
         stage["status"] = DONE
@@ -317,6 +397,18 @@ def _apply_verified_no_action_completion(stages: list[dict[str, Any]]) -> None:
         stage["next_command"] = None
         stage["next_action"] = None
         stage["note"] = "Verified runbook NO_ACTION completion requires no further local operator action."
+
+
+def _apply_verified_standard_completion(stages: list[dict[str, Any]]) -> None:
+    for stage in stages:
+        if stage.get("stage_name") not in STANDARD_AUTHORITATIVE_STAGES:
+            continue
+        stage["status"] = DONE
+        stage["blockers"] = []
+        stage["warnings"] = []
+        stage["next_command"] = None
+        stage["next_action"] = None
+        stage["note"] = "Verified official runbook command evidence supersedes the legacy diagnostic sidecar."
 
 
 def _validate_required_account_id(account_id: str) -> str:

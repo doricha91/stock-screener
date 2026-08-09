@@ -13,6 +13,7 @@ from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
 from scripts import runbook_completion_evidence
 from scripts import runbook_stage_runner
 from scripts import runbook_state
+from tests.runbook_standard_evidence_fixtures import seed_standard_export_evidence
 
 
 ACCOUNT_ID = "paper_pilot_202606"
@@ -71,6 +72,7 @@ def _seed_stage_d_pass_state(workspace: Path, *, stage_d_pass: bool = True) -> r
     if stage_d_pass:
         state = runbook_state.complete_step(state, 15, "D")
         state = runbook_state.complete_stage(state, "D")
+        state = seed_standard_export_evidence(workspace, state)
     latest_dir = workspace / "stage_runs" / state.runbook_day_id
     _write_json(latest_dir / "latest_D_PREVIEW.json", {"stage_id": "D_PREVIEW", "runner_result": "PASS"})
     _write_json(latest_dir / "latest_D.json", {"stage_id": "D", "runner_result": "PASS"})
@@ -176,6 +178,9 @@ def _fake_stage_e_run(
                 "workflow_status": "REVIEW_DONE",
                 "completion_mode": "STANDARD",
                 "completion_proof": None,
+                "runbook_completion_evidence": (
+                    runbook_completion_evidence.build_standard_completion_context(workspace, state)
+                ),
                 "account_root": str(repo_outputs),
                 "read_only": True,
                 "write_executed": False,

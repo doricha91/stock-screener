@@ -25,6 +25,7 @@ from scripts import runbook_stage_runner
 from scripts import runbook_state
 from tests import test_runbook_day_rollover as rollover_fixtures
 from tests import test_runbook_stage_e_evidence as standard_fixtures
+from tests.runbook_standard_evidence_fixtures import seed_standard_export_evidence
 
 
 ACCOUNT_ID = rollover_fixtures.ACCOUNT_ID
@@ -50,6 +51,15 @@ def _completed_standard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
         "build_paper_account_paths",
         lambda account_id, create=False: type("Paths", (), {"root": account_root})(),
     )
+    state = runbook_state.load_state(state_path)
+    state = seed_standard_export_evidence(workspace, state)
+    final_path = workspace / state.artifacts["final_status_report_json"]
+    final_wrapper = json.loads(final_path.read_text(encoding="utf-8"))
+    final_wrapper["raw_payload"]["runbook_completion_evidence"] = (
+        runbook_completion_evidence.build_standard_completion_context(workspace, state)
+    )
+    final_path.write_text(json.dumps(final_wrapper), encoding="utf-8")
+    runbook_state.save_state(state, state_path)
     return workspace, account_root, state_path
 
 
@@ -183,6 +193,12 @@ def test_actual_standard_cli_wrapper_manifest_and_stored_validator(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     account_root, legacy_root = standard_fixtures._build_terminal_account(tmp_path)
+    for stem in (
+        "daily_plan_notion_export",
+        "manual_execution_template_export",
+        "manual_review_template_export",
+    ):
+        (account_root / "reports" / f"{stem}_20260608.json").unlink()
     items = [{"symbol": "AAPL", "action": "BUY", "quantity": 1}]
     plan = {
         "schema_version": "paper_daily_plan.v1", "account_id": standard_fixtures.ACCOUNT_ID,
@@ -218,6 +234,7 @@ def test_actual_standard_cli_wrapper_manifest_and_stored_validator(
         "position_snapshot_written": True, "market_valuation_status": "success",
     }), encoding="utf-8")
     state = runbook_state.record_artifact(state, "eod_commit_report_json", str(eod), workspace)
+    state = seed_standard_export_evidence(workspace, state)
     state_path = runbook_state.get_state_path_for_context(
         workspace, standard_fixtures.ACCOUNT_ID, standard_fixtures.DATA_DATE, standard_fixtures.TRADE_DATE
     )
@@ -233,7 +250,20 @@ def test_actual_standard_cli_wrapper_manifest_and_stored_validator(
     payload = json.loads(capsys.readouterr().out)
     assert payload["completion_mode"] == "STANDARD"
     assert payload["completion_proof"] is None
+    assert payload["runbook_completion_evidence"] == (
+        runbook_completion_evidence.build_standard_completion_context(workspace, state)
+    )
     assert payload["completion_manifest"]["schema_version"] == runbook_completion_evidence.MANIFEST_SCHEMA_VERSION
+    assert payload["overall_status"] == "PASS"
+    assert payload["workflow_status"] == "REVIEW_DONE"
+    assert payload["summary"]["terminal"] is True
+    assert payload["summary"]["needs_attention"] is False
+    assert payload["blockers"] == [] and payload["warnings"] == []
+    assert payload["next_command"] is None and payload["next_action"] is None
+    stage_status = {item["stage_name"]: item["status"] for item in payload["stages"]}
+    assert stage_status["DAILY_PLAN_NOTION_EXPORT"] == "DONE"
+    assert stage_status["MANUAL_EXECUTION_TEMPLATE"] == "DONE"
+    assert stage_status["MANUAL_REVIEW_TEMPLATE"] == "DONE"
     assert runbook_stage_e_evidence.validate_final_status_payload(payload, state, workspace, account_root) == []
 
     wrapper = runbook_result.create_command_result(
@@ -249,6 +279,49 @@ def test_actual_standard_cli_wrapper_manifest_and_stored_validator(
     state = runbook_state.record_artifact(state, "final_status_report_json", str(wrapper_path), workspace)
     state = runbook_state.record_artifact(state, "completion_manifest_json", str(manifest_path), workspace)
     assert runbook_stage_e_evidence.validate_stored_final_status(workspace, state, account_root)["valid"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("missing_summary", "workspace_ref_missing"),
+        ("failed_command", "standard_runbook_command_missing_or_failed"),
+        ("context_mismatch", "standard_runbook_command_result_mismatch"),
+        ("stage_incomplete", "standard_runbook_stage_incomplete"),
+    ],
+)
+def test_standard_runbook_export_evidence_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+    reason: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = seed_standard_export_evidence(workspace, state)
+    if mutation == "missing_summary":
+        (workspace / "stage_runs" / state.runbook_day_id / "latest_A.json").unlink()
+    elif mutation in {"failed_command", "context_mismatch"}:
+        summary = json.loads(
+            (workspace / "stage_runs" / state.runbook_day_id / "latest_A.json").read_text(encoding="utf-8")
+        )
+        step = next(item for item in summary["steps"] if item["command_key"] == "export_daily_plan_notion")
+        result_path = workspace / step["result_json_ref"]
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if mutation == "failed_command":
+            step["runner_result"] = "FAILED"
+            (workspace / "stage_runs" / state.runbook_day_id / "latest_A.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+        else:
+            result["frozen_context"]["trade_date"] = "2026-07-03"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+    else:
+        status = dict(state.stage_status)
+        status["D"] = "PENDING"
+        state = replace(state, stage_status=status)
+    with pytest.raises(runbook_completion_evidence.CompletionEvidenceError, match=reason):
+        runbook_completion_evidence.build_standard_completion_context(workspace, state)
 
 
 def test_workspace_ref_path_matrix_and_stable_reasons(tmp_path: Path) -> None:

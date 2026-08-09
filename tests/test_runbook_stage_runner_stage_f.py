@@ -22,6 +22,7 @@ from scripts import runbook_stage_runner
 from scripts import runbook_command_registry
 from scripts import runbook_result
 from scripts import runbook_state
+from tests.runbook_standard_evidence_fixtures import seed_standard_export_evidence
 
 
 ACCOUNT_ID = "paper_pilot_202606"
@@ -85,6 +86,7 @@ def _seed_stage_e_pass(workspace: Path, account_root: Path, *, omit_f: bool = Fa
         },
     )
     state = runbook_state.record_artifact(state, "eod_commit_report_json", str(commit_path), workspace)
+    state = seed_standard_export_evidence(workspace, state)
     manifest = runbook_completion_evidence.build_runbook_completion_manifest(workspace, state, account_root)
     manifest_path = _write_json(
         workspace / "completion_manifests" / f"{state.runbook_day_id}.json", manifest
@@ -106,6 +108,9 @@ def _seed_stage_e_pass(workspace: Path, account_root: Path, *, omit_f: bool = Fa
                 "workflow_status": "REVIEW_DONE",
                 "completion_mode": "STANDARD",
                 "completion_proof": None,
+                "runbook_completion_evidence": (
+                    runbook_completion_evidence.build_standard_completion_context(workspace, state)
+                ),
                 "completion_manifest": manifest,
                 "read_only": True,
                 "write_executed": False,

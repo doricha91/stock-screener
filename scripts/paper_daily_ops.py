@@ -15,6 +15,7 @@ from core.paper_account_paths import build_paper_account_paths  # noqa: E402
 from core.paper_daily_ops_orchestrator import OpsEvidencePaths, build_daily_ops_status  # noqa: E402
 from scripts import runbook_state  # noqa: E402
 from scripts.runbook_completion_evidence import (  # noqa: E402
+    build_standard_completion_context,
     build_runbook_completion_manifest,
     resolve_workspace_ref,
 )
@@ -83,7 +84,7 @@ def handle_status(args: argparse.Namespace) -> int:
             evidence_paths=evidence,
             include_notion_read=bool(args.include_notion_read),
             notion_timeout_seconds=int(args.notion_timeout_seconds),
-            completion_context=(runbook_context or {}).get("completion_proof"),
+            completion_context=(runbook_context or {}).get("completion_context"),
         )
         if runbook_context:
             manifest = build_runbook_completion_manifest(
@@ -215,14 +216,16 @@ def _load_completion_context(args: argparse.Namespace) -> dict[str, object] | No
         if args.account_root
         else build_paper_account_paths(str(args.account_id), create=False).root.resolve(strict=False)
     )
-    completion_proof = None
+    completion_context: dict[str, object]
     if state.artifacts.get("stage_d_no_action_json"):
-        completion_proof = build_no_action_completion_context(workspace, state, account_root=account_root)
+        completion_context = build_no_action_completion_context(workspace, state, account_root=account_root)
+    else:
+        completion_context = build_standard_completion_context(workspace, state)
     return {
         "workspace": workspace,
         "state": state,
         "account_root": account_root,
-        "completion_proof": completion_proof,
+        "completion_context": completion_context,
     }
 
 

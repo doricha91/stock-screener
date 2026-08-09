@@ -19,10 +19,18 @@ from core.paper_symbol_unrealized_performance import (
     load_paper_position_snapshot_rows,
 )
 from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
+from scripts import runbook_result
 from scripts.runbook_state import RunbookState
 
 
 MANIFEST_SCHEMA_VERSION = "runbook_completion_manifest.v1"
+STANDARD_COMPLETION_SCHEMA_VERSION = "runbook_standard_completion.v1"
+STANDARD_REQUIRED_PASS_STAGES = ("A", "GATE1", "B", "C", "GATE2", "D")
+STANDARD_EXPORT_COMMANDS = {
+    "DAILY_PLAN_NOTION_EXPORT": ("A", 4, "export_daily_plan_notion"),
+    "MANUAL_EXECUTION_TEMPLATE": ("A", 5, "export_execution_template"),
+    "MANUAL_REVIEW_TEMPLATE": ("C", 11, "export_review_template"),
+}
 NO_ACTION_ARTIFACT_KEYS = (
     "execution_preview_json",
     "execution_commit_report_json",
@@ -96,6 +104,178 @@ def validate_no_action_contradictions(state: RunbookState) -> None:
                 "no_action_write_idempotency_present",
                 f"{record.get('command_key')} idempotency contradicts NO_ACTION completion",
             )
+
+
+def build_standard_completion_context(
+    workspace: Path | str,
+    state: RunbookState,
+) -> dict[str, Any]:
+    workspace_path = Path(workspace).resolve(strict=False)
+    for stage_id in STANDARD_REQUIRED_PASS_STAGES:
+        if state.stage_status.get(stage_id) != "PASS":
+            raise CompletionEvidenceError("standard_runbook_stage_incomplete", stage_id)
+
+    expected_context = {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    summaries = {
+        stage_id: _load_standard_stage_summary(workspace_path, state, stage_id, expected_context)
+        for stage_id in {spec[0] for spec in STANDARD_EXPORT_COMMANDS.values()}
+    }
+    authoritative_stages: dict[str, Any] = {}
+    for stage_name, (stage_id, step_id, command_key) in STANDARD_EXPORT_COMMANDS.items():
+        summary, summary_path = summaries[stage_id]
+        matching_steps = [
+            step
+            for step in summary["steps"]
+            if isinstance(step, dict)
+            and step.get("step_id") == step_id
+            and step.get("command_key") == command_key
+        ]
+        if len(matching_steps) != 1 or matching_steps[0].get("runner_result") != "PASS":
+            raise CompletionEvidenceError("standard_runbook_command_missing_or_failed", command_key)
+        result_ref = str(matching_steps[0].get("result_json_ref") or "").strip()
+        result_path = resolve_workspace_ref(workspace_path, result_ref)
+        if command_key == "export_review_template":
+            pinned_ref = str(state.artifacts.get("notion_review_template_report_json") or "").strip()
+            if not pinned_ref or resolve_workspace_ref(workspace_path, pinned_ref) != result_path:
+                raise CompletionEvidenceError("standard_runbook_pinned_artifact_mismatch", command_key)
+        result = _load_json_object(result_path, "standard_runbook_command_result_invalid")
+        _validate_standard_command_result(
+            result,
+            state=state,
+            stage_id=stage_id,
+            step_id=step_id,
+            command_key=command_key,
+        )
+        authoritative_stages[stage_name] = {
+            "stage_id": stage_id,
+            "step_id": step_id,
+            "command_key": command_key,
+            "summary_ref": workspace_relative_ref(workspace_path, summary_path),
+            "summary_sha256": _sha256_file(summary_path),
+            "result_ref": workspace_relative_ref(workspace_path, result_path),
+            "result_sha256": _sha256_file(result_path),
+        }
+    return {
+        "schema_version": STANDARD_COMPLETION_SCHEMA_VERSION,
+        "runbook_day_id": state.runbook_day_id,
+        **expected_context,
+        "action_mode": "STANDARD",
+        "authoritative_stages": authoritative_stages,
+    }
+
+
+def _load_standard_stage_summary(
+    workspace: Path,
+    state: RunbookState,
+    stage_id: str,
+    expected_context: dict[str, str],
+) -> tuple[dict[str, Any], Path]:
+    path = workspace / "stage_runs" / state.runbook_day_id / f"latest_{stage_id}.json"
+    path = resolve_workspace_ref(workspace, path)
+    summary = _load_json_object(path, "standard_runbook_stage_summary_invalid")
+    if runbook_result.validate_stage_summary(summary):
+        raise CompletionEvidenceError("standard_runbook_stage_summary_invalid", stage_id)
+    if (
+        summary.get("runner_result") != "PASS"
+        or summary.get("stage_status") != "PASS"
+        or summary.get("runbook_day_id") != state.runbook_day_id
+        or summary.get("frozen_context") != expected_context
+        or summary.get("stage_id") != stage_id
+    ):
+        raise CompletionEvidenceError("standard_runbook_stage_summary_mismatch", stage_id)
+    return summary, path
+
+
+def _validate_standard_command_result(
+    result: dict[str, Any],
+    *,
+    state: RunbookState,
+    stage_id: str,
+    step_id: int,
+    command_key: str,
+) -> None:
+    if runbook_result.validate_command_result(result):
+        raise CompletionEvidenceError("standard_runbook_command_result_invalid", command_key)
+    expected_context = {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    process = result.get("process")
+    summary = result.get("summary")
+    if (
+        result.get("runner_result") != "PASS"
+        or result.get("runbook_day_id") != state.runbook_day_id
+        or result.get("frozen_context") != expected_context
+        or result.get("stage_id") != stage_id
+        or result.get("step_id") != step_id
+        or result.get("command_key") != command_key
+        or not isinstance(process, dict)
+        or process.get("executed") is not True
+        or process.get("exit_code") != 0
+        or not isinstance(summary, dict)
+        or bool(summary.get("blockers"))
+    ):
+        raise CompletionEvidenceError("standard_runbook_command_result_mismatch", command_key)
+    _validate_standard_export_payload(result.get("raw_payload"), state, command_key)
+
+
+def _validate_standard_export_payload(payload: Any, state: RunbookState, command_key: str) -> None:
+    if not isinstance(payload, dict):
+        raise CompletionEvidenceError("standard_runbook_export_payload_invalid", command_key)
+    account_id = state.frozen_context.account_id
+    trade_date = state.frozen_context.trade_date
+    if command_key == "export_daily_plan_notion":
+        rows = payload.get("json")
+        valid = (
+            isinstance(rows, list)
+            and len(rows) == 1
+            and isinstance(rows[0], dict)
+            and rows[0].get("target") == "daily_plans"
+            and rows[0].get("account_id") == account_id
+            and rows[0].get("external_key") == f"daily_plan:{account_id}:{trade_date}"
+            and rows[0].get("failed_count") == 0
+            and rows[0].get("dry_run") is False
+        )
+    else:
+        expected = {
+            "export_execution_template": ("manual_execution_template", "execution_date"),
+            "export_review_template": ("manual_review_template", "review_date"),
+        }
+        target, date_field = expected[command_key]
+        candidate_count = payload.get("candidate_count")
+        processed_count = sum(
+            value if isinstance(value, int) and not isinstance(value, bool) else -10**9
+            for value in (payload.get("create_count"), payload.get("update_count"), payload.get("skip_count"))
+        )
+        valid = (
+            payload.get("target") == target
+            and payload.get("account_id") == account_id
+            and payload.get(date_field) == trade_date
+            and isinstance(candidate_count, int)
+            and not isinstance(candidate_count, bool)
+            and candidate_count > 0
+            and processed_count >= candidate_count
+            and payload.get("failed_count") == 0
+            and payload.get("dry_run") is False
+            and payload.get("would_write") is True
+        )
+    if not valid:
+        raise CompletionEvidenceError("standard_runbook_export_payload_invalid", command_key)
+
+
+def _load_json_object(path: Path, reason: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CompletionEvidenceError(reason) from exc
+    if not isinstance(payload, dict):
+        raise CompletionEvidenceError(reason)
+    return payload
 
 
 def build_runbook_completion_manifest(

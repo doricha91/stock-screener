@@ -22,6 +22,7 @@ FINAL_STATUS_REQUIRED_FIELDS = (
     "workflow_status",
     "completion_mode",
     "completion_proof",
+    "runbook_completion_evidence",
     "read_only",
     "write_executed",
     "operation_write_executed",
@@ -153,6 +154,7 @@ def validate_final_status_payload(
 
     completion_mode = payload.get("completion_mode")
     completion_proof = payload.get("completion_proof")
+    standard_evidence = payload.get("runbook_completion_evidence")
     completion_manifest = payload.get("completion_manifest")
     if workspace is not None or account_root is not None:
         if not isinstance(completion_manifest, dict):
@@ -164,11 +166,29 @@ def validate_final_status_payload(
             blockers.append(f"final_status workflow_status must be {FINAL_STATUS_WORKFLOW_COMPLETE}")
         if completion_proof is not None:
             blockers.append("final_status standard completion_proof must be null")
+        if workspace is not None and account_root is not None:
+            if not isinstance(standard_evidence, dict):
+                blockers.append("final_status standard runbook_completion_evidence must be an object")
+            else:
+                try:
+                    current_standard_evidence = runbook_completion_evidence.build_standard_completion_context(
+                        workspace, state
+                    )
+                except (OSError, ValueError) as exc:
+                    blockers.append(
+                        "final_status standard evidence invalid:"
+                        f"{getattr(exc, 'reason', type(exc).__name__)}"
+                    )
+                else:
+                    if standard_evidence != current_standard_evidence:
+                        blockers.append("final_status standard runbook_completion_evidence mismatch")
     elif completion_mode == FINAL_STATUS_COMPLETION_NO_ACTION:
         if not isinstance(payload.get("workflow_status"), str) or not payload.get("workflow_status"):
             blockers.append("final_status no-action workflow_status must be a non-empty string")
         if not isinstance(completion_proof, dict):
             blockers.append("final_status no-action completion_proof must be an object")
+        if standard_evidence is not None:
+            blockers.append("final_status no-action runbook_completion_evidence must be null")
     else:
         blockers.append("final_status completion_mode is invalid")
 

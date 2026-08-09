@@ -20,6 +20,7 @@ from scripts import runbook_day_rollover as runbook_day_rollover_cli
 from scripts import runbook_completion_evidence
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_state
+from tests.runbook_standard_evidence_fixtures import seed_standard_export_evidence
 
 
 ACCOUNT_ID = "paper_pilot_202606"
@@ -166,6 +167,8 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
     )
     state = runbook_state.record_artifact(state, "eod_commit_report_json", str(eod_commit), workspace)
     state = runbook_state.complete_stage(state, "D")
+    state = seed_standard_export_evidence(workspace, state)
+    standard_evidence = runbook_completion_evidence.build_standard_completion_context(workspace, state)
     manifest = runbook_completion_evidence.build_runbook_completion_manifest(workspace, state, account_root)
     completion_manifest = _write_json(
         workspace / "completion_manifests" / f"{state.runbook_day_id}.json", manifest
@@ -185,6 +188,7 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
                 "workflow_status": "REVIEW_DONE",
                 "completion_mode": "STANDARD",
                 "completion_proof": None,
+                "runbook_completion_evidence": standard_evidence,
                 "completion_manifest": manifest,
                 "read_only": True,
                 "write_executed": False,
@@ -213,6 +217,7 @@ def _complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
         last_completed_stage="F",
         stage_status={stage_id: "PASS" for stage_id in runbook_state.STAGE_IDS},
         artifacts={
+            **state.artifacts,
             "daily_plan_json": str(plan_path.relative_to(workspace)),
             "eod_commit_report_json": str(eod_commit.relative_to(workspace)),
             "completion_manifest_json": str(completion_manifest.relative_to(workspace)),
