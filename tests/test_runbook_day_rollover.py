@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from core import runbook_day_rollover as rollover_core
+from core import runbook_retirement
 from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
 from core.paper_execution_intent import build_execution_intent
 from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
@@ -17,7 +18,9 @@ from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
 from core.runbook_calendar import CalendarCoverageError, load_market_calendar
 from core.runbook_day_rollover import preview_rollover
 from scripts import runbook_day_rollover as runbook_day_rollover_cli
+from scripts import runbook_command_registry
 from scripts import runbook_completion_evidence
+from scripts import runbook_result
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_state
 from tests.runbook_standard_evidence_fixtures import seed_standard_export_evidence
@@ -239,6 +242,62 @@ def _active_state(workspace: Path, data_date: str, trade_date: str) -> Path:
     return path
 
 
+def _legacy_complete_state(workspace: Path, data_date: str, trade_date: str) -> Path:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, data_date, trade_date)
+    statuses = {stage_id: "PASS" for stage_id in runbook_state.STAGE_IDS if stage_id != "F"}
+    statuses["F"] = "PENDING"
+    state = replace(
+        state,
+        current_stage="E",
+        current_status="PASS",
+        last_completed_step=18,
+        last_completed_stage="E",
+        stage_status=statuses,
+    )
+    eod = _write_json(
+        workspace / "command_runs" / state.runbook_day_id / "eod_commit.json",
+        {
+            "runner_result": "PASS", "status": "COMMITTED", "mode": "commit",
+            "account_id": ACCOUNT_ID, "date": trade_date, "trade_date": trade_date,
+            "failed_count": 0, "blocked_count": 0, "current_state_written": True,
+            "account_snapshot_written": True, "position_snapshot_written": True,
+            "market_valuation_status": "success",
+        },
+    )
+    state = runbook_state.record_artifact(state, "eod_commit_report_json", str(eod), workspace)
+    raw_terminal = {
+        "schema_version": "mfu_oper9_daily_ops_status.v1",
+        "account_id": ACCOUNT_ID, "data_date": data_date, "trade_date": trade_date,
+        "overall_status": "PASS", "workflow_status": "REVIEW_DONE",
+        "read_only": True, "write_executed": False, "operation_write_executed": False,
+        "notion_api_called": False, "notion_live_read_enabled": False,
+        "notion_live_read_called": False, "commit_append_executed": False,
+        "blockers": [], "warnings": [], "next_command": None, "next_action": None,
+        "summary": {"terminal": True, "needs_attention": False},
+        "stage_counts": {}, "stages": [], "operator_summary": {},
+    }
+    command = runbook_command_registry.get_command("final_status")
+    result = runbook_result.create_command_result(
+        state,
+        command,
+        "PASS",
+        "PASS",
+        raw_payload=raw_terminal,
+        process={"executed": True, "exit_code": 0, "duration_ms": 1},
+        workspace=workspace,
+    )
+    final_path, _ = runbook_result.write_command_result(workspace, state, command, result)
+    state = runbook_state.record_artifact(state, "final_status_report_json", str(final_path), workspace)
+    stored_result = json.loads(final_path.read_text(encoding="utf-8"))
+    summary = runbook_result.create_stage_summary(state, "E", [stored_result])
+    runbook_result.write_stage_summary(workspace, state, summary)
+    raw_state = state.to_dict()
+    raw_state["stage_status"].pop("F")
+    path = runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, data_date, trade_date)
+    _write_json(path, raw_state)
+    return path
+
+
 def test_calendar_returns_next_ordinary_weekday() -> None:
     calendar = load_market_calendar()
     assert calendar.next_trading_day(date(2026, 7, 6)) == date(2026, 7, 7)
@@ -275,6 +334,13 @@ def test_previous_trade_date_becomes_next_data_date(tmp_path: Path) -> None:
         "next_data_date": "2026-07-02",
         "next_trade_date": "2026-07-06",
         "next_runbook_day_id": f"{ACCOUNT_ID}_2026-07-02_2026-07-06",
+        "runbook_classifications": [{
+            "runbook_day_id": f"{ACCOUNT_ID}_2026-07-01_2026-07-02",
+            "data_date": "2026-07-01",
+            "trade_date": "2026-07-02",
+            "classification": "STANDARD_COMPLETED",
+            "blockers": [],
+        }],
         "already_exists": False,
         "safe_to_prepare": True,
         "next_required_action": "Run 6-4C to prepare the local runbook environment.",
@@ -292,6 +358,150 @@ def test_active_incomplete_day_blocks_rollover(tmp_path: Path) -> None:
     assert result["runner_result"] == "BLOCKED"
     assert result["reason"] == "active_runbook_day_exists"
     assert result["safe_to_prepare"] is False
+
+
+def test_valid_pre_stage_f_terminal_is_legacy_completed_without_state_mutation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _legacy_complete_state(workspace, "2026-07-01", "2026-07-02")
+    before = state_path.read_bytes()
+
+    classification = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert classification["classifications"][0]["classification"] == "LEGACY_COMPLETED"
+    assert result["runner_result"] == "PASS"
+    assert state_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("f_status", ["PENDING", "FAILED", "BLOCKED"])
+def test_current_lifecycle_incomplete_f_is_not_legacy_completed(tmp_path: Path, f_status: str) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _legacy_complete_state(workspace, "2026-07-01", "2026-07-02")
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    raw["stage_status"]["F"] = f_status
+    _write_json(state_path, raw)
+
+    classification = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert classification["classifications"][0]["classification"] == "ACTIVE_INCOMPLETE"
+    assert result["reason"] == "active_runbook_day_exists"
+
+
+@pytest.mark.parametrize("status", ["BLOCKED", "FAILED"])
+def test_legacy_e_failure_is_not_completed(tmp_path: Path, status: str) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _legacy_complete_state(workspace, "2026-07-01", "2026-07-02")
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    raw["current_status"] = status
+    raw["stage_status"]["E"] = status
+    raw["last_error"] = {"stage_id": "E", "status": status}
+    _write_json(state_path, raw)
+
+    classification = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+
+    assert classification["classifications"][0]["classification"] == "ACTIVE_INCOMPLETE"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "context", "step", "latest"])
+def test_legacy_final_status_must_be_present_and_untampered(tmp_path: Path, mutation: str) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _legacy_complete_state(workspace, "2026-07-01", "2026-07-02")
+    state = runbook_state.load_state(state_path)
+    final_path = workspace / state.artifacts["final_status_report_json"]
+    if mutation == "missing":
+        final_path.unlink()
+    elif mutation in {"context", "step"}:
+        payload = json.loads(final_path.read_text(encoding="utf-8"))
+        if mutation == "context":
+            payload["frozen_context"]["trade_date"] = "2026-07-03"
+        else:
+            payload["step_id"] = 17
+        _write_json(final_path, payload)
+    else:
+        latest_path = workspace / "stage_runs" / state.runbook_day_id / "latest_E.json"
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        latest["steps"][0]["runner_result"] = "FAILED"
+        _write_json(latest_path, latest)
+
+    classification = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+
+    assert classification["classifications"][0]["classification"] == "ACTIVE_INCOMPLETE"
+
+
+def test_rollover_uses_latest_standard_with_legacy_and_explicit_retirement(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _legacy_complete_state(workspace, "2026-07-01", "2026-07-02")
+    _legacy_complete_state(workspace, "2026-07-02", "2026-07-06")
+    _active_state(workspace, "2026-07-06", "2026-07-07")
+    retired = runbook_retirement.retire_runbook(
+        workspace,
+        account_id=ACCOUNT_ID,
+        data_date="2026-07-06",
+        trade_date="2026-07-07",
+        runbook_day_id=f"{ACCOUNT_ID}_2026-07-06_2026-07-07",
+        reason="Unused runbook created before initial-cash correction",
+        confirm_paper_test=True,
+        confirm_retire_zero_progress=True,
+    )
+    _complete_state(workspace, "2026-08-07", "2026-08-10")
+
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+    classifications = {item["runbook_day_id"]: item["classification"] for item in result["runbook_classifications"]}
+
+    assert retired["runner_result"] == "PASS"
+    assert result["runner_result"] == "PASS"
+    assert result["previous_runbook_day_id"] == f"{ACCOUNT_ID}_2026-08-07_2026-08-10"
+    assert result["next_data_date"] == "2026-08-10"
+    assert result["next_trade_date"] == "2026-08-11"
+    assert result["next_runbook_day_id"] == f"{ACCOUNT_ID}_2026-08-10_2026-08-11"
+    assert list(classifications.values()).count("LEGACY_COMPLETED") == 2
+    assert classifications[f"{ACCOUNT_ID}_2026-07-06_2026-07-07"] == "RETIRED"
+    assert classifications[f"{ACCOUNT_ID}_2026-08-07_2026-08-10"] == "STANDARD_COMPLETED"
+
+
+def test_zero_progress_without_retirement_remains_blocked(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _legacy_complete_state(workspace, "2026-07-01", "2026-07-02")
+    _active_state(workspace, "2026-07-06", "2026-07-07")
+
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "active_runbook_day_exists"
+
+
+def test_stale_retirement_evidence_remains_active_fail_closed(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _legacy_complete_state(workspace, "2026-07-01", "2026-07-02")
+    state_path = _active_state(workspace, "2026-07-06", "2026-07-07")
+    runbook_id = f"{ACCOUNT_ID}_2026-07-06_2026-07-07"
+    assert runbook_retirement.retire_runbook(
+        workspace,
+        account_id=ACCOUNT_ID,
+        data_date="2026-07-06",
+        trade_date="2026-07-07",
+        runbook_day_id=runbook_id,
+        reason="Unused runbook",
+        confirm_paper_test=True,
+        confirm_retire_zero_progress=True,
+    )["runner_result"] == "PASS"
+    state_path.write_bytes(state_path.read_bytes() + b" ")
+
+    classification = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+
+    stale = next(item for item in classification["classifications"] if item["runbook_day_id"] == runbook_id)
+    assert stale["classification"] == "ACTIVE_INCOMPLETE"
+    assert "retirement_state_sha256_mismatch" in stale["blockers"]
+    assert result["reason"] == "active_runbook_day_exists"
 
 
 def test_missing_completed_day_blocks_without_bootstrap(tmp_path: Path) -> None:

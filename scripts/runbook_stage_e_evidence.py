@@ -316,6 +316,126 @@ def validate_stored_final_status(
     return {"valid": not blockers, "blockers": blockers}
 
 
+def validate_legacy_stored_final_status(
+    workspace: Path,
+    state: RunbookState,
+) -> dict[str, Any]:
+    """Validate the historical pre-Stage-F terminal contract without rewriting it."""
+    payload, final_path, error = load_workspace_json_artifact(
+        workspace, state.artifacts.get("final_status_report_json")
+    )
+    if error:
+        return {"valid": False, "blockers": [f"final_status_report_json:{error}"]}
+    blockers = [f"final_status_report_json:schema:{item}" for item in runbook_result.validate_command_result(payload)]
+    expected_context = {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+    process = payload.get("process")
+    summary = payload.get("summary")
+    if payload.get("runner_result") != "PASS":
+        blockers.append("final_status_report_json:runner_result_not_pass")
+    if payload.get("runbook_day_id") != state.runbook_day_id:
+        blockers.append("final_status_report_json:runbook_day_id_mismatch")
+    if payload.get("frozen_context") != expected_context:
+        blockers.append("final_status_report_json:frozen_context_mismatch")
+    if payload.get("stage_id") != "E" or payload.get("step_id") != 18:
+        blockers.append("final_status_report_json:stage_step_mismatch")
+    if payload.get("command_key") != "final_status":
+        blockers.append("final_status_report_json:command_key_mismatch")
+    if not isinstance(process, dict) or process.get("executed") is not True or process.get("exit_code") != 0:
+        blockers.append("final_status_report_json:process_not_successful")
+    if not isinstance(summary, dict) or bool(summary.get("blockers")):
+        blockers.append("final_status_report_json:summary_blocked")
+
+    raw_payload = payload.get("raw_payload")
+    if not isinstance(raw_payload, dict):
+        blockers.append("final_status_report_json:raw_payload_invalid")
+    else:
+        expected_values = {
+            "schema_version": FINAL_STATUS_SCHEMA_VERSION,
+            **expected_context,
+            "overall_status": "PASS",
+            "workflow_status": FINAL_STATUS_WORKFLOW_COMPLETE,
+        }
+        for field, expected in expected_values.items():
+            if raw_payload.get(field) != expected:
+                blockers.append(f"final_status_report_json:payload:{field}_mismatch")
+        expected_flags = {
+            "read_only": True,
+            "write_executed": False,
+            "operation_write_executed": False,
+            "notion_api_called": False,
+            "commit_append_executed": False,
+        }
+        for field, expected in expected_flags.items():
+            if raw_payload.get(field) is not expected or not isinstance(raw_payload.get(field), bool):
+                blockers.append(f"final_status_report_json:payload:{field}_mismatch")
+        live_enabled = raw_payload.get("notion_live_read_enabled")
+        live_called = raw_payload.get("notion_live_read_called")
+        if not isinstance(live_enabled, bool) or not isinstance(live_called, bool) or live_called != live_enabled:
+            blockers.append("final_status_report_json:payload:notion_live_read_contract_invalid")
+        live_errors = raw_payload.get("notion_live_read_errors")
+        if live_errors is not None and (not isinstance(live_errors, list) or live_errors):
+            blockers.append("final_status_report_json:payload:notion_live_read_errors_present")
+        for field in ("blockers", "warnings"):
+            if not isinstance(raw_payload.get(field), list) or raw_payload.get(field):
+                blockers.append(f"final_status_report_json:payload:{field}_not_empty")
+        terminal_summary = raw_payload.get("summary")
+        if not isinstance(terminal_summary, dict) or terminal_summary.get("terminal") is not True:
+            blockers.append("final_status_report_json:payload:not_terminal")
+        if not isinstance(terminal_summary, dict) or terminal_summary.get("needs_attention") is not False:
+            blockers.append("final_status_report_json:payload:needs_attention")
+        if raw_payload.get("next_command") is not None or raw_payload.get("next_action") is not None:
+            blockers.append("final_status_report_json:payload:next_action_present")
+
+    latest_path = workspace / "stage_runs" / state.runbook_day_id / "latest_E.json"
+    latest, _, latest_error = load_workspace_json_artifact(workspace, latest_path)
+    if latest_error:
+        blockers.append(f"latest_stage_e:{latest_error}")
+    else:
+        blockers.extend(f"latest_stage_e:schema:{item}" for item in runbook_result.validate_stage_summary(latest))
+        if (
+            latest.get("runner_result") != "PASS"
+            or latest.get("stage_status") != "PASS"
+            or latest.get("runbook_day_id") != state.runbook_day_id
+            or latest.get("frozen_context") != expected_context
+            or latest.get("stage_id") != "E"
+        ):
+            blockers.append("latest_stage_e:contract_mismatch")
+        steps = latest.get("steps")
+        matches = [
+            item
+            for item in steps if isinstance(item, dict)
+            and item.get("step_id") == 18
+            and item.get("command_key") == "final_status"
+        ] if isinstance(steps, list) else []
+        if len(matches) != 1 or matches[0].get("runner_result") != "PASS":
+            blockers.append("latest_stage_e:final_status_step_invalid")
+        else:
+            try:
+                summary_result_path = runbook_completion_evidence.resolve_workspace_ref(
+                    workspace, matches[0].get("result_json_ref")
+                )
+            except runbook_completion_evidence.CompletionEvidenceError as exc:
+                blockers.append(f"latest_stage_e:result_ref:{exc.reason}")
+            else:
+                if final_path is None or summary_result_path != final_path:
+                    blockers.append("latest_stage_e:result_ref_mismatch")
+    return {"valid": not blockers, "blockers": blockers}
+
+
+def validate_legacy_stage_e_completion_evidence(
+    workspace: Path,
+    state: RunbookState,
+) -> dict[str, Any]:
+    commit = validate_stored_eod_commit(workspace, state)
+    final_status = validate_legacy_stored_final_status(workspace, state)
+    blockers = [*commit["blockers"], *final_status["blockers"]]
+    return {"valid": not blockers, "blockers": blockers}
+
+
 def validate_stage_e_completion_evidence(
     workspace: Path,
     state: RunbookState,

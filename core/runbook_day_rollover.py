@@ -9,6 +9,7 @@ from typing import Any
 
 from core.paper_account_paths import build_paper_account_paths
 from core.runbook_calendar import CalendarCoverageError, MarketCalendar
+from core import runbook_retirement
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
@@ -32,6 +33,7 @@ DUPLICATE_DIRS = (
 class StateRecord:
     path: Path
     state: runbook_state.RunbookState
+    raw_stage_status: dict[str, Any]
 
 
 def _blocked(reason: str, blockers: list[str] | None = None) -> dict[str, Any]:
@@ -45,7 +47,7 @@ def _blocked(reason: str, blockers: list[str] | None = None) -> dict[str, Any]:
     }
 
 
-def _is_completed(workspace: Path, state: runbook_state.RunbookState) -> bool:
+def _is_standard_completed(workspace: Path, state: runbook_state.RunbookState) -> bool:
     state_complete = (
         state.current_stage == "F"
         and state.current_status == "PASS"
@@ -79,6 +81,55 @@ def _is_completed(workspace: Path, state: runbook_state.RunbookState) -> bool:
     return bool(evidence["valid"])
 
 
+def _is_legacy_completed(workspace: Path, record: StateRecord) -> bool:
+    state = record.state
+    legacy_stages = COMPLETION_STAGES[:-1]
+    state_complete = (
+        "F" not in record.raw_stage_status
+        and set(record.raw_stage_status) == set(legacy_stages)
+        and all(record.raw_stage_status.get(stage_id) == "PASS" for stage_id in legacy_stages)
+        and state.current_stage == "E"
+        and state.current_status == "PASS"
+        and state.last_completed_step == 18
+        and state.last_completed_stage == "E"
+        and state.last_error is None
+        and bool(state.artifacts.get("final_status_report_json"))
+    )
+    if not state_complete:
+        return False
+    return bool(
+        runbook_stage_e_evidence.validate_legacy_stage_e_completion_evidence(
+            workspace, state
+        )["valid"]
+    )
+
+
+def classify_state(workspace: Path, record: StateRecord) -> dict[str, Any]:
+    if _is_standard_completed(workspace, record.state):
+        classification = "STANDARD_COMPLETED"
+        blockers: list[str] = []
+    elif _is_legacy_completed(workspace, record):
+        classification = "LEGACY_COMPLETED"
+        blockers = []
+    else:
+        retirement = runbook_retirement.validate_retirement_evidence(
+            workspace, record.path, record.state
+        )
+        if retirement["valid"]:
+            classification = "RETIRED"
+            blockers = []
+        else:
+            classification = "ACTIVE_INCOMPLETE"
+            blockers = retirement["blockers"] if retirement["exists"] else []
+    return {
+        "runbook_day_id": record.state.runbook_day_id,
+        "data_date": record.state.frozen_context.data_date,
+        "trade_date": record.state.frozen_context.trade_date,
+        "classification": classification,
+        "blockers": blockers,
+    }
+
+
 def _account_filename_prefix(account_id: str) -> str:
     marker = runbook_state.get_runbook_day_id(account_id, "2000-01-01", "2000-01-02")
     return marker.rsplit("_2000-01-01_2000-01-02", 1)[0] + "_"
@@ -94,6 +145,12 @@ def _load_account_states(workspace: Path, account_id: str) -> tuple[list[StateRe
     prefix = _account_filename_prefix(account_id)
     for path in sorted(state_dir.glob("*.json")):
         try:
+            raw_payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw_payload, dict):
+                raise ValueError("state_json_must_be_object")
+            raw_stage_status = raw_payload.get("stage_status")
+            if not isinstance(raw_stage_status, dict):
+                raise ValueError("stage_status_must_be_object")
             state = runbook_state.load_state(path)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             if path.name.startswith(prefix):
@@ -113,8 +170,17 @@ def _load_account_states(workspace: Path, account_id: str) -> tuple[list[StateRe
         if path.name != f"{state.runbook_day_id}.json":
             blockers.append(f"state_filename_mismatch:{path.name}")
             continue
-        records.append(StateRecord(path=path, state=state))
+        records.append(StateRecord(path=path, state=state, raw_stage_status=dict(raw_stage_status)))
     return records, blockers
+
+
+def classify_account_runbooks(workspace: str | Path, account_id: str) -> dict[str, Any]:
+    workspace_path = Path(workspace).resolve(strict=False)
+    records, blockers = _load_account_states(workspace_path, str(account_id or "").strip())
+    return {
+        "classifications": [classify_state(workspace_path, record) for record in records],
+        "blockers": blockers,
+    }
 
 
 def _already_exists(workspace: Path, runbook_day_id: str) -> bool:
@@ -146,7 +212,8 @@ def preview_rollover(
     if not records:
         return _blocked("completed_runbook_day_not_found")
 
-    active = [record for record in records if not _is_completed(workspace_path, record.state)]
+    classified = [(record, classify_state(workspace_path, record)) for record in records]
+    active = [record for record, item in classified if item["classification"] == "ACTIVE_INCOMPLETE"]
     if len(active) > 1:
         return _blocked(
             "multiple_active_runbook_days",
@@ -158,7 +225,11 @@ def preview_rollover(
             [f"active_runbook_day:{active[0].state.runbook_day_id}"],
         )
 
-    completed = [record for record in records if _is_completed(workspace_path, record.state)]
+    completed = [
+        record
+        for record, item in classified
+        if item["classification"] in {"STANDARD_COMPLETED", "LEGACY_COMPLETED"}
+    ]
     if not completed:
         return _blocked("completed_runbook_day_not_found")
     latest_trade_date = max(record.state.frozen_context.trade_date for record in completed)
@@ -194,6 +265,7 @@ def preview_rollover(
         "next_data_date": next_data_date.isoformat(),
         "next_trade_date": next_trade_date.isoformat(),
         "next_runbook_day_id": next_runbook_day_id,
+        "runbook_classifications": [item for _, item in classified],
         "already_exists": already_exists,
         "safe_to_prepare": not already_exists,
         "next_required_action": NEXT_ACTION if not already_exists else "Inspect the existing next runbook day before 6-4C.",
