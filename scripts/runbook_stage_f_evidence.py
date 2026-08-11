@@ -136,6 +136,8 @@ def validate_stage_f_export_payload(
     *,
     expected_source: Path,
     label: str,
+    frozen_benchmark_payload: dict[str, Any] | None = None,
+    read_current_benchmark_source: bool = True,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     rows = payload.get("json")
@@ -147,9 +149,11 @@ def validate_stage_f_export_payload(
     blockers.extend(_strict_zero_count(item, "failed_count"))
     if str(item.get("action") or "").strip().lower() not in {"created", "updated", "skipped"}:
         blockers.append("action must be created/updated/skipped")
-    source_path = Path(str(item.get("source_path") or ""))
+    source_ref = str(item.get("source_path") or "").strip()
+    source_path = Path(source_ref)
     source_valid = True
-    if not source_path.is_file():
+    historical_benchmark = label == "Benchmark Report" and not read_current_benchmark_source
+    if not source_ref or (not historical_benchmark and not source_path.is_file()):
         blockers.append("source_path must exist")
         source_valid = False
     else:
@@ -167,11 +171,13 @@ def validate_stage_f_export_payload(
             state.frozen_context.trade_date,
         )
     elif label == "Benchmark Report" and source_valid:
-        try:
-            benchmark_source = json.loads(source_path.read_text(encoding="utf-8-sig"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            blockers.append("benchmark_source_json_invalid")
-        else:
+        benchmark_source = frozen_benchmark_payload
+        if read_current_benchmark_source:
+            try:
+                benchmark_source = json.loads(source_path.read_text(encoding="utf-8-sig"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                blockers.append("benchmark_source_json_invalid")
+        if benchmark_source is not None:
             if not isinstance(benchmark_source, dict):
                 blockers.append("benchmark_source_json_must_be_object")
             else:
@@ -206,14 +212,14 @@ def validate_stage_f_export_payload(
     )
 
 
-def _validate_benchmark_artifact(
+def _load_and_validate_benchmark_artifact(
     workspace: Path,
     state: RunbookState,
     artifact_ref: object,
-) -> list[str]:
+) -> tuple[dict[str, Any] | None, list[str]]:
     payload, _, error = load_workspace_json_artifact(workspace, artifact_ref)
     if error:
-        return [f"benchmark_report_json:{error}"]
+        return None, [f"benchmark_report_json:{error}"]
     blockers: list[str] = []
     if str(payload.get("account_id") or "").strip() != state.frozen_context.account_id:
         blockers.append("benchmark_report_json:account_id_mismatch")
@@ -223,7 +229,7 @@ def _validate_benchmark_artifact(
         blockers.append("benchmark_report_json:run_mode_missing")
     elif not isinstance(payload["run_mode"], str) or not payload["run_mode"].strip():
         blockers.append("benchmark_report_json:run_mode_type_invalid")
-    return blockers
+    return payload, blockers
 
 
 def _validate_notion_command_evidence(
@@ -235,6 +241,7 @@ def _validate_notion_command_evidence(
     step_id: int,
     expected_source: Path,
     label: str,
+    frozen_benchmark_payload: dict[str, Any] | None = None,
 ) -> list[str]:
     payload, _, error = load_workspace_json_artifact(workspace, state.artifacts.get(artifact_name))
     if error:
@@ -265,6 +272,8 @@ def _validate_notion_command_evidence(
             account_root,
             expected_source=expected_source,
             label=label,
+            frozen_benchmark_payload=frozen_benchmark_payload,
+            read_current_benchmark_source=False,
         )
         blockers.extend(f"{artifact_name}:payload:{item}" for item in validation["blockers"])
     else:
@@ -294,9 +303,10 @@ def validate_stage_f_completion_evidence(
         "last_error": state.last_error is None,
     }
     blockers.extend(f"state:{field}_invalid" for field, valid in expected_state.items() if not valid)
-    blockers.extend(
-        _validate_benchmark_artifact(workspace, state, state.artifacts.get("benchmark_report_json"))
+    frozen_benchmark_payload, benchmark_blockers = _load_and_validate_benchmark_artifact(
+        workspace, state, state.artifacts.get("benchmark_report_json")
     )
+    blockers.extend(benchmark_blockers)
     blockers.extend(
         _validate_notion_command_evidence(
             workspace,
@@ -319,6 +329,7 @@ def validate_stage_f_completion_evidence(
             21,
             account_root / "reports" / "paper_benchmark_comparison.json",
             "Benchmark Report",
+            frozen_benchmark_payload=frozen_benchmark_payload,
         )
     )
     return {"valid": not blockers, "blockers": blockers}

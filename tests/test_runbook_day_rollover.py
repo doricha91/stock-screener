@@ -22,6 +22,7 @@ from scripts import runbook_command_registry
 from scripts import runbook_completion_evidence
 from scripts import runbook_result
 from scripts import runbook_stage_e_evidence
+from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
 from tests.runbook_standard_evidence_fixtures import seed_standard_export_evidence
 
@@ -345,6 +346,117 @@ def test_previous_trade_date_becomes_next_data_date(tmp_path: Path) -> None:
         "safe_to_prepare": True,
         "next_required_action": "Run 6-4C to prepare the local runbook environment.",
     }
+
+
+def test_historical_completion_ignores_later_mutable_benchmark_contents(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-08-07", "2026-08-10")
+    before_state = state_path.read_bytes()
+
+    before = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+    benchmark_source = (
+        tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID / "reports" / "paper_benchmark_comparison.json"
+    )
+    _write_json(
+        benchmark_source,
+        {"account_id": ACCOUNT_ID, "latest_snapshot_date": "2026-08-11", "run_mode": "exploratory"},
+    )
+    after = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+
+    assert before["classifications"][0]["classification"] == "STANDARD_COMPLETED"
+    assert after["classifications"][0]["classification"] == "STANDARD_COMPLETED"
+    assert state_path.read_bytes() == before_state
+
+
+def test_historical_completion_rejects_tampered_pinned_benchmark_date(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-08-07", "2026-08-10")
+    state = runbook_state.load_state(state_path)
+    benchmark_artifact = workspace / state.artifacts["benchmark_report_json"]
+    payload = json.loads(benchmark_artifact.read_text(encoding="utf-8"))
+    payload["latest_snapshot_date"] = "2026-08-11"
+    _write_json(benchmark_artifact, payload)
+
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    evidence = runbook_stage_f_evidence.validate_stage_f_completion_evidence(
+        workspace, state, account_root
+    )
+    classification = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+
+    assert "benchmark_report_json:latest_snapshot_date_mismatch" in evidence["blockers"]
+    assert classification["classifications"][0]["classification"] == "ACTIVE_INCOMPLETE"
+
+
+def test_historical_completion_requires_pinned_benchmark_artifact(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = _complete_state(workspace, "2026-08-07", "2026-08-10")
+    state = runbook_state.load_state(state_path)
+    artifacts = dict(state.artifacts)
+    artifacts.pop("benchmark_report_json")
+    state = replace(state, artifacts=artifacts)
+    runbook_state.save_state(state, state_path)
+
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    evidence = runbook_stage_f_evidence.validate_stage_f_completion_evidence(
+        workspace, state, account_root
+    )
+    classification = rollover_core.classify_account_runbooks(workspace, ACCOUNT_ID)
+
+    assert "benchmark_report_json:artifact_ref_missing" in evidence["blockers"]
+    assert classification["classifications"][0]["classification"] == "ACTIVE_INCOMPLETE"
+
+
+def test_rollover_selects_latest_completed_after_shared_benchmark_advances(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first_id = f"{ACCOUNT_ID}_2026-08-07_2026-08-10"
+    second_id = f"{ACCOUNT_ID}_2026-08-10_2026-08-11"
+    first_state_path = _complete_state(workspace, "2026-08-07", "2026-08-10")
+    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    append_only_sources = (
+        (account_root / "paper_account_snapshot.csv", PAPER_ACCOUNT_SNAPSHOT_COLUMNS),
+        (account_root / "paper_position_snapshot.csv", PAPER_POSITION_SNAPSHOT_COLUMNS),
+        (account_root / "paper_execution_log.csv", PAPER_EXECUTION_LOG_COLUMNS),
+        (account_root / "reviews" / "paper_manual_review_log.csv", PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS),
+    )
+    first_rows = {}
+    for path, _ in append_only_sources:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            first_rows[path] = list(csv.DictReader(handle))
+    _complete_state(workspace, "2026-08-10", "2026-08-11")
+    for path, fieldnames in append_only_sources:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            second_rows = list(csv.DictReader(handle))
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows([*first_rows[path], *second_rows])
+
+    first_state = runbook_state.load_state(first_state_path)
+    first_evidence = runbook_stage_f_evidence.validate_stage_f_completion_evidence(
+        workspace,
+        first_state,
+        account_root,
+    )
+    assert first_evidence["valid"] is True, first_evidence
+    result = preview_rollover(workspace, ACCOUNT_ID, load_market_calendar(), confirm_paper_test=True)
+    assert result["runner_result"] == "PASS", result
+    classifications = {
+        item["runbook_day_id"]: item["classification"]
+        for item in result["runbook_classifications"]
+    }
+
+    assert classifications[first_id] == "STANDARD_COMPLETED"
+    assert classifications[second_id] == "STANDARD_COMPLETED"
+    assert "ACTIVE_INCOMPLETE" not in classifications.values()
+    assert result["previous_runbook_day_id"] == second_id
+    assert result["next_data_date"] == "2026-08-11"
+    assert result["next_trade_date"] == "2026-08-12"
+    assert result["next_runbook_day_id"] == f"{ACCOUNT_ID}_2026-08-11_2026-08-12"
+    assert result["safe_to_prepare"] is True
 
 
 def test_active_incomplete_day_blocks_rollover(tmp_path: Path) -> None:
