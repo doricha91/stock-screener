@@ -1165,6 +1165,16 @@ def init_state_file_for_context(
     path = get_state_path_for_context(workspace, account_id, data_date, trade_date)
     requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
     if not path.exists():
+        from core.runbook_calendar import load_market_calendar
+        from core.runbook_recovery import assert_initialization_allowed
+
+        assert_initialization_allowed(
+            workspace,
+            account_id,
+            data_date,
+            trade_date,
+            load_market_calendar(),
+        )
         save_state(requested_state, path)
         return "CREATED", path, requested_state
 

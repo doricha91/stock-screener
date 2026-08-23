@@ -9,7 +9,7 @@ from typing import Any
 
 from core.paper_account_paths import build_paper_account_paths
 from core.runbook_calendar import CalendarCoverageError, MarketCalendar
-from core import runbook_retirement
+from core import runbook_recovery, runbook_retirement
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
@@ -104,7 +104,11 @@ def _is_legacy_completed(workspace: Path, record: StateRecord) -> bool:
     )
 
 
-def classify_state(workspace: Path, record: StateRecord) -> dict[str, Any]:
+def classify_state(
+    workspace: Path,
+    record: StateRecord,
+    calendar: MarketCalendar | None = None,
+) -> dict[str, Any]:
     if _is_standard_completed(workspace, record.state):
         classification = "STANDARD_COMPLETED"
         blockers: list[str] = []
@@ -119,8 +123,20 @@ def classify_state(workspace: Path, record: StateRecord) -> dict[str, Any]:
             classification = "RETIRED"
             blockers = []
         else:
-            classification = "ACTIVE_INCOMPLETE"
-            blockers = retirement["blockers"] if retirement["exists"] else []
+            recovery = runbook_recovery.validate_recovery_evidence(
+                workspace,
+                record.path,
+                record.state,
+                calendar or runbook_recovery.default_calendar(),
+            )
+            if recovery["valid"]:
+                classification = "RECOVERY_EXCLUDED"
+                blockers = []
+            else:
+                classification = "ACTIVE_INCOMPLETE"
+                blockers = recovery["blockers"] if recovery["exists"] else (
+                    retirement["blockers"] if retirement["exists"] else []
+                )
     return {
         "runbook_day_id": record.state.runbook_day_id,
         "data_date": record.state.frozen_context.data_date,
@@ -212,7 +228,7 @@ def preview_rollover(
     if not records:
         return _blocked("completed_runbook_day_not_found")
 
-    classified = [(record, classify_state(workspace_path, record)) for record in records]
+    classified = [(record, classify_state(workspace_path, record, calendar)) for record in records]
     active = [record for record, item in classified if item["classification"] == "ACTIVE_INCOMPLETE"]
     if len(active) > 1:
         return _blocked(
@@ -224,6 +240,42 @@ def preview_rollover(
             "active_runbook_day_exists",
             [f"active_runbook_day:{active[0].state.runbook_day_id}"],
         )
+
+    recoveries = [
+        record for record, item in classified if item["classification"] == "RECOVERY_EXCLUDED"
+    ]
+    if len(recoveries) > 1:
+        return _blocked(
+            "multiple_recovery_authorizations",
+            [f"recovery_source:{record.state.runbook_day_id}" for record in recoveries],
+        )
+    if recoveries:
+        source = recoveries[0]
+        recovery = runbook_recovery.validate_recovery_evidence(
+            workspace_path, source.path, source.state, calendar
+        )
+        if not recovery["valid"]:
+            return _blocked("recovery_authorization_invalid", recovery["blockers"])
+        if not recovery["consumed"]:
+            restart = recovery["payload"]["restart"]
+            already_exists = _already_exists(workspace_path, restart["runbook_day_id"])
+            if already_exists:
+                return _blocked("recovery_target_already_exists")
+            return {
+                "runner_result": "PASS",
+                "mode": "PREVIEW",
+                "rollover_mode": "RECOVERY",
+                "account_id": account_id,
+                "previous_runbook_day_id": recovery["payload"]["latest_completed"]["runbook_day_id"],
+                "recovery_source_runbook_day_id": source.state.runbook_day_id,
+                "next_data_date": restart["data_date"],
+                "next_trade_date": restart["trade_date"],
+                "next_runbook_day_id": restart["runbook_day_id"],
+                "runbook_classifications": [item for _, item in classified],
+                "already_exists": False,
+                "safe_to_prepare": True,
+                "next_required_action": NEXT_ACTION,
+            }
 
     completed = [
         record
