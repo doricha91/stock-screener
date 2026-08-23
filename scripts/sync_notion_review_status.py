@@ -120,10 +120,6 @@ def main(argv: list[str] | None = None) -> int:
     except NotionSettingsError:
         data_source_check = "missing"
 
-    client: NotionClient | None = None
-    if not args.dry_run:
-        client = NotionClient(get_notion_token(settings))
-
     try:
         commit_report_payload = json.loads(Path(args.commit_report).read_text(encoding="utf-8"))
         report_account_id = _resolve_report_account_id(commit_report_payload)
@@ -131,6 +127,12 @@ def main(argv: list[str] | None = None) -> int:
             raise ManualReviewStatusSyncError(
                 f"CLI account_id '{resolved_account_id}' does not match commit report account_id '{report_account_id}'."
             )
+        report_rows = commit_report_payload.get("rows", [])
+        if not isinstance(report_rows, list):
+            raise ManualReviewStatusSyncError("Commit report rows must be a list.")
+        client: NotionClient | None = None
+        if not args.dry_run and report_rows:
+            client = NotionClient(get_notion_token(settings))
         result = sync_manual_review_status(
             client=client,
             mapping_root=mapping,

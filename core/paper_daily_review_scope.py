@@ -117,6 +117,7 @@ def build_daily_manual_review_scope(
             raise DailyReviewScopeError(f"Daily Plan markdown could not be read: {exc}") from exc
     manual_symbols = extract_manual_review_symbols(daily_plan, plan_markdown)
     open_symbols: list[str] = []
+    include_account_reviews = False
 
     if action_mode == "NO_ACTION":
         if (
@@ -130,8 +131,13 @@ def build_daily_manual_review_scope(
         rows: list[dict[str, Any]] = []
     else:
         if current_state is None or current_state_path is None:
-            raise DailyReviewScopeError("Post-Stage-B current state is required for EXECUTION scope")
-        _validate_current_state(current_state, current_state_path, trade_date)
+            raise DailyReviewScopeError("Canonical current state is required for EXECUTION scope")
+        _validate_current_state(
+            current_state,
+            current_state_path,
+            trade_date,
+            allow_prior=stage_b_verification.get("verified_zero_write") is True,
+        )
         open_symbols = _current_open_symbols(current_state)
         if execution_commit_report is None or execution_commit_report_path is None:
             raise DailyReviewScopeError("Execution commit report is required for EXECUTION scope")
@@ -141,8 +147,19 @@ def build_daily_manual_review_scope(
             account_id=account_id,
             trade_date=trade_date,
         )
-        position_symbols = [symbol for symbol in open_symbols if symbol in set(manual_symbols)]
-        rows = _build_scope_rows(account_id, trade_date, position_symbols, execution_symbols)
+        position_symbols = (
+            open_symbols
+            if stage_b_verification.get("verified_zero_write") is True
+            else [symbol for symbol in open_symbols if symbol in set(manual_symbols)]
+        )
+        include_account_reviews = stage_b_verification.get("verified_zero_write") is not True
+        rows = _build_scope_rows(
+            account_id,
+            trade_date,
+            position_symbols,
+            execution_symbols,
+            include_account_reviews=include_account_reviews,
+        )
 
     source_paths: dict[str, Path | None] = {
         "daily_plan_json": Path(daily_plan_path),
@@ -176,7 +193,7 @@ def build_daily_manual_review_scope(
         "counts": {
             "position": len(position_symbols),
             "execution": len(execution_symbols),
-            "account": 3 if action_mode == "EXECUTION" else 0,
+            "account": len(ACCOUNT_REVIEW_QUESTIONS) if include_account_reviews else 0,
             "total": len(rows),
         },
         "scope_sha256": scope_sha256,
@@ -279,12 +296,21 @@ def _validate_verification_context(verification: dict[str, Any], context: dict[s
         raise DailyReviewScopeError("Stage B verification failed_count must be 0")
 
 
-def _validate_current_state(state: dict[str, Any], path: Path, trade_date: str) -> None:
+def _validate_current_state(
+    state: dict[str, Any],
+    path: Path,
+    trade_date: str,
+    *,
+    allow_prior: bool = False,
+) -> None:
     if not isinstance(state.get("current_symbols"), list) or not isinstance(state.get("shares"), dict):
         raise DailyReviewScopeError("Current state current_symbols/shares are required")
     compact_date = trade_date.replace("-", "")
-    if compact_date not in Path(path).stem:
-        raise DailyReviewScopeError("Current state filename does not match trade_date")
+    match = re.fullmatch(r"paper_current_state_(\d{8})", Path(path).stem)
+    if match is None or match.group(1) > compact_date or (
+        not allow_prior and match.group(1) != compact_date
+    ):
+        raise DailyReviewScopeError("Current state filename is not valid as-of trade_date")
 
 
 def _current_open_symbols(state: dict[str, Any]) -> list[str]:
@@ -344,6 +370,8 @@ def _build_scope_rows(
     trade_date: str,
     position_symbols: list[str],
     execution_symbols: list[str],
+    *,
+    include_account_reviews: bool = True,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for symbol in position_symbols:
@@ -352,9 +380,10 @@ def _build_scope_rows(
     for symbol in execution_symbols:
         rows.append(_scope_row(account_id, trade_date, symbol, EXECUTION_REVIEW_QUESTION_ID,
                                EXECUTION_REVIEW_QUESTION_TEXT, "execution_review", "execution_quality"))
-    for question_id, question_text, review_tag in ACCOUNT_REVIEW_QUESTIONS:
-        rows.append(_scope_row(account_id, trade_date, "ACCOUNT", question_id, question_text,
-                               "account_review", review_tag))
+    if include_account_reviews:
+        for question_id, question_text, review_tag in ACCOUNT_REVIEW_QUESTIONS:
+            rows.append(_scope_row(account_id, trade_date, "ACCOUNT", question_id, question_text,
+                                   "account_review", review_tag))
     return rows
 
 

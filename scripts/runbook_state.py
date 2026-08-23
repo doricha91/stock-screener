@@ -19,6 +19,9 @@ STATE_DIRNAME = "runbook_states"
 # It does not replace the existing n8n runner context.json contract.
 # It shares account_id/data_date/trade_date concepts but owns controller state.
 SCHEMA_VERSION = "runbook_state.v1"
+EXECUTION_CONTRACT_V1 = "execution_reconciliation_preview.v1"
+EXECUTION_CONTRACT_V2 = "execution_reconciliation_preview.v2"
+SUPPORTED_EXECUTION_CONTRACTS = {EXECUTION_CONTRACT_V1, EXECUTION_CONTRACT_V2}
 STAGE_IDS = ("A", "GATE1", "B", "C", "GATE2", "D", "E", "F")
 ALLOWED_STATUSES = {"READY", "PENDING", "RUNNING", "WAIT", "PASS", "BLOCKED", "FAILED", "DONE"}
 ALLOWED_IDEMPOTENCY_STATUSES = {
@@ -54,6 +57,7 @@ class RunbookState:
     last_completed_step: int | None
     last_completed_stage: str | None
     stage_status: dict[str, str]
+    execution_contract: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
     idempotency_records: dict[str, Any] = field(default_factory=dict)
     recovery_authorizations: dict[str, Any] = field(default_factory=dict)
@@ -130,6 +134,11 @@ def create_initial_state(
         last_completed_step=None,
         last_completed_stage=None,
         stage_status={stage_id: "PENDING" for stage_id in STAGE_IDS},
+        execution_contract={
+            "version": EXECUTION_CONTRACT_V2,
+            "input_finalized": False,
+            "finalized_at": None,
+        },
         artifacts={},
         idempotency_records={},
         recovery_authorizations={},
@@ -160,6 +169,11 @@ def _state_from_dict(data: dict[str, Any]) -> RunbookState:
         last_completed_step=data.get("last_completed_step"),
         last_completed_stage=data.get("last_completed_stage"),
         stage_status=stage_status,
+        execution_contract=(
+            dict(data.get("execution_contract", {}))
+            if isinstance(data.get("execution_contract"), dict)
+            else {}
+        ),
         artifacts=dict(data.get("artifacts", {})) if isinstance(data.get("artifacts"), dict) else {},
         idempotency_records=(
             dict(data.get("idempotency_records", {}))
@@ -211,6 +225,84 @@ def context_matches_state(
     )
 
 
+def get_execution_contract(state: RunbookState) -> dict[str, Any]:
+    """Return the effective execution contract without migrating legacy state."""
+    if not state.execution_contract:
+        return {
+            "version": EXECUTION_CONTRACT_V1,
+            "input_finalized": False,
+            "finalized_at": None,
+        }
+    return dict(state.execution_contract)
+
+
+def activate_execution_outcome_v2(state: RunbookState) -> RunbookState:
+    contract = get_execution_contract(state)
+    version = contract.get("version")
+    if version == EXECUTION_CONTRACT_V2:
+        return state
+    if version != EXECUTION_CONTRACT_V1 or contract.get("input_finalized"):
+        raise ValueError("execution_contract_cannot_be_upgraded")
+    if (
+        state.stage_status.get("B") != "PENDING"
+        or (state.last_completed_step is not None and state.last_completed_step >= 7)
+        or "execution_reconciliation_preview_json" in state.artifacts
+        or "execution_commit_report_json" in state.artifacts
+    ):
+        raise ValueError("completed_or_started_v1_execution_contract_is_immutable")
+    timestamp = _next_updated_at(state)
+    next_contract = {
+        "version": EXECUTION_CONTRACT_V2,
+        "input_finalized": False,
+        "finalized_at": None,
+    }
+    return replace(
+        state,
+        updated_at=timestamp,
+        execution_contract=next_contract,
+        history=_append_history(
+            state,
+            {
+                "event_type": "execution_outcome_v2_activated",
+                "stage_id": state.current_stage,
+                "step_id": state.last_completed_step,
+                "status": state.current_status,
+                "reason": None,
+                "created_at": timestamp,
+            },
+        ),
+    )
+
+
+def finalize_execution_input(state: RunbookState) -> RunbookState:
+    """Finalize v2 input once; a repeated Finalize is an exact no-op."""
+    contract = get_execution_contract(state)
+    if contract.get("version") != EXECUTION_CONTRACT_V2:
+        raise ValueError("execution_finalize_requires_v2_contract")
+    if contract.get("input_finalized") is True:
+        return state
+    timestamp = _next_updated_at(state)
+    next_contract = dict(contract)
+    next_contract["input_finalized"] = True
+    next_contract["finalized_at"] = timestamp
+    return replace(
+        state,
+        updated_at=timestamp,
+        execution_contract=next_contract,
+        history=_append_history(
+            state,
+            {
+                "event_type": "execution_input_finalized",
+                "stage_id": state.current_stage,
+                "step_id": state.last_completed_step,
+                "status": state.current_status,
+                "reason": None,
+                "created_at": timestamp,
+            },
+        ),
+    )
+
+
 def validate_state(state: RunbookState) -> list[str]:
     errors: list[str] = []
     if state.schema_version != SCHEMA_VERSION:
@@ -250,6 +342,17 @@ def validate_state(state: RunbookState) -> list[str]:
         errors.append("last_completed_stage must be null or one of A/GATE1/B/C/GATE2/D/E/F")
     if not isinstance(state.artifacts, dict):
         errors.append("artifacts must be an object")
+    execution_contract = state.execution_contract
+    if not isinstance(execution_contract, dict):
+        errors.append("execution_contract must be an object")
+    elif execution_contract:
+        version = execution_contract.get("version")
+        if version not in SUPPORTED_EXECUTION_CONTRACTS:
+            errors.append(f"execution_contract.version is unsupported: {version}")
+        if not isinstance(execution_contract.get("input_finalized"), bool):
+            errors.append("execution_contract.input_finalized must be a boolean")
+        if execution_contract.get("input_finalized") and not execution_contract.get("finalized_at"):
+            errors.append("execution_contract.finalized_at is required after Finalize")
     if not isinstance(state.idempotency_records, dict):
         errors.append("idempotency_records must be an object")
     else:
@@ -1113,6 +1216,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_parser = subparsers.add_parser("validate", help="Validate current runbook_state.json")
     validate_parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
 
+    for command_name, help_text in (
+        ("activate-execution-v2", "Activate the v2 execution outcome contract for this runbook"),
+        ("finalize-execution-input", "Finalize v2 execution input once for this runbook"),
+    ):
+        command_parser = subparsers.add_parser(command_name, help=help_text)
+        command_parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+        command_parser.add_argument("--account-id", required=True)
+        command_parser.add_argument("--data-date", required=True)
+        command_parser.add_argument("--trade-date", required=True)
+
     key_parser = subparsers.add_parser("idempotency-key", help="Build an idempotency key")
     key_parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     key_parser.add_argument("--command-key", required=True)
@@ -1160,6 +1273,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json({"runner_result": "FAIL", "errors": errors})
             return 1
         _print_json({"runner_result": "PASS", "runbook_day_id": state.runbook_day_id})
+        return 0
+    if args.command in {"activate-execution-v2", "finalize-execution-input"}:
+        path = get_state_path_for_context(
+            args.workspace,
+            args.account_id,
+            args.data_date,
+            args.trade_date,
+        )
+        try:
+            state = load_state(path)
+            if not context_matches_state(state, args.account_id, args.data_date, args.trade_date):
+                raise ValueError("context_mismatch_existing_runbook_state")
+            next_state = (
+                activate_execution_outcome_v2(state)
+                if args.command == "activate-execution-v2"
+                else finalize_execution_input(state)
+            )
+            if next_state is not state:
+                save_state(next_state, path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            _print_json({"runner_result": "BLOCKED", "reason": str(exc)})
+            return 1
+        _print_json(
+            {
+                "runner_result": "PASS",
+                "runbook_day_id": next_state.runbook_day_id,
+                "execution_contract": get_execution_contract(next_state),
+                "no_op": next_state is state,
+            }
+        )
         return 0
     if args.command == "idempotency-key":
         state = load_state(get_state_path(args.workspace))

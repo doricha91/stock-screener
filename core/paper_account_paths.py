@@ -15,6 +15,21 @@ def _clean_date(date_str: str) -> str:
     return str(date_str).replace("-", "")
 
 
+def latest_current_state_snapshot_path(
+    account_paths: "PaperAccountPaths",
+    as_of_date: str,
+) -> Path | None:
+    clean_limit = _clean_date(as_of_date)
+    candidates: list[tuple[str, Path]] = []
+    for path in account_paths.root.glob("paper_current_state_*.json"):
+        date_part = path.stem.replace("paper_current_state_", "")
+        if len(date_part) == 8 and date_part.isdigit() and date_part <= clean_limit:
+            candidates.append((date_part, path))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item[0])[-1][1]
+
+
 @dataclass(frozen=True)
 class PaperAccountPaths:
     account_id: str

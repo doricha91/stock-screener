@@ -13,6 +13,8 @@ from scripts import runbook_state
 def seed_standard_export_evidence(
     workspace: Path,
     state: runbook_state.RunbookState,
+    *,
+    review_candidate_count: int = 1,
 ) -> runbook_state.RunbookState:
     stage_status = dict(state.stage_status)
     for stage_id in runbook_completion_evidence.STANDARD_REQUIRED_PASS_STAGES:
@@ -46,13 +48,13 @@ def seed_standard_export_evidence(
             "target": "manual_review_template",
             "account_id": state.frozen_context.account_id,
             "review_date": state.frozen_context.trade_date,
-            "candidate_count": 1,
-            "create_count": 1,
+            "candidate_count": review_candidate_count,
+            "create_count": review_candidate_count,
             "update_count": 0,
             "skip_count": 0,
             "failed_count": 0,
             "dry_run": False,
-            "would_write": True,
+            "would_write": review_candidate_count > 0,
         },
     }
     results_by_stage: dict[str, list[dict[str, object]]] = {"A": [], "C": []}

@@ -76,10 +76,40 @@ def verify_stage_b_completion(
     commit_payload = _load_json_report(commit_report, "commit_report", checks) if commit_report else None
     sync_payload = _load_json_report(sync_report, "sync_report", checks) if sync_report else None
 
-    if commit_payload is not None and sync_payload is not None:
+    zero_write = bool((commit_payload or {}).get("zero_write"))
+    commit_contract_version = (
+        (commit_payload or {}).get("execution_contract_version")
+        or resolution.get("execution_contract_version")
+    )
+    is_v2 = commit_contract_version == runbook_state.EXECUTION_CONTRACT_V2
+    v2_evidence: dict[str, Any] = {}
+    if commit_payload is not None:
         _check_commit_report(commit_payload, account_id, trade_date, checks)
+        if is_v2:
+            v2_evidence = _check_v2_execution_evidence(
+                workspace=workspace,
+                commit_payload=commit_payload,
+                account_id=account_id,
+                data_date=data_date,
+                trade_date=trade_date,
+                checks=checks,
+            )
+        elif commit_payload.get("execution_contract_version"):
+            checks.append(
+                _check(
+                    "execution_contract_version",
+                    BLOCKED,
+                    "unsupported_execution_contract_version",
+                    f"execution_contract_version={commit_contract_version}",
+                )
+            )
+    if commit_payload is not None and sync_payload is not None:
         _check_sync_report(sync_payload, account_id, trade_date, checks)
         _check_report_consistency(commit_payload, sync_payload, checks)
+    elif commit_payload is not None and not zero_write and not is_v2:
+        checks.append(
+            _check("sync_report", BLOCKED, "sync_report_missing", "sync report is required for committed trades.")
+        )
 
     runner_result = _runner_result_from_checks(checks)
     committed_row_count = _committed_row_count(commit_payload or {})
@@ -104,7 +134,9 @@ def verify_stage_b_completion(
         "failed_count": failed_count,
         "action_mode": "EXECUTION",
         "verified_no_action": False,
+        "verified_zero_write": zero_write,
         "stage_b_no_action_json": None,
+        **v2_evidence,
         "checks": checks,
         "next_required_action": (
             "Proceed to Stage C review prep."
@@ -330,8 +362,17 @@ def _resolve_stage_b_reports(
 ) -> dict[str, Any]:
     resolved_from_state = False
     state: runbook_state.RunbookState | None = None
-    if commit_report is None or sync_report is None:
-        if not data_date:
+    must_resolve_commit = commit_report is None
+    state_path = (
+        runbook_state.get_state_path_for_context(workspace, account_id, data_date, trade_date)
+        if data_date
+        else None
+    )
+    should_inspect_state = must_resolve_commit or (
+        sync_report is None and state_path is not None and state_path.exists()
+    )
+    if should_inspect_state:
+        if state_path is None:
             checks.append(
                 _check(
                     "stage_b_state",
@@ -340,9 +381,8 @@ def _resolve_stage_b_reports(
                     "data_date is required when commit/sync report paths are omitted.",
                 )
             )
-        else:
-            state_path = runbook_state.get_state_path_for_context(workspace, account_id, data_date, trade_date)
-            if not state_path.exists():
+        elif not state_path.exists():
+            if must_resolve_commit:
                 checks.append(
                     _check(
                         "stage_b_state",
@@ -351,9 +391,10 @@ def _resolve_stage_b_reports(
                         f"runbook state not found: {state_path}",
                     )
                 )
-            else:
-                state = runbook_state.load_state(state_path)
-                if not runbook_state.context_matches_state(state, account_id, data_date, trade_date):
+        else:
+            candidate_state = runbook_state.load_state(state_path)
+            if not runbook_state.context_matches_state(candidate_state, account_id, data_date, trade_date):
+                if must_resolve_commit:
                     checks.append(
                         _check(
                             "stage_b_state",
@@ -362,9 +403,10 @@ def _resolve_stage_b_reports(
                             "runbook state frozen_context does not match requested context.",
                         )
                     )
-                elif state.stage_status.get("B") != PASS or not (
-                    state.current_status == PASS or state.last_completed_stage == "B"
-                ):
+            elif candidate_state.stage_status.get("B") != PASS or not (
+                candidate_state.current_status == PASS or candidate_state.last_completed_stage == "B"
+            ):
+                if must_resolve_commit:
                     checks.append(
                         _check(
                             "stage_b_state",
@@ -373,8 +415,9 @@ def _resolve_stage_b_reports(
                             "Stage B must pass before verification.",
                         )
                     )
-                else:
-                    resolved_from_state = True
+            else:
+                state = candidate_state
+                resolved_from_state = True
     if commit_report is None and state is not None:
         commit_report = _resolve_pinned_artifact(
             workspace,
@@ -383,7 +426,11 @@ def _resolve_stage_b_reports(
             "commit_report",
             checks,
         )
-    if sync_report is None and state is not None:
+    state_contract_version = (
+        runbook_state.get_execution_contract(state).get("version") if state is not None else None
+    )
+    state_contract_is_v2 = state_contract_version == runbook_state.EXECUTION_CONTRACT_V2
+    if sync_report is None and state is not None and not state_contract_is_v2:
         sync_report = _resolve_pinned_artifact(
             workspace,
             state,
@@ -395,7 +442,12 @@ def _resolve_stage_b_reports(
     return {
         "commit_report": Path(commit_report) if commit_report else None,
         "sync_report": Path(sync_report) if sync_report else None,
-        "resolved_from_state": resolved_from_state and commit_report is not None and sync_report is not None,
+        "resolved_from_state": (
+            resolved_from_state
+            and commit_report is not None
+            and (sync_report is not None or state_contract_is_v2)
+        ),
+        "execution_contract_version": state_contract_version,
     }
 
 
@@ -512,6 +564,10 @@ def _load_json_report(path: Path, label: str, checks: list[dict[str, Any]]) -> d
 def _check_commit_report(payload: dict[str, Any], account_id: str, trade_date: str, checks: list[dict[str, Any]]) -> None:
     committed_trade_ids = _committed_trade_ids(payload)
     committed_row_count = _committed_row_count(payload)
+    zero_write = (
+        payload.get("zero_write") is True
+        and payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
+    )
     status = str(payload.get("status") or "").upper()
     if not status and _rows_all_committed(payload):
         status = "COMMITTED"
@@ -542,8 +598,8 @@ def _check_commit_report(payload: dict[str, Any], account_id: str, trade_date: s
     checks.append(
         _check(
             "committed_row_count",
-            PASS if committed_row_count > 0 else BLOCKED,
-            "committed_row_count_zero" if committed_row_count <= 0 else "committed_row_count_positive",
+            PASS if committed_row_count > 0 or zero_write else BLOCKED,
+            "committed_row_count_zero_write" if zero_write else "committed_row_count_zero" if committed_row_count <= 0 else "committed_row_count_positive",
             f"committed_row_count={committed_row_count}",
         )
     )
@@ -559,14 +615,212 @@ def _check_commit_report(payload: dict[str, Any], account_id: str, trade_date: s
         value = payload.get(field)
         if value is None and _rows_all_committed(payload):
             value = True
+        expected = False if zero_write else True
         checks.append(
             _check(
                 field,
-                PASS if value is True else BLOCKED,
-                f"{field}_false" if value is not True else f"{field}_true",
+                PASS if value is expected else BLOCKED,
+                f"{field}_{str(value).lower()}",
                 f"{field}={value}",
             )
         )
+
+
+def _check_v2_execution_evidence(
+    *,
+    workspace: Path,
+    commit_payload: dict[str, Any],
+    account_id: str,
+    data_date: str | None,
+    trade_date: str,
+    checks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "execution_contract_version": runbook_state.EXECUTION_CONTRACT_V2,
+        "reconciliation_preview_json": None,
+        "reconciliation_preview_sha256": None,
+        "planned_count": 0,
+        "executed_count": 0,
+        "partial_count": 0,
+        "not_executed_count": 0,
+    }
+    schema_ok = commit_payload.get("schema_version") == "execution_commit.v2"
+    version_ok = commit_payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
+    checks.append(
+        _check(
+            "v2_commit_contract",
+            PASS if schema_ok and version_ok else BLOCKED,
+            "v2_commit_contract_match" if schema_ok and version_ok else "v2_commit_contract_mismatch",
+            f"schema_version={commit_payload.get('schema_version') or '-'} "
+            f"execution_contract_version={commit_payload.get('execution_contract_version') or '-'}",
+        )
+    )
+    commit_context_ok = (
+        commit_payload.get("account_id") == account_id
+        and commit_payload.get("data_date") == data_date
+        and commit_payload.get("execution_date") == trade_date
+    )
+    checks.append(
+        _check(
+            "v2_commit_context",
+            PASS if commit_context_ok else BLOCKED,
+            "v2_commit_context_match" if commit_context_ok else "v2_commit_context_mismatch",
+            f"account_id={commit_payload.get('account_id') or '-'} "
+            f"data_date={commit_payload.get('data_date') or '-'} "
+            f"trade_date={commit_payload.get('execution_date') or '-'}",
+        )
+    )
+
+    preview_ref = str(commit_payload.get("reconciliation_preview_json_path") or "").strip()
+    expected_sha256 = str(commit_payload.get("reconciliation_preview_sha256") or "").strip().lower()
+    if not preview_ref or not expected_sha256:
+        checks.append(
+            _check(
+                "v2_preview_binding",
+                BLOCKED,
+                "v2_preview_binding_missing",
+                "Commit evidence does not pin the v2 reconciliation preview path and SHA-256.",
+            )
+        )
+        return evidence
+    preview_path = Path(preview_ref)
+    if not preview_path.is_absolute():
+        preview_path = workspace / preview_path
+    evidence["reconciliation_preview_json"] = str(preview_path)
+    evidence["reconciliation_preview_sha256"] = expected_sha256
+    if not preview_path.exists():
+        checks.append(
+            _check(
+                "v2_preview_binding",
+                BLOCKED,
+                "v2_preview_file_missing",
+                f"Pinned v2 reconciliation preview not found: {preview_path}",
+            )
+        )
+        return evidence
+    try:
+        actual_sha256 = sha256_file(preview_path)
+    except OSError as exc:
+        checks.append(_check("v2_preview_digest", BLOCKED, "v2_preview_unreadable", str(exc)))
+        return evidence
+    if actual_sha256 != expected_sha256:
+        checks.append(
+            _check(
+                "v2_preview_digest",
+                BLOCKED,
+                "v2_preview_digest_mismatch",
+                f"expected={expected_sha256} actual={actual_sha256}",
+            )
+        )
+        return evidence
+    checks.append(
+        _check(
+            "v2_preview_digest",
+            PASS,
+            "v2_preview_digest_match",
+            f"sha256={actual_sha256}",
+        )
+    )
+    try:
+        preview = json.loads(preview_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        checks.append(_check("v2_preview_payload", BLOCKED, "v2_preview_invalid", str(exc)))
+        return evidence
+    if not isinstance(preview, dict):
+        checks.append(
+            _check("v2_preview_payload", BLOCKED, "v2_preview_invalid", "Preview root must be an object.")
+        )
+        return evidence
+
+    preview_context_ok = (
+        (preview.get("schema_version") or preview.get("reconciliation_contract_version"))
+        == runbook_state.EXECUTION_CONTRACT_V2
+        and preview.get("account_id") == account_id
+        and preview.get("data_date") == data_date
+        and preview.get("trade_date") == trade_date
+        and preview.get("input_finalized") is True
+        and preview.get("runner_result") == PASS
+        and preview.get("count_invariant_satisfied") is True
+    )
+    checks.append(
+        _check(
+            "v2_preview_contract_context",
+            PASS if preview_context_ok else BLOCKED,
+            "v2_preview_contract_context_match" if preview_context_ok else "v2_preview_contract_context_mismatch",
+            "Pinned preview version, context, finalized state, and PASS status must match.",
+        )
+    )
+
+    rows = preview.get("rows")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        checks.append(_check("v2_outcome_counts", BLOCKED, "v2_preview_rows_invalid", "rows must be objects."))
+        return evidence
+    try:
+        planned_count = int(preview["planned_count"])
+        executed_count = int(preview["executed_count"])
+        partial_count = int(preview["partial_count"])
+        not_executed_count = int(preview["not_executed_count"])
+    except (KeyError, TypeError, ValueError) as exc:
+        checks.append(_check("v2_outcome_counts", BLOCKED, "v2_outcome_counts_invalid", str(exc)))
+        return evidence
+    evidence.update(
+        planned_count=planned_count,
+        executed_count=executed_count,
+        partial_count=partial_count,
+        not_executed_count=not_executed_count,
+    )
+    row_executed_count = sum(row.get("outcome") == "EXECUTED" for row in rows)
+    row_partial_count = sum(row.get("outcome") == "PARTIAL" for row in rows)
+    row_not_executed_count = sum(row.get("outcome") == "NOT_EXECUTED" for row in rows)
+    committed_count = _committed_row_count(commit_payload)
+    count_ok = (
+        min(planned_count, executed_count, partial_count, not_executed_count) >= 0
+        and len(rows) == planned_count
+        and planned_count == executed_count + partial_count + not_executed_count
+        and (row_executed_count, row_partial_count, row_not_executed_count)
+        == (executed_count, partial_count, not_executed_count)
+        and committed_count == executed_count + partial_count
+        and not_executed_count == planned_count - committed_count
+    )
+    checks.append(
+        _check(
+            "v2_outcome_counts",
+            PASS if count_ok else BLOCKED,
+            "v2_outcome_count_invariants_match" if count_ok else "v2_outcome_count_invariants_mismatch",
+            f"planned={planned_count} executed={executed_count} partial={partial_count} "
+            f"not_executed={not_executed_count} committed={committed_count}",
+        )
+    )
+
+    trade_keys = [
+        str(row.get("candidate_key") or "").strip()
+        for row in rows
+        if row.get("outcome") in {"EXECUTED", "PARTIAL"}
+    ]
+    committed_rows = commit_payload.get("committed_rows")
+    committed_keys = (
+        [str(row.get("canonical_key") or "").strip() for row in committed_rows if isinstance(row, dict)]
+        if isinstance(committed_rows, list)
+        else []
+    )
+    identity_ok = (
+        isinstance(committed_rows, list)
+        and len(committed_keys) == len(committed_rows)
+        and all(trade_keys)
+        and all(committed_keys)
+        and len(trade_keys) == len(set(trade_keys))
+        and len(committed_keys) == len(set(committed_keys))
+        and set(trade_keys) == set(committed_keys)
+    )
+    checks.append(
+        _check(
+            "v2_candidate_identity",
+            PASS if identity_ok else BLOCKED,
+            "v2_candidate_key_set_match" if identity_ok else "v2_candidate_key_set_mismatch",
+            f"preview_trade_keys={len(trade_keys)} committed_keys={len(committed_keys)}",
+        )
+    )
+    return evidence
 
 
 def _check_sync_report(payload: dict[str, Any], account_id: str, trade_date: str, checks: list[dict[str, Any]]) -> None:

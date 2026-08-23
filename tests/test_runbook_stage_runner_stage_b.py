@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scripts import runbook_stage_runner
 from scripts import runbook_stage_b_recovery
+from scripts import runbook_stage_b_verifier
 from scripts import runbook_state
 from scripts.runbook_no_action import sha256_file
 from core.paper_account_paths import build_paper_account_paths
@@ -142,7 +143,7 @@ def _seed_no_action_gate1_pass_state(workspace: Path, *, gate_action_mode: str =
     return state_path
 
 
-def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]]):
+def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]], *, zero_commit: bool = False):
     preview_json = tmp_path / "manual_execution_import_preview_20260615.json"
     preview_md = tmp_path / "manual_execution_import_preview_20260615.md"
     recon_json = tmp_path / "execution_reconciliation_preview_20260615.json"
@@ -169,7 +170,35 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]]):
                 "markdown_path": str(preview_md),
             }
         elif "runbook_execution_reconciliation_preview.py" in joined:
-            recon_json.write_text(json.dumps(_reconciliation_payload()), encoding="utf-8")
+            reconciliation = (
+                {
+                    "schema_version": "execution_reconciliation_preview.v2",
+                    "reconciliation_contract_version": "execution_reconciliation_preview.v2",
+                    "runner_result": "PASS",
+                    "account_id": ACCOUNT_ID,
+                    "data_date": DATA_DATE,
+                    "trade_date": TRADE_DATE,
+                    "input_finalized": True,
+                    "planned_count": 4,
+                    "executed_count": 0,
+                    "partial_count": 0,
+                    "not_executed_count": 4,
+                    "count_invariant_satisfied": True,
+                    "rows": [
+                        {
+                            "candidate_key": (
+                                f"manual_execution:{ACCOUNT_ID}:{TRADE_DATE}:"
+                                f"{candidate['symbol']}:{candidate['side']}:{index:02d}"
+                            ),
+                            "outcome": "NOT_EXECUTED",
+                        }
+                        for index, candidate in enumerate(_execution_candidates(), start=1)
+                    ],
+                }
+                if zero_commit
+                else _reconciliation_payload()
+            )
+            recon_json.write_text(json.dumps(reconciliation), encoding="utf-8")
             recon_md.write_text("recon", encoding="utf-8")
             payload = {
                 "runner_result": "PASS",
@@ -184,17 +213,51 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]]):
         elif "import_notion_executions.py" in joined and "--commit" in argv:
             assert str(preview_json) in argv
             assert str(recon_json) in argv
-            commit_json.write_text("{}", encoding="utf-8")
-            commit_md.write_text("commit", encoding="utf-8")
-            payload = {
-                "status": "COMMITTED",
-                "committed_row_count": 4,
-                "current_state_written": True,
-                "account_snapshot_written": True,
-                "position_snapshot_written": True,
-                "commit_json_path": str(commit_json),
-                "commit_markdown_path": str(commit_md),
-            }
+            if zero_commit:
+                commit_json.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "execution_commit.v2",
+                            "execution_contract_version": "execution_reconciliation_preview.v2",
+                            "status": "COMMITTED",
+                            "zero_write": True,
+                            "account_id": ACCOUNT_ID,
+                            "data_date": DATA_DATE,
+                            "execution_date": TRADE_DATE,
+                            "reconciliation_preview_json_path": str(recon_json),
+                            "reconciliation_preview_sha256": sha256_file(recon_json),
+                            "committed_row_count": 0,
+                            "committed_trade_ids": [],
+                            "current_state_written": False,
+                            "account_snapshot_written": False,
+                            "position_snapshot_written": False,
+                            "committed_rows": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                commit_md.write_text("zero write", encoding="utf-8")
+                payload = {
+                    "status": "COMMITTED",
+                    "committed_row_count": 0,
+                    "current_state_written": False,
+                    "account_snapshot_written": False,
+                    "position_snapshot_written": False,
+                    "commit_json_path": str(commit_json),
+                    "commit_markdown_path": str(commit_md),
+                }
+            else:
+                commit_json.write_text("{}", encoding="utf-8")
+                commit_md.write_text("commit", encoding="utf-8")
+                payload = {
+                    "status": "COMMITTED",
+                    "committed_row_count": 4,
+                    "current_state_written": True,
+                    "account_snapshot_written": True,
+                    "position_snapshot_written": True,
+                    "commit_json_path": str(commit_json),
+                    "commit_markdown_path": str(commit_md),
+                }
         elif "sync_notion_execution_status.py" in joined:
             assert str(commit_json) in argv
             sync_json.write_text("{}", encoding="utf-8")
@@ -374,6 +437,39 @@ def test_stage_b_success_pins_artifacts_and_completes(tmp_path: Path, monkeypatc
         record.get("command_key") == "execution_commit" and record.get("status") == "PASS"
         for record in state.idempotency_records.values()
     )
+
+
+def test_stage_b_all_not_executed_stops_after_zero_write_commit(tmp_path: Path, monkeypatch) -> None:
+    state_path = _seed_gate1_pass_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = runbook_state.finalize_execution_input(runbook_state.activate_execution_outcome_v2(state))
+    runbook_state.save_state(state, state_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runbook_stage_runner,
+        "run_allowlisted_command",
+        _fake_stage_b_run(tmp_path, calls, zero_commit=True),
+    )
+
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        confirm_paper_test=True,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert len(calls) == 3
+    assert all("sync_notion_execution_status.py" not in " ".join(argv) for argv in calls)
+    verification = runbook_stage_b_verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+    )
+    assert verification["runner_result"] == "PASS"
+    assert verification["verified_zero_write"] is True
 
 
 def test_stage_b_no_action_skips_all_commands_and_completes(tmp_path: Path, monkeypatch) -> None:

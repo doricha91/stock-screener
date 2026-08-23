@@ -35,6 +35,12 @@ NEEDS_REVIEW = "NEEDS_REVIEW"
 BLOCKED = "BLOCKED"
 
 PASS = "PASS"
+WAIT = "WAIT"
+NO_ACTION = "NO_ACTION"
+
+EXECUTED = "EXECUTED"
+PARTIAL = "PARTIAL"
+NOT_EXECUTED = "NOT_EXECUTED"
 
 NOT_IMPORTED = "NOT_IMPORTED"
 
@@ -196,6 +202,181 @@ def reconcile_plan_and_executions(
     }
 
 
+def derive_execution_outcomes(
+    plan_rows: list[dict[str, Any]],
+    execution_rows: list[dict[str, Any]],
+    *,
+    input_finalized: bool,
+    plan_context: dict[str, Any],
+    execution_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive quantity outcomes without changing the v1 reconciliation path.
+
+    Rows use the existing normalized reconciliation fields: ``plan_external_key``
+    and ``planned_quantity`` for plan rows, and
+    ``manual_execution_external_key`` and ``actual_quantity`` for execution
+    rows. Batch context owns data-date and contract-version validation because
+    those values are not present on the normalized v1 rows.
+    """
+
+    errors: list[dict[str, Any]] = []
+    if not isinstance(plan_rows, list):
+        errors.append(_outcome_error(None, "plan_rows_invalid", "plan_rows must be a list."))
+        plan_rows = []
+    if not isinstance(execution_rows, list):
+        errors.append(_outcome_error(None, "execution_rows_invalid", "execution_rows must be a list."))
+        execution_rows = []
+    if not isinstance(input_finalized, bool):
+        errors.append(
+            _outcome_error(None, "input_finalized_invalid", "input_finalized must be a boolean.")
+        )
+
+    errors.extend(_outcome_context_errors(plan_context, execution_context))
+
+    plan_by_key, plan_duplicate_count, plan_index_errors = _index_outcome_rows(
+        plan_rows,
+        key_field="plan_external_key",
+        source="plan",
+    )
+    execution_by_key, execution_duplicate_count, execution_index_errors = _index_outcome_rows(
+        execution_rows,
+        key_field="manual_execution_external_key",
+        source="execution",
+    )
+    errors.extend(plan_index_errors)
+    errors.extend(execution_index_errors)
+
+    plan_keys = set(plan_by_key)
+    execution_keys = set(execution_by_key)
+    missing_keys = sorted(plan_keys - execution_keys)
+    extra_keys = sorted(execution_keys - plan_keys)
+    for key in missing_keys:
+        errors.append(
+            _outcome_error(key, "missing_execution_record", "Plan candidate is missing from execution input.")
+        )
+    for key in extra_keys:
+        errors.append(
+            _outcome_error(key, "extra_execution_record", "Execution input is not present in the plan.")
+        )
+
+    if isinstance(plan_context, dict) and isinstance(execution_context, dict):
+        for key in sorted(plan_keys & execution_keys):
+            errors.extend(
+                _outcome_row_identity_errors(
+                    key,
+                    plan_by_key[key],
+                    execution_by_key[key],
+                    plan_context=plan_context,
+                    execution_context=execution_context,
+                )
+            )
+
+    duplicate_count = plan_duplicate_count + execution_duplicate_count
+    structural_invalid_count = sum(
+        1
+        for error in errors
+        if error["reason_code"]
+        not in {"missing_execution_record", "extra_execution_record", "duplicate_candidate_key"}
+    )
+    if errors:
+        return _build_outcome_result(
+            runner_result=BLOCKED,
+            action_mode=NO_ACTION if not plan_rows else "EXECUTION",
+            input_finalized=input_finalized,
+            plan_context=plan_context,
+            planned_count=len(plan_rows),
+            execution_input_count=len(execution_rows),
+            rows=[],
+            errors=errors,
+            missing_count=len(missing_keys),
+            extra_count=len(extra_keys),
+            duplicate_count=duplicate_count,
+            invalid_count=structural_invalid_count,
+        )
+
+    if not plan_rows:
+        return _build_outcome_result(
+            runner_result=PASS,
+            action_mode=NO_ACTION,
+            input_finalized=input_finalized,
+            plan_context=plan_context,
+            planned_count=0,
+            execution_input_count=0,
+            rows=[],
+            errors=[],
+        )
+
+    outcome_rows: list[dict[str, Any]] = []
+    quantity_errors: list[dict[str, Any]] = []
+    for key in sorted(plan_keys):
+        plan_row = plan_by_key[key]
+        execution_row = execution_by_key[key]
+        planned_quantity = _to_decimal(plan_row.get("planned_quantity"))
+        actual_raw = execution_row.get("actual_quantity")
+        actual_quantity = _to_decimal(actual_raw)
+
+        row = {
+            "candidate_key": key,
+            "planned_quantity": _json_number(planned_quantity),
+            "actual_quantity": _json_number(actual_quantity),
+            "outcome": None,
+            "status": PASS,
+            "reason_code": None,
+        }
+        if planned_quantity is None or planned_quantity <= 0:
+            row.update(status=BLOCKED, reason_code="planned_quantity_invalid")
+            quantity_errors.append(
+                _outcome_error(key, "planned_quantity_invalid", "Planned quantity must be finite and positive.")
+            )
+        elif _is_blank(actual_raw):
+            if input_finalized:
+                row["outcome"] = NOT_EXECUTED
+            else:
+                row.update(status=WAIT, reason_code="actual_quantity_pending")
+        elif actual_quantity is None or actual_quantity <= 0:
+            row.update(status=BLOCKED, reason_code="actual_quantity_invalid")
+            quantity_errors.append(
+                _outcome_error(
+                    key,
+                    "actual_quantity_invalid",
+                    "Actual quantity must be blank or a finite positive number; explicit zero is invalid.",
+                )
+            )
+        elif actual_quantity > planned_quantity:
+            row.update(status=BLOCKED, reason_code="actual_quantity_exceeds_planned")
+            quantity_errors.append(
+                _outcome_error(
+                    key,
+                    "actual_quantity_exceeds_planned",
+                    "Actual quantity exceeds planned quantity.",
+                )
+            )
+        elif actual_quantity == planned_quantity:
+            row["outcome"] = EXECUTED
+        else:
+            row["outcome"] = PARTIAL
+        outcome_rows.append(row)
+
+    if quantity_errors:
+        runner_result = BLOCKED
+    elif any(row["status"] == WAIT for row in outcome_rows):
+        runner_result = WAIT
+    else:
+        runner_result = PASS
+
+    return _build_outcome_result(
+        runner_result=runner_result,
+        action_mode="EXECUTION",
+        input_finalized=input_finalized,
+        plan_context=plan_context,
+        planned_count=len(plan_rows),
+        execution_input_count=len(execution_rows),
+        rows=outcome_rows,
+        errors=quantity_errors,
+        invalid_count=len(quantity_errors),
+    )
+
+
 def normalize_plan_items(
     plan_items: list[dict[str, Any]] | dict[str, Any],
     account_id: str,
@@ -241,8 +422,10 @@ def normalize_plan_items(
 def normalize_execution_row(row: dict[str, Any], account_id: str, trade_date: str) -> dict[str, Any]:
     symbol = str(row.get("symbol") or "").strip().upper()
     side = str(row.get("side") or "").strip().upper()
-    quantity = _to_decimal(row.get("quantity") if row.get("quantity") is not None else row.get("actual_quantity"))
-    price = _to_decimal(row.get("actual_price") if row.get("actual_price") is not None else row.get("price"))
+    quantity_raw = row.get("quantity") if row.get("quantity") is not None else row.get("actual_quantity")
+    price_raw = row.get("actual_price") if row.get("actual_price") is not None else row.get("price")
+    quantity = _to_decimal(quantity_raw)
+    price = _to_decimal(price_raw)
     execution_date = _none_if_blank(row.get("execution_date") or row.get("trade_date"))
     external_key = _none_if_blank(
         row.get("external_key")
@@ -258,8 +441,8 @@ def normalize_execution_row(row: dict[str, Any], account_id: str, trade_date: st
         "linked_daily_plan_key": _none_if_blank(row.get("linked_daily_plan_key")),
         "symbol": symbol,
         "side": side,
-        "actual_quantity": _json_number(quantity),
-        "actual_price": _json_number(price),
+        "actual_quantity": quantity_raw if quantity is None and not _is_blank(quantity_raw) else _json_number(quantity),
+        "actual_price": price_raw if price is None and not _is_blank(price_raw) else _json_number(price),
         "actual_notional": _json_number(_multiply(quantity, price)),
         "commission": row.get("commission"),
         "status": _none_if_blank(row.get("status")),
@@ -521,6 +704,177 @@ def _gate_result(
         "missing_count": _int_value(preview.get("missing_count")),
         "extra_count": _int_value(preview.get("extra_count")),
     }
+
+
+def _index_outcome_rows(
+    rows: list[Any],
+    *,
+    key_field: str,
+    source: str,
+) -> tuple[dict[str, dict[str, Any]], int, list[dict[str, Any]]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    duplicate_count = 0
+    errors: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            errors.append(
+                _outcome_error(None, f"{source}_row_invalid", f"{source} row {index} must be an object.")
+            )
+            continue
+        key = _none_if_blank(row.get(key_field))
+        if key is None:
+            errors.append(
+                _outcome_error(None, f"{source}_candidate_key_missing", f"{source} row {index} has no canonical key.")
+            )
+            continue
+        if key in indexed:
+            duplicate_count += 1
+            errors.append(
+                _outcome_error(key, "duplicate_candidate_key", f"Duplicate canonical key in {source} rows.")
+            )
+            continue
+        indexed[key] = row
+    return indexed, duplicate_count, errors
+
+
+def _outcome_context_errors(
+    plan_context: dict[str, Any],
+    execution_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not isinstance(plan_context, dict) or not isinstance(execution_context, dict):
+        return [_outcome_error(None, "context_invalid", "Plan and execution contexts must be objects.")]
+
+    errors: list[dict[str, Any]] = []
+    for field in ("account_id", "data_date", "trade_date", "contract_version"):
+        plan_value = _none_if_blank(plan_context.get(field))
+        execution_value = _none_if_blank(execution_context.get(field))
+        if plan_value is None:
+            errors.append(_outcome_error(None, "context_invalid", f"Plan context {field} is required."))
+            continue
+        if execution_value is None:
+            errors.append(_outcome_error(None, "context_invalid", f"Execution context {field} is required."))
+            continue
+        if field == "account_id":
+            plan_value = _safe_normalize_account_id(plan_value)
+            execution_value = _safe_normalize_account_id(execution_value)
+        if plan_value != execution_value:
+            errors.append(
+                _outcome_error(None, "context_mismatch", f"Plan and execution {field} do not match.")
+            )
+    return errors
+
+
+def _outcome_row_identity_errors(
+    key: str,
+    plan_row: dict[str, Any],
+    execution_row: dict[str, Any],
+    *,
+    plan_context: dict[str, Any],
+    execution_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    expected_pairs = (
+        ("account_id", plan_context.get("account_id"), execution_context.get("account_id")),
+        ("trade_date", plan_context.get("trade_date"), execution_context.get("trade_date")),
+    )
+    for field, plan_expected, execution_expected in expected_pairs:
+        plan_value = plan_row.get(field)
+        execution_value = execution_row.get(field)
+        if field == "account_id":
+            plan_value = _safe_normalize_account_id(plan_value)
+            execution_value = _safe_normalize_account_id(execution_value)
+            plan_expected = _safe_normalize_account_id(plan_expected)
+            execution_expected = _safe_normalize_account_id(execution_expected)
+        if plan_value != plan_expected:
+            errors.append(
+                _outcome_error(key, "plan_identity_mismatch", f"Plan row {field} does not match plan context.")
+            )
+        if execution_value != execution_expected:
+            errors.append(
+                _outcome_error(
+                    key,
+                    "execution_identity_mismatch",
+                    f"Execution row {field} does not match execution context.",
+                )
+            )
+
+    for field in ("symbol", "side"):
+        plan_value = _none_if_blank(plan_row.get(field))
+        execution_value = _none_if_blank(execution_row.get(field))
+        if plan_value is None or execution_value is None or plan_value.upper() != execution_value.upper():
+            errors.append(
+                _outcome_error(key, "candidate_identity_mismatch", f"Plan and execution {field} do not match.")
+            )
+    return errors
+
+
+def _build_outcome_result(
+    *,
+    runner_result: str,
+    action_mode: str,
+    input_finalized: Any,
+    plan_context: dict[str, Any],
+    planned_count: int,
+    execution_input_count: int,
+    rows: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+    missing_count: int = 0,
+    extra_count: int = 0,
+    duplicate_count: int = 0,
+    invalid_count: int = 0,
+) -> dict[str, Any]:
+    executed_count = sum(row.get("outcome") == EXECUTED for row in rows)
+    partial_count = sum(row.get("outcome") == PARTIAL for row in rows)
+    not_executed_count = sum(row.get("outcome") == NOT_EXECUTED for row in rows)
+    waiting_count = sum(row.get("status") == WAIT for row in rows)
+    resolved_count = executed_count + partial_count + not_executed_count
+    count_invariant_satisfied = (
+        runner_result == PASS
+        and planned_count == resolved_count
+        and missing_count == 0
+        and extra_count == 0
+        and duplicate_count == 0
+        and invalid_count == 0
+    )
+    return {
+        "contract_version": plan_context.get("contract_version") if isinstance(plan_context, dict) else None,
+        "runner_result": runner_result,
+        "action_mode": action_mode,
+        "input_finalized": input_finalized,
+        "planned_count": planned_count,
+        "execution_input_count": execution_input_count,
+        "resolved_count": resolved_count,
+        "executed_count": executed_count,
+        "partial_count": partial_count,
+        "not_executed_count": not_executed_count,
+        "waiting_count": waiting_count,
+        "missing_count": missing_count,
+        "extra_count": extra_count,
+        "duplicate_count": duplicate_count,
+        "invalid_count": invalid_count,
+        "count_invariant_satisfied": count_invariant_satisfied,
+        "rows": sorted(rows, key=lambda row: str(row.get("candidate_key") or "")),
+        "errors": sorted(
+            errors,
+            key=lambda error: (
+                str(error.get("candidate_key") or ""),
+                str(error.get("reason_code") or ""),
+                str(error.get("message") or ""),
+            ),
+        ),
+    }
+
+
+def _outcome_error(candidate_key: str | None, reason_code: str, message: str) -> dict[str, Any]:
+    return {
+        "candidate_key": candidate_key,
+        "reason_code": reason_code,
+        "message": message,
+    }
+
+
+def _is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _int_value(value: Any) -> int:

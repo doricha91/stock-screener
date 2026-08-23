@@ -18,6 +18,7 @@ from core.paper_manual_execution_commit import (
     commit_manual_execution_preview,
 )
 from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
+from core.paper_daily_review_scope import sha256_file
 from core.paths import OUTPUTS, PAPER_TEST_DIR
 
 
@@ -131,6 +132,31 @@ def _preview_payload(*, date: str, commit_allowed: str, fail_count: int, warning
         "projected_cash_impact": -100.0,
         "projected_position_impact": {"AAPL": 1},
         "candidates": candidates,
+    }
+
+
+def _v2_evidence(path: Path, rows: list[dict], *, data_date: str = "2026-05-24") -> dict:
+    payload = {
+        "schema_version": "execution_reconciliation_preview.v2",
+        "reconciliation_contract_version": "execution_reconciliation_preview.v2",
+        "runner_result": "PASS",
+        "account_id": "paper_default",
+        "data_date": data_date,
+        "trade_date": "2026-05-25",
+        "input_finalized": True,
+        "planned_count": len(rows),
+        "executed_count": sum(row.get("outcome") == "EXECUTED" for row in rows),
+        "partial_count": sum(row.get("outcome") == "PARTIAL" for row in rows),
+        "not_executed_count": sum(row.get("outcome") == "NOT_EXECUTED" for row in rows),
+        "count_invariant_satisfied": True,
+        "rows": rows,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return {
+        "data_date": data_date,
+        "reconciliation_preview_json_path": path,
+        "reconciliation_preview_sha256": sha256_file(path),
+        "expected_outcome_rows": [row for row in rows if row.get("outcome") in {"EXECUTED", "PARTIAL"}],
     }
 
 
@@ -494,6 +520,171 @@ def test_current_state_save_failure_rolls_back(commit_env, monkeypatch):
         rows = list(csv.DictReader(handle))
     assert rows == []
     assert not commit_env["current_state_path"].exists()
+
+
+def test_v2_outcome_filter_commits_only_trade_bearing_candidate(commit_env):
+    aapl = _candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)
+    msft = _candidate(symbol="MSFT", side="BUY", quantity=1, actual_price=200.0)
+    payload = _preview_payload(
+        date="2026-05-25",
+        commit_allowed="true",
+        fail_count=0,
+        warning_count=0,
+        candidates=[aapl, msft],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    outcome_rows = [
+        {
+            "candidate_key": aapl["canonical_key"],
+            "symbol": "AAPL",
+            "side": "BUY",
+            "actual_quantity": 1,
+            "actual_price": 100.0,
+            "outcome": "EXECUTED",
+        },
+        {
+            "candidate_key": msft["canonical_key"],
+            "symbol": "MSFT",
+            "side": "BUY",
+            "actual_quantity": None,
+            "actual_price": None,
+            "outcome": "NOT_EXECUTED",
+        },
+    ]
+    evidence = _v2_evidence(commit_env["preview_path"].with_name("reconciliation.json"), outcome_rows)
+
+    result = commit_manual_execution_preview(
+        execution_date="2026-05-25",
+        preview_json_path=commit_env["preview_path"],
+        eligible_candidate_keys={aapl["canonical_key"]},
+        **evidence,
+    )
+
+    assert result.committed_row_count == 1
+    with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["symbol"] for row in rows] == ["AAPL"]
+    snapshots_before = {
+        path: path.read_bytes()
+        for path in (
+            commit_env["exec_path"],
+            commit_env["account_path"],
+            commit_env["position_path"],
+            commit_env["current_state_path"],
+        )
+    }
+    with pytest.raises(ManualExecutionCommitError, match="already exist"):
+        commit_manual_execution_preview(
+            execution_date="2026-05-25",
+            preview_json_path=commit_env["preview_path"],
+            eligible_candidate_keys={aapl["canonical_key"]},
+            **evidence,
+        )
+    assert {path: path.read_bytes() for path in snapshots_before} == snapshots_before
+
+
+def test_v2_filtered_commit_blocks_stale_input_preview_before_write(commit_env):
+    candidate = _candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)
+    payload = _preview_payload(
+        date="2026-05-25", commit_allowed="true", fail_count=0, warning_count=0,
+        candidates=[candidate],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    outcome_rows = [
+        {
+            "candidate_key": candidate["canonical_key"],
+            "symbol": "AAPL",
+            "side": "BUY",
+            "actual_quantity": 1,
+            "actual_price": 101.0,
+            "outcome": "EXECUTED",
+        }
+    ]
+    evidence = _v2_evidence(commit_env["preview_path"].with_name("reconciliation.json"), outcome_rows)
+
+    with pytest.raises(ManualExecutionCommitError, match="does not match"):
+        commit_manual_execution_preview(
+            execution_date="2026-05-25",
+            preview_json_path=commit_env["preview_path"],
+            eligible_candidate_keys={candidate["canonical_key"]},
+            **evidence,
+        )
+
+    with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        assert list(csv.DictReader(handle)) == []
+
+
+def test_v2_commit_blocks_tampered_reconciliation_digest_before_domain_write(commit_env):
+    candidate = _candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)
+    payload = _preview_payload(
+        date="2026-05-25", commit_allowed="true", fail_count=0, warning_count=0,
+        candidates=[candidate],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    outcome_rows = [
+        {
+            "candidate_key": candidate["canonical_key"],
+            "symbol": "AAPL",
+            "side": "BUY",
+            "actual_quantity": 1,
+            "actual_price": 100.0,
+            "outcome": "EXECUTED",
+        }
+    ]
+    evidence = _v2_evidence(commit_env["preview_path"].with_name("reconciliation.json"), outcome_rows)
+    evidence["reconciliation_preview_json_path"].write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ManualExecutionCommitError, match="SHA-256 mismatch"):
+        commit_manual_execution_preview(
+            execution_date="2026-05-25",
+            preview_json_path=commit_env["preview_path"],
+            eligible_candidate_keys={candidate["canonical_key"]},
+            **evidence,
+        )
+
+    with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        assert list(csv.DictReader(handle)) == []
+    assert not commit_env["current_state_path"].exists()
+
+
+def test_v2_filtered_commit_revalidates_latest_ledger_hard_cap(commit_env):
+    existing = _execution_row(
+        date="2026-05-24", symbol="AAPL", side="BUY", shares=1, price=100.0
+    )
+    _write_csv(commit_env["exec_path"], PAPER_EXECUTION_LOG_COLUMNS, [existing])
+    candidate = _candidate(symbol="MSFT", side="BUY", quantity=1, actual_price=200.0)
+    payload = _preview_payload(
+        date="2026-05-25",
+        commit_allowed="true",
+        fail_count=0,
+        warning_count=0,
+        candidates=[candidate],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    outcome_rows = [
+        {
+            "candidate_key": candidate["canonical_key"],
+            "symbol": "MSFT",
+            "side": "BUY",
+            "actual_quantity": 1,
+            "actual_price": 200.0,
+            "outcome": "EXECUTED",
+        }
+    ]
+    evidence = _v2_evidence(commit_env["preview_path"].with_name("reconciliation.json"), outcome_rows)
+
+    with pytest.raises(ManualExecutionCommitError, match="hard-cap"):
+        commit_manual_execution_preview(
+            execution_date="2026-05-25",
+            preview_json_path=commit_env["preview_path"],
+            eligible_candidate_keys={candidate["canonical_key"]},
+            max_long_positions=1,
+            **evidence,
+        )
+
+    with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["symbol"] for row in rows] == ["AAPL"]
 
 
 def test_non_default_preview_commit_writes_under_account_root(tmp_path, monkeypatch):

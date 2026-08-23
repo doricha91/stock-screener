@@ -62,11 +62,44 @@ def commit_manual_review_preview(
     target_log_path = review_log_path or writer_paths["review_log_path"]
     template_csv_path = template_path or writer_paths["template_path"]
     output_reports_dir = reports_dir or writer_paths["reports_dir"]
+    candidate_payloads = _select_committable_candidates(payload)
+    if not candidate_payloads:
+        output_reports_dir.mkdir(parents=True, exist_ok=True)
+        compact_date = review_date.replace("-", "")
+        commit_json_path = output_reports_dir / f"manual_review_import_commit_{compact_date}.json"
+        commit_markdown_path = output_reports_dir / f"manual_review_import_commit_{compact_date}.md"
+        _write_commit_sidecar(
+            account_id=resolved_account_id,
+            review_date=review_date,
+            preview_json_path=preview_json_path,
+            commit_json_path=commit_json_path,
+            commit_markdown_path=commit_markdown_path,
+            allow_warnings=allow_warnings,
+            candidate_payloads=[],
+            append_issues=[],
+            summary={
+                "rows_appended": 0,
+                "rows_skipped_pending": 0,
+                "rows_skipped_duplicate": 0,
+                "rows_skipped_invalid": 0,
+            },
+            backups={},
+        )
+        return ManualReviewAppendCommitResult(
+            account_id=resolved_account_id,
+            review_date=review_date,
+            preview_json_path=str(preview_json_path),
+            commit_json_path=str(commit_json_path),
+            commit_markdown_path=str(commit_markdown_path),
+            appended_count=0,
+            skipped_count=0,
+            failed_count=0,
+            backups={},
+        )
 
     allowed_root = account_paths.root if account_paths is not None and account_paths.account_id != "paper_default" else None
     existing_rows = load_existing_paper_manual_review_log_rows(target_log_path, allowed_root=allowed_root)
     template_by_key = _load_template_index(template_csv_path, allowed_root=allowed_root)
-    candidate_payloads = _select_committable_candidates(payload)
     _normalize_append_candidate_payloads(candidate_payloads, account_id=resolved_account_id)
     preview_rows = [_candidate_to_review_log_row(candidate, template_by_key) for candidate in candidate_payloads]
 
@@ -177,6 +210,9 @@ def _select_committable_candidates(payload: dict[str, Any]) -> list[dict[str, An
         for candidate in payload.get("candidates", [])
         if str(candidate.get("validation_status") or "").strip() in {PASS, WARNING}
     ]
+    candidate_count = payload.get("candidate_count")
+    if not candidates and candidate_count == 0 and payload.get("candidates") == []:
+        return []
     if not candidates:
         raise ManualReviewAppendCommitError("Preview JSON contains no committable review candidates.")
 

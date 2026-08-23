@@ -78,6 +78,11 @@ def test_initial_state_defaults() -> None:
     assert state.last_completed_stage is None
     assert set(state.stage_status) == {"A", "GATE1", "B", "C", "GATE2", "D", "E", "F"}
     assert all(status == "PENDING" for status in state.stage_status.values())
+    assert state.execution_contract == {
+        "version": runbook_state.EXECUTION_CONTRACT_V2,
+        "input_finalized": False,
+        "finalized_at": None,
+    }
     assert state.idempotency_records == {}
 
 
@@ -95,6 +100,80 @@ def test_save_state_then_load_state_round_trips(tmp_path: Path) -> None:
     loaded = runbook_state.load_state(path)
 
     assert loaded == state
+
+
+def test_new_context_state_file_persists_v2_contract(tmp_path: Path) -> None:
+    result, path, state = runbook_state.init_state_file_for_context(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+    )
+
+    loaded = runbook_state.load_state(path)
+
+    assert result == "CREATED"
+    assert state.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V2
+    assert loaded.execution_contract == state.execution_contract
+
+
+def test_new_v2_state_finalizes_without_activation_and_activation_is_exact_no_op() -> None:
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+
+    assert runbook_state.activate_execution_outcome_v2(state) is state
+
+    finalized = runbook_state.finalize_execution_input(state)
+
+    assert finalized.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V2
+    assert finalized.execution_contract["input_finalized"] is True
+    assert finalized.execution_contract["finalized_at"] is not None
+
+
+def test_existing_explicit_v1_state_remains_v1(tmp_path: Path) -> None:
+    state = replace(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        execution_contract={
+            "version": runbook_state.EXECUTION_CONTRACT_V1,
+            "input_finalized": False,
+            "finalized_at": None,
+        },
+    )
+    path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    runbook_state.save_state(state, path)
+
+    result, loaded_path, loaded = runbook_state.init_state_file_for_context(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+    )
+
+    assert result == "EXISTING"
+    assert loaded_path == path
+    assert runbook_state.get_execution_contract(loaded)["version"] == runbook_state.EXECUTION_CONTRACT_V1
+
+
+def test_legacy_missing_execution_contract_remains_effective_v1(tmp_path: Path) -> None:
+    payload = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE).to_dict()
+    payload.pop("execution_contract")
+    path = runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result, _, loaded = runbook_state.init_state_file_for_context(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+    )
+
+    assert result == "EXISTING"
+    assert loaded.execution_contract == {}
+    assert runbook_state.get_execution_contract(loaded) == {
+        "version": runbook_state.EXECUTION_CONTRACT_V1,
+        "input_finalized": False,
+        "finalized_at": None,
+    }
 
 
 def test_load_legacy_state_without_stage_f_treats_it_as_pending(tmp_path: Path) -> None:

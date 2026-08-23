@@ -67,6 +67,74 @@ def _reports(tmp_path: Path, commit_payload: dict | None = None, sync_payload: d
     return commit_path, sync_path
 
 
+def _v2_reports(tmp_path: Path, outcomes: list[str]) -> tuple[Path, Path]:
+    rows = []
+    committed_rows = []
+    committed_trade_ids = []
+    for index, outcome in enumerate(outcomes, start=1):
+        symbol = f"TEST{index}"
+        key = f"manual_execution:{ACCOUNT_ID}:{TRADE_DATE}:{symbol}:BUY:{index:02d}"
+        rows.append({"candidate_key": key, "outcome": outcome})
+        if outcome in {"EXECUTED", "PARTIAL"}:
+            trade_id = f"trade-{index}"
+            committed_trade_ids.append(trade_id)
+            committed_rows.append(
+                {
+                    "account_id": ACCOUNT_ID,
+                    "canonical_key": key,
+                    "symbol": symbol,
+                    "commit_status": "COMMITTED",
+                    "committed_trade_id": trade_id,
+                }
+            )
+    preview = {
+        "schema_version": runbook_state.EXECUTION_CONTRACT_V2,
+        "reconciliation_contract_version": runbook_state.EXECUTION_CONTRACT_V2,
+        "runner_result": "PASS",
+        "account_id": ACCOUNT_ID,
+        "data_date": DATA_DATE,
+        "trade_date": TRADE_DATE,
+        "input_finalized": True,
+        "planned_count": len(rows),
+        "executed_count": outcomes.count("EXECUTED"),
+        "partial_count": outcomes.count("PARTIAL"),
+        "not_executed_count": outcomes.count("NOT_EXECUTED"),
+        "count_invariant_satisfied": True,
+        "rows": rows,
+    }
+    preview_path = _write_json(tmp_path / "reconciliation.json", preview)
+    zero_write = not committed_rows
+    commit = {
+        "schema_version": "execution_commit.v2",
+        "execution_contract_version": runbook_state.EXECUTION_CONTRACT_V2,
+        "status": "COMMITTED",
+        "zero_write": zero_write,
+        "account_id": ACCOUNT_ID,
+        "data_date": DATA_DATE,
+        "execution_date": TRADE_DATE,
+        "reconciliation_preview_json_path": str(preview_path),
+        "reconciliation_preview_sha256": sha256_file(preview_path),
+        "committed_row_count": len(committed_rows),
+        "committed_trade_ids": committed_trade_ids,
+        "current_state_written": not zero_write,
+        "account_snapshot_written": not zero_write,
+        "position_snapshot_written": not zero_write,
+        "committed_rows": committed_rows,
+    }
+    return _write_json(tmp_path / "commit-v2.json", commit), preview_path
+
+
+def _explicit_v1_state() -> runbook_state.RunbookState:
+    return replace(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        execution_contract={
+            "version": runbook_state.EXECUTION_CONTRACT_V1,
+            "input_finalized": False,
+            "finalized_at": None,
+        },
+    )
+
+
 def _seed_stage_b_state(
     workspace: Path,
     commit_path: Path | None,
@@ -75,7 +143,7 @@ def _seed_stage_b_state(
     sync_key: str = "execution_status_sync_report_json",
     stage_b_pass: bool = True,
 ) -> Path:
-    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = _explicit_v1_state()
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
     if stage_b_pass:
@@ -90,7 +158,7 @@ def _seed_stage_b_state(
 
 
 def _seed_no_action_state(workspace: Path) -> tuple[Path, Path, Path]:
-    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = _explicit_v1_state()
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
     state = runbook_state.complete_stage(state, "B")
@@ -328,7 +396,7 @@ def test_stage_b_verifier_prefers_sync_json_key_over_fallback(tmp_path: Path) ->
     commit_path = _write_json(tmp_path / "commit.json", _commit_report())
     preferred_sync = _write_json(tmp_path / "sync_preferred.json", _sync_report())
     fallback_sync = _write_json(tmp_path / "sync_fallback.json", _sync_report(updated_count=1))
-    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = _explicit_v1_state()
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
     state = runbook_state.complete_stage(state, "B")
@@ -443,7 +511,7 @@ def test_stage_b_verifier_resolves_workspace_relative_paths(tmp_path: Path) -> N
 
 
 def test_stage_b_verifier_pins_artifact_to_existing_state(tmp_path: Path) -> None:
-    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = _explicit_v1_state()
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
     state = runbook_state.complete_stage(state, "B")
@@ -593,3 +661,196 @@ def test_stage_b_verifier_fails_missing_report_file(tmp_path: Path) -> None:
 
     assert result["runner_result"] == "FAILED"
     assert any(check["reason_code"] == "missing_report_file" for check in result["checks"])
+
+
+def test_v2_verifier_pins_preview_count_identity_and_digest(tmp_path: Path) -> None:
+    commit_path, preview_path = _v2_reports(tmp_path, ["EXECUTED", "PARTIAL", "NOT_EXECUTED"])
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["reconciliation_preview_json"] == str(preview_path)
+    assert result["reconciliation_preview_sha256"] == sha256_file(preview_path)
+    assert (result["planned_count"], result["executed_count"], result["partial_count"], result["not_executed_count"]) == (3, 1, 1, 1)
+    assert any(check["reason_code"] == "v2_candidate_key_set_match" for check in result["checks"])
+
+
+def test_v2_verifier_rerun_has_deterministic_decision(tmp_path: Path) -> None:
+    commit_path, _ = _v2_reports(tmp_path, ["EXECUTED", "NOT_EXECUTED"])
+
+    first = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+    second = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    decision = lambda payload: (
+        payload["runner_result"],
+        payload["planned_count"],
+        payload["committed_row_count"],
+        [(item["name"], item["status"], item["reason_code"]) for item in payload["checks"]],
+    )
+    assert decision(first) == decision(second)
+
+
+def test_v2_verifier_blocks_tampered_pinned_preview(tmp_path: Path) -> None:
+    commit_path, preview_path = _v2_reports(tmp_path, ["EXECUTED"])
+    preview = json.loads(preview_path.read_text(encoding="utf-8"))
+    preview["rows"][0]["outcome"] = "NOT_EXECUTED"
+    _write_json(preview_path, preview)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "v2_preview_digest_mismatch" for check in result["checks"])
+
+
+def test_v2_verifier_blocks_duplicate_committed_candidate_key(tmp_path: Path) -> None:
+    commit_path, _ = _v2_reports(tmp_path, ["EXECUTED", "PARTIAL"])
+    commit = json.loads(commit_path.read_text(encoding="utf-8"))
+    commit["committed_rows"][1]["canonical_key"] = commit["committed_rows"][0]["canonical_key"]
+    _write_json(commit_path, commit)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "v2_candidate_key_set_mismatch" for check in result["checks"])
+
+
+def test_v2_verifier_blocks_extra_and_missing_committed_candidate_key(tmp_path: Path) -> None:
+    commit_path, _ = _v2_reports(tmp_path, ["EXECUTED"])
+    commit = json.loads(commit_path.read_text(encoding="utf-8"))
+    commit["committed_rows"][0]["canonical_key"] = (
+        f"manual_execution:{ACCOUNT_ID}:{TRADE_DATE}:EXTRA:BUY:99"
+    )
+    _write_json(commit_path, commit)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "v2_candidate_key_set_mismatch" for check in result["checks"])
+
+
+def test_v2_verifier_blocks_missing_preview_binding(tmp_path: Path) -> None:
+    commit_path, _ = _v2_reports(tmp_path, ["EXECUTED"])
+    commit = json.loads(commit_path.read_text(encoding="utf-8"))
+    commit.pop("reconciliation_preview_sha256")
+    _write_json(commit_path, commit)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "v2_preview_binding_missing" for check in result["checks"])
+
+
+def test_v2_verifier_blocks_data_date_context_mismatch(tmp_path: Path) -> None:
+    commit_path, _ = _v2_reports(tmp_path, ["EXECUTED"])
+    commit = json.loads(commit_path.read_text(encoding="utf-8"))
+    commit["data_date"] = "2026-06-29"
+    _write_json(commit_path, commit)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "v2_commit_context_mismatch" for check in result["checks"])
+
+
+def test_v2_verifier_blocks_count_mismatch_even_with_matching_digest(tmp_path: Path) -> None:
+    commit_path, preview_path = _v2_reports(tmp_path, ["EXECUTED", "NOT_EXECUTED"])
+    preview = json.loads(preview_path.read_text(encoding="utf-8"))
+    preview["not_executed_count"] = 0
+    _write_json(preview_path, preview)
+    commit = json.loads(commit_path.read_text(encoding="utf-8"))
+    commit["reconciliation_preview_sha256"] = sha256_file(preview_path)
+    _write_json(commit_path, commit)
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "v2_outcome_count_invariants_mismatch" for check in result["checks"])
+
+
+def test_v2_all_not_executed_is_verified_zero_write(tmp_path: Path) -> None:
+    commit_path, _ = _v2_reports(tmp_path, ["NOT_EXECUTED", "NOT_EXECUTED"])
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "PASS"
+    assert result["verified_zero_write"] is True
+    assert result["committed_row_count"] == 0
+    assert result["not_executed_count"] == 2
+
+
+def test_verifier_blocks_unknown_execution_contract_version(tmp_path: Path) -> None:
+    commit_path = _write_json(
+        tmp_path / "commit-unknown.json",
+        _commit_report(execution_contract_version="execution_reconciliation_preview.v999"),
+    )
+
+    result = verifier.verify_stage_b_completion(
+        workspace=tmp_path,
+        account_id=ACCOUNT_ID,
+        data_date=DATA_DATE,
+        trade_date=TRADE_DATE,
+        commit_report=commit_path,
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert any(check["reason_code"] == "unsupported_execution_contract_version" for check in result["checks"])

@@ -314,12 +314,21 @@ def check_gate2_readiness(
         state, gate_json, gate_txt = _write_gate2_result_and_save(workspace, state_path, state, result)
         return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
 
-    runner_result = "PASS" if rows and all(row["ready"] for row in rows) else "WAIT"
+    verified_empty_scope = (
+        evidence_context.get("action_mode") == "EXECUTION"
+        and evidence_context.get("manual_review_scope_count") == 0
+        and not rows
+    )
+    runner_result = "PASS" if verified_empty_scope or (rows and all(row["ready"] for row in rows)) else "WAIT"
     if runner_result == "PASS":
         state = runbook_state.complete_step(state, 12, GATE2_ID)
         state = runbook_state.complete_stage(state, GATE2_ID)
         next_poll_time = None
-        message = "All manual review rows are ready."
+        message = (
+            "The pinned canonical Manual Review scope is verified empty."
+            if verified_empty_scope
+            else "All manual review rows are ready."
+        )
     else:
         next_poll_time = _next_poll_time(state.timezone, next_poll_minutes)
         state = runbook_state.wait_gate(
@@ -416,7 +425,13 @@ def normalize_gate1_rows(raw_rows: list[dict[str, Any]], state: RunbookState) ->
     rows = []
     for raw in raw_rows:
         row = normalize_flat_manual_execution_row(raw)
-        missing = _row_missing_reasons(row, account_id, trade_date, linked_daily_plan_key)
+        missing = _row_missing_reasons(
+            row,
+            account_id,
+            trade_date,
+            linked_daily_plan_key,
+            execution_contract=runbook_state.get_execution_contract(state),
+        )
         rows.append(
             {
                 **row,
@@ -593,7 +608,7 @@ def create_gate2_result(
         if runner_result == "WAIT"
         else "Fix Manual Review row or Notion mapping before retry."
     )
-    return {
+    result = {
         "schema_version": GATE2_RESULT_SCHEMA_VERSION,
         "runner_result": runner_result,
         "gate_status": runner_result,
@@ -629,6 +644,18 @@ def create_gate2_result(
         "next_stage": "D" if runner_result == "PASS" else None,
         "next_required_action": next_required_action,
     }
+    if action_mode == "EXECUTION" and evidence_context is not None:
+        result.update(
+            {
+                "manual_review_scope_json": evidence_context.get("manual_review_scope_json"),
+                "manual_review_scope_sha256": evidence_context.get("manual_review_scope_sha256"),
+                "manual_review_scope_count": evidence_context.get("manual_review_scope_count"),
+                "manual_review_scope_canonical_keys": evidence_context.get(
+                    "manual_review_scope_canonical_keys"
+                ),
+            }
+        )
+    return result
 
 
 def write_gate_result(workspace: Path, state: RunbookState, result: dict[str, Any]) -> tuple[Path, Path]:
@@ -750,6 +777,10 @@ def _cli_payload(result: dict[str, Any], gate_json: Path, gate_txt: Path, state_
         "manual_review_row_count",
         "no_action_reason",
         "daily_plan_sha256",
+        "manual_review_scope_json",
+        "manual_review_scope_sha256",
+        "manual_review_scope_count",
+        "manual_review_scope_canonical_keys",
     ):
         if field_name in result:
             payload[field_name] = result[field_name]
@@ -768,6 +799,7 @@ def _row_missing_reasons(
     account_id: str,
     trade_date: str,
     linked_daily_plan_key: str,
+    execution_contract: dict[str, Any] | None = None,
 ) -> list[str]:
     missing: list[str] = []
     if row.get("account_id") != account_id:
@@ -780,7 +812,10 @@ def _row_missing_reasons(
         missing.append("import_status_NOT_IMPORTED")
     if row.get("status") != "READY":
         missing.append("status_READY")
-    if row.get("actual_price") is None:
+    is_v2 = (execution_contract or {}).get("version") == runbook_state.EXECUTION_CONTRACT_V2
+    if is_v2 and (execution_contract or {}).get("input_finalized") is not True:
+        missing.append("execution_input_not_finalized")
+    if not is_v2 and row.get("actual_price") is None:
         missing.append("actual_price")
     if int(row.get("failed_count") or 0) != 0:
         missing.append("failed_count")

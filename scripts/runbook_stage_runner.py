@@ -38,7 +38,7 @@ from scripts.runbook_no_action import (
 )
 from scripts.runbook_command_registry import RunbookCommand
 from scripts.runbook_state import RunbookState
-from core.paper_account_paths import build_paper_account_paths
+from core.paper_account_paths import build_paper_account_paths, latest_current_state_snapshot_path
 from core.paper_daily_review_scope import (
     DailyReviewScopeError,
     build_daily_manual_review_scope,
@@ -740,6 +740,11 @@ def run_stage_b(
                     result_ref=artifact_refs.get("execution_commit_report_json"),
                 )
             runbook_state.save_state(state, state_path)
+            if (
+                command.command_key == "execution_commit"
+                and command_result.get("raw_payload", {}).get("committed_row_count") == 0
+            ):
+                break
             continue
 
         if command.command_key == "execution_commit" and idempotency_key:
@@ -1034,6 +1039,9 @@ def run_stage_c(
     pass_next_action = (
         "No Manual Review input is required. Run Gate 2 to validate the pinned no-action review state."
         if evidence_context["action_mode"] == "NO_ACTION"
+        else "The canonical Manual Review scope is empty. Run Gate 2 to verify it."
+        if evidence_context.get("verified_zero_write") is True
+        and evidence_context.get("manual_review_scope_count") == 0
         else "Fill Manual Review in Notion, then run Gate 2."
     )
 
@@ -2787,9 +2795,17 @@ def _build_stage_c_scope(workspace: Path, state: RunbookState) -> dict[str, Any]
             current_state_path = _artifact_ref_path(workspace, current_state_ref)
         else:
             account_paths = build_paper_account_paths(state.frozen_context.account_id, create=False)
-            current_state_path = account_paths.current_state_snapshot_path(state.frozen_context.trade_date)
-        if not current_state_path.exists():
-            raise DailyReviewScopeError(f"Post-Stage-B current state not found: {current_state_path}")
+            if verification.get("verified_zero_write") is True:
+                current_state_path = latest_current_state_snapshot_path(
+                    account_paths,
+                    state.frozen_context.data_date,
+                )
+            else:
+                current_state_path = account_paths.current_state_snapshot_path(
+                    state.frozen_context.trade_date
+                )
+        if current_state_path is None or not current_state_path.exists():
+            raise DailyReviewScopeError("Canonical current state not found on or before data_date")
         current_state = json.loads(current_state_path.read_text(encoding="utf-8"))
         commit_ref = state.artifacts.get("execution_commit_report_json")
         if not commit_ref:
@@ -2848,15 +2864,27 @@ def _stage_c_evidence_context(state: RunbookState, workspace: Path) -> dict[str,
         commit_ref = state.artifacts.get("execution_commit_report_json")
         if not commit_ref or not _artifact_ref_exists(workspace, commit_ref):
             raise EvidenceError("execution_commit_report_required", "execution commit report is required")
+        committed_count = _int_payload(verification, "committed_row_count")
+        verified_zero_write = (
+            verification.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
+            and verification.get("verified_zero_write") is True
+            and committed_count == 0
+            and _int_payload(verification, "executed_count") == 0
+            and _int_payload(verification, "partial_count") == 0
+            and _int_payload(verification, "planned_count")
+            == _int_payload(verification, "not_executed_count")
+            == intent["candidate_execution_count"]
+        )
         if (
             verification.get("verified_no_action") is not False
-            or _int_payload(verification, "committed_row_count") <= 0
             or _int_payload(verification, "failed_count") != 0
+            or (committed_count <= 0 and not verified_zero_write)
         ):
             raise EvidenceError("stage_b_verification_required", "execution verification is not commit-ready")
         return {
             "action_mode": "EXECUTION",
             "verified_no_action": False,
+            "verified_zero_write": verified_zero_write,
             "candidate_execution_count": intent["candidate_execution_count"],
             "execution_commit_report_json": commit_ref,
             "stage_b_no_action_json": None,
@@ -2935,6 +2963,21 @@ def _stage_d_preview_precondition_error(state: RunbookState, workspace: Path) ->
         return "gate2_required"
     if str(gate2.get("runner_result") or "").upper() != "PASS":
         return "gate2_required"
+    if state.artifacts.get("manual_review_scope_json"):
+        try:
+            scope = _load_state_review_scope(state, workspace)
+        except DailyReviewScopeError:
+            return "manual_review_scope_required"
+        if scope["action_mode"] == "EXECUTION" and scope["counts"]["total"] == 0:
+            if not (
+                gate2.get("action_mode") == "EXECUTION"
+                and gate2.get("manual_review_scope_sha256") == scope["scope_sha256"]
+                and gate2.get("manual_review_scope_count") == 0
+                and gate2.get("candidate_count") == 0
+                and gate2.get("required_count") == 0
+                and gate2.get("manual_review_row_count") == 0
+            ):
+                return "gate2_required"
     if not (
         state.artifacts.get("manual_review_template_csv")
         or state.artifacts.get("notion_review_template_report_json")
@@ -2959,7 +3002,7 @@ def _stage_d_append_precondition_error(state: RunbookState, workspace: Path) -> 
         preview = json.loads(_artifact_ref_path(workspace, preview_ref).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return "review_preview_required"
-    preview_error = _review_preview_append_readiness_error(preview, state)
+    preview_error = _review_preview_append_readiness_error(preview, state, workspace)
     if preview_error:
         return preview_error
     return None
@@ -3069,13 +3112,22 @@ def _stage_d_sync_retry_allowed(state: RunbookState, workspace: Path) -> bool:
     return bool(report_ref and _artifact_ref_exists(workspace, report_ref))
 
 
-def _review_preview_append_readiness_error(preview: dict[str, Any], state: RunbookState) -> str | None:
+def _review_preview_append_readiness_error(
+    preview: dict[str, Any],
+    state: RunbookState,
+    workspace: Path,
+) -> str | None:
     if str(preview.get("account_id") or "").strip() != state.frozen_context.account_id:
         return "review_preview_context_mismatch"
     if str(preview.get("review_date") or "").strip() != state.frozen_context.trade_date:
         return "review_preview_context_mismatch"
     if _int_payload(preview, "candidate_count") <= 0:
-        return "review_preview_not_append_ready"
+        try:
+            scope = _load_state_review_scope(state, workspace)
+        except DailyReviewScopeError:
+            return "review_preview_not_append_ready"
+        if scope["action_mode"] != "EXECUTION" or scope["counts"]["total"] != 0:
+            return "review_preview_not_append_ready"
     if _int_payload(preview, "fail_count") != 0:
         return "review_preview_not_append_ready"
     duplicate_candidates = preview.get("duplicate_candidates")
@@ -3748,7 +3800,7 @@ def _run_stage_d_append_command(
         )
         return result, _format_command_log(rendered_argv, argv, repo_root, process, stdout, stderr), rendered_argv
 
-    validation = _validate_stage_d_append_payload(command.command_key, raw_payload, state)
+    validation = _validate_stage_d_append_payload(command.command_key, raw_payload, state, workspace)
     if validation["artifact_refs"]:
         validation["artifact_refs"] = _pin_artifact_refs(
             workspace,
@@ -4132,11 +4184,12 @@ def _validate_stage_d_append_payload(
     command_key: str,
     payload: dict[str, Any],
     state: RunbookState,
+    workspace: Path | None = None,
 ) -> dict[str, Any]:
     if command_key == "review_append":
-        return _validate_review_append_payload(payload, state)
+        return _validate_review_append_payload(payload, state, workspace)
     if command_key == "sync_review_status":
-        return _validate_review_sync_payload(payload, state)
+        return _validate_review_sync_payload(payload, state, workspace)
     return _payload_validation("PASS", "Command completed successfully.", {}, [])
 
 
@@ -4229,8 +4282,7 @@ def _validate_review_preview_payload(
         blockers.append("account_id must match frozen context")
     if review_date != state.frozen_context.trade_date:
         blockers.append("review_date must match trade_date")
-    if _int_payload(payload, "candidate_count") <= 0:
-        blockers.append("candidate_count must be greater than 0")
+    candidate_count = _int_payload(payload, "candidate_count")
     if _int_payload(payload, "fail_count") != 0:
         blockers.append("fail_count must be 0")
     if _int_payload(payload, "blocked_count") != 0:
@@ -4263,6 +4315,10 @@ def _validate_review_preview_payload(
                 blockers.append(f"review preview extra canonical keys: {','.join(extra_keys)}")
             if len(actual) != len(desired):
                 blockers.append("review preview candidate count must exactly match pinned scope")
+            if candidate_count != len(desired):
+                blockers.append("candidate_count must exactly match pinned scope")
+    elif candidate_count <= 0:
+        blockers.append("candidate_count must be greater than 0")
     json_path = str(payload.get("json_path") or payload.get("preview_json_path") or "").strip()
     markdown_path = str(payload.get("markdown_path") or payload.get("preview_markdown_path") or "").strip()
     if not json_path or not Path(json_path).exists():
@@ -4297,7 +4353,11 @@ def _validate_review_preview_payload(
     )
 
 
-def _validate_review_append_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+def _validate_review_append_payload(
+    payload: dict[str, Any],
+    state: RunbookState,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
     blockers = []
     status = str(payload.get("status") or payload.get("runner_result") or "").upper()
     if status not in {"COMMITTED", "PASS"}:
@@ -4306,7 +4366,9 @@ def _validate_review_append_payload(payload: dict[str, Any], state: RunbookState
         blockers.append("account_id must match frozen context")
     if str(payload.get("review_date") or "").strip() != state.frozen_context.trade_date:
         blockers.append("review_date must match trade_date")
-    if _int_payload(payload, "appended_count") <= 0:
+    if _int_payload(payload, "appended_count") <= 0 and not _is_pinned_zero_review_scope(
+        state, workspace
+    ):
         blockers.append("appended_count must be greater than 0")
     if _int_payload(payload, "failed_count") != 0:
         blockers.append("failed_count must be 0")
@@ -4331,7 +4393,11 @@ def _validate_review_append_payload(payload: dict[str, Any], state: RunbookState
     )
 
 
-def _validate_review_sync_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
+def _validate_review_sync_payload(
+    payload: dict[str, Any],
+    state: RunbookState,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
     blockers = []
     if str(payload.get("overall_status") or "").upper() != "SUCCESS":
         blockers.append("overall_status must be SUCCESS")
@@ -4340,7 +4406,7 @@ def _validate_review_sync_payload(payload: dict[str, Any], state: RunbookState) 
     if str(payload.get("review_date") or "").strip() != state.frozen_context.trade_date:
         blockers.append("review_date must match trade_date")
     candidate_count = _int_payload(payload, "candidate_count")
-    if candidate_count <= 0:
+    if candidate_count <= 0 and not _is_pinned_zero_review_scope(state, workspace):
         blockers.append("candidate_count must be greater than 0")
     if _int_payload(payload, "updated_count") != candidate_count:
         blockers.append("updated_count must equal candidate_count")
@@ -4364,6 +4430,16 @@ def _validate_review_sync_payload(payload: dict[str, Any], state: RunbookState) 
         artifacts if not blockers else {},
         blockers,
     )
+
+
+def _is_pinned_zero_review_scope(state: RunbookState, workspace: Path | None) -> bool:
+    if workspace is None:
+        return False
+    try:
+        scope = _load_state_review_scope(state, workspace)
+    except DailyReviewScopeError:
+        return False
+    return scope["action_mode"] == "EXECUTION" and scope["counts"]["total"] == 0
 
 
 def _validate_eod_dryrun_payload(payload: dict[str, Any], state: RunbookState) -> dict[str, Any]:
@@ -4511,7 +4587,12 @@ def _validate_export_review_template_payload(
             scope = _load_state_review_scope(state, workspace)
         except DailyReviewScopeError as exc:
             blockers.append(str(exc))
-    if candidate_count <= 0 and not (scope and scope.get("action_mode") == "NO_ACTION"):
+    verified_empty_scope = bool(
+        scope
+        and scope.get("action_mode") in {"EXECUTION", "NO_ACTION"}
+        and scope.get("counts", {}).get("total") == 0
+    )
+    if candidate_count <= 0 and not verified_empty_scope:
         blockers.append("candidate_count must be greater than 0")
     if _int_payload(payload, "failed_count") != 0:
         blockers.append("failed_count must be 0")
@@ -4574,11 +4655,11 @@ def _existing_artifacts_from_payload(payload: dict[str, Any], mapping: dict[str,
 
 def _validate_execution_preview_payload(payload: dict[str, Any]) -> dict[str, Any]:
     blockers = []
-    if _int_payload(payload, "candidate_count") <= 0:
-        blockers.append("candidate_count must be greater than 0")
-    if _int_payload(payload, "fail_count") != 0:
+    is_v2 = payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
+    candidate_count = _int_payload(payload, "candidate_count")
+    if not is_v2 and _int_payload(payload, "fail_count") != 0:
         blockers.append("fail_count must be 0")
-    if str(payload.get("commit_allowed")).lower() != "true":
+    if not is_v2 and str(payload.get("commit_allowed")).lower() != "true":
         blockers.append("commit_allowed must be true")
     json_path = str(payload.get("json_path") or "").strip()
     markdown_path = str(payload.get("markdown_path") or "").strip()
@@ -4623,11 +4704,13 @@ def _validate_execution_commit_payload(payload: dict[str, Any]) -> dict[str, Any
     blockers = []
     if str(payload.get("status") or "").upper() != "COMMITTED":
         blockers.append("status must be COMMITTED")
-    if _int_payload(payload, "committed_row_count") <= 0:
-        blockers.append("committed_row_count must be greater than 0")
+    committed_count = _int_payload(payload, "committed_row_count")
+    if committed_count < 0:
+        blockers.append("committed_row_count must not be negative")
     for field in ("current_state_written", "account_snapshot_written", "position_snapshot_written"):
-        if payload.get(field) is not True:
-            blockers.append(f"{field} must be true")
+        expected = committed_count > 0
+        if payload.get(field) is not expected:
+            blockers.append(f"{field} must be {str(expected).lower()}")
     commit_json = str(payload.get("commit_json_path") or "").strip()
     commit_md = str(payload.get("commit_markdown_path") or "").strip()
     if not commit_json or not Path(commit_json).exists():
@@ -4639,7 +4722,7 @@ def _validate_execution_commit_payload(payload: dict[str, Any]) -> dict[str, Any
     return _payload_validation(
         "FAILED" if blockers else "PASS",
         "Execution commit report is pinned." if not blockers else "Execution commit result failed validation.",
-        artifacts if not blockers else {},
+        ({key: value for key, value in artifacts.items() if value} if not blockers else {}),
         blockers,
     )
 

@@ -120,6 +120,11 @@ def build_standard_completion_context(
         "data_date": state.frozen_context.data_date,
         "trade_date": state.frozen_context.trade_date,
     }
+    zero_review_evidence = _build_standard_zero_review_evidence(
+        workspace_path,
+        state,
+        expected_context,
+    )
     summaries = {
         stage_id: _load_standard_stage_summary(workspace_path, state, stage_id, expected_context)
         for stage_id in {spec[0] for spec in STANDARD_EXPORT_COMMANDS.values()}
@@ -149,6 +154,7 @@ def build_standard_completion_context(
             stage_id=stage_id,
             step_id=step_id,
             command_key=command_key,
+            allow_zero_review=zero_review_evidence is not None,
         )
         authoritative_stages[stage_name] = {
             "stage_id": stage_id,
@@ -159,13 +165,16 @@ def build_standard_completion_context(
             "result_ref": workspace_relative_ref(workspace_path, result_path),
             "result_sha256": _sha256_file(result_path),
         }
-    return {
+    result = {
         "schema_version": STANDARD_COMPLETION_SCHEMA_VERSION,
         "runbook_day_id": state.runbook_day_id,
         **expected_context,
         "action_mode": "STANDARD",
         "authoritative_stages": authoritative_stages,
     }
+    if zero_review_evidence is not None:
+        result["zero_review_evidence"] = zero_review_evidence
+    return result
 
 
 def _load_standard_stage_summary(
@@ -197,6 +206,7 @@ def _validate_standard_command_result(
     stage_id: str,
     step_id: int,
     command_key: str,
+    allow_zero_review: bool = False,
 ) -> None:
     if runbook_result.validate_command_result(result):
         raise CompletionEvidenceError("standard_runbook_command_result_invalid", command_key)
@@ -221,10 +231,21 @@ def _validate_standard_command_result(
         or bool(summary.get("blockers"))
     ):
         raise CompletionEvidenceError("standard_runbook_command_result_mismatch", command_key)
-    _validate_standard_export_payload(result.get("raw_payload"), state, command_key)
+    _validate_standard_export_payload(
+        result.get("raw_payload"),
+        state,
+        command_key,
+        allow_zero_review=allow_zero_review,
+    )
 
 
-def _validate_standard_export_payload(payload: Any, state: RunbookState, command_key: str) -> None:
+def _validate_standard_export_payload(
+    payload: Any,
+    state: RunbookState,
+    command_key: str,
+    *,
+    allow_zero_review: bool = False,
+) -> None:
     if not isinstance(payload, dict):
         raise CompletionEvidenceError("standard_runbook_export_payload_invalid", command_key)
     account_id = state.frozen_context.account_id
@@ -258,14 +279,194 @@ def _validate_standard_export_payload(payload: Any, state: RunbookState, command
             and payload.get(date_field) == trade_date
             and isinstance(candidate_count, int)
             and not isinstance(candidate_count, bool)
-            and candidate_count > 0
+            and (
+                candidate_count > 0
+                or (command_key == "export_review_template" and allow_zero_review and candidate_count == 0)
+            )
             and processed_count >= candidate_count
             and payload.get("failed_count") == 0
             and payload.get("dry_run") is False
-            and payload.get("would_write") is True
+            and payload.get("would_write") is (candidate_count > 0)
         )
     if not valid:
         raise CompletionEvidenceError("standard_runbook_export_payload_invalid", command_key)
+
+
+def _build_standard_zero_review_evidence(
+    workspace: Path,
+    state: RunbookState,
+    expected_context: dict[str, str],
+) -> dict[str, Any] | None:
+    scope_ref = str(state.artifacts.get("manual_review_scope_json") or "").strip()
+    if not scope_ref:
+        return None
+    scope_path = resolve_workspace_ref(workspace, scope_ref)
+    scope = _load_json_object(scope_path, "standard_zero_review_scope_invalid")
+    counts = scope.get("counts")
+    if not isinstance(counts, dict) or counts.get("total") != 0:
+        return None
+    frozen_context = scope.get("frozen_context")
+    if (
+        scope.get("schema_version") != "paper_daily_manual_review_scope.v1"
+        or scope.get("action_mode") != "EXECUTION"
+        or not isinstance(frozen_context, dict)
+        or frozen_context
+        != {"runbook_day_id": state.runbook_day_id, **expected_context}
+        or scope.get("canonical_keys") != []
+        or scope.get("rows") != []
+    ):
+        raise CompletionEvidenceError("standard_zero_review_scope_invalid")
+    scope_basis = {
+        key: scope[key]
+        for key in (
+            "schema_version",
+            "frozen_context",
+            "action_mode",
+            "sources",
+            "manual_review_symbols",
+            "current_open_symbols",
+            "position_symbols",
+            "execution_symbols",
+            "canonical_keys",
+            "rows",
+        )
+    }
+    scope_sha256 = hashlib.sha256(
+        json.dumps(scope_basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    if scope.get("scope_sha256") != scope_sha256:
+        raise CompletionEvidenceError("standard_zero_review_scope_invalid")
+
+    stage_c_summary, stage_c_summary_path = _load_standard_stage_summary(
+        workspace,
+        state,
+        "C",
+        expected_context,
+    )
+    stage_c_raw = stage_c_summary.get("raw_payload")
+    if not isinstance(stage_c_raw, dict) or not (
+        stage_c_raw.get("action_mode") == "EXECUTION"
+        and stage_c_raw.get("verified_no_action") is False
+        and stage_c_raw.get("verified_zero_write") is True
+        and stage_c_raw.get("manual_review_scope_sha256") == scope_sha256
+        and stage_c_raw.get("manual_review_scope_count") == 0
+    ):
+        raise CompletionEvidenceError("standard_zero_review_stage_c_invalid")
+
+    verification_ref = str(state.artifacts.get("stage_b_verification_json") or "").strip()
+    verification_path = resolve_workspace_ref(workspace, verification_ref)
+    verification = _load_json_object(
+        verification_path,
+        "standard_zero_review_stage_b_invalid",
+    )
+    if not (
+        verification.get("schema_version") == "stage_b_verification.v1"
+        and verification.get("runner_result") == "PASS"
+        and verification.get("action_mode") == "EXECUTION"
+        and verification.get("execution_contract_version") == "execution_reconciliation_preview.v2"
+        and verification.get("verified_no_action") is False
+        and verification.get("verified_zero_write") is True
+        and verification.get("committed_row_count") == 0
+        and verification.get("executed_count") == 0
+        and verification.get("partial_count") == 0
+        and verification.get("planned_count") == verification.get("not_executed_count")
+    ):
+        raise CompletionEvidenceError("standard_zero_review_stage_b_invalid")
+
+    gate_ref = str(state.artifacts.get("gate2_readiness_json") or "").strip()
+    gate_path = resolve_workspace_ref(workspace, gate_ref)
+    gate = _load_json_object(gate_path, "standard_zero_review_gate2_invalid")
+    if not (
+        gate.get("schema_version") == "gate2_review_readiness.v1"
+        and gate.get("runner_result") == "PASS"
+        and gate.get("action_mode") == "EXECUTION"
+        and gate.get("manual_review_scope_sha256") == scope_sha256
+        and gate.get("manual_review_scope_count") == 0
+        and gate.get("candidate_count") == 0
+        and gate.get("required_count") == 0
+        and gate.get("manual_review_row_count") == 0
+    ):
+        raise CompletionEvidenceError("standard_zero_review_gate2_invalid")
+
+    artifact_specs = {
+        "review_preview": (
+            "review_preview_json",
+            lambda payload: (
+                payload.get("account_id") == state.frozen_context.account_id
+                and payload.get("review_date") == state.frozen_context.trade_date
+                and payload.get("candidate_count") == 0
+                and payload.get("fail_count") == 0
+                and payload.get("blocked_count", 0) == 0
+                and payload.get("append_allowed") == "true"
+                and payload.get("candidates") == []
+            ),
+        ),
+        "review_append": (
+            "review_append_report_json",
+            lambda payload: (
+                payload.get("account_id") == state.frozen_context.account_id
+                and payload.get("review_date") == state.frozen_context.trade_date
+                and payload.get("candidate_count") == 0
+                and payload.get("appended_count") == 0
+                and payload.get("failed_count") == 0
+                and payload.get("rows") == []
+            ),
+        ),
+        "review_status_sync": (
+            "review_status_sync_report_json",
+            lambda payload: (
+                payload.get("overall_status") == "SUCCESS"
+                and payload.get("account_id") == state.frozen_context.account_id
+                and payload.get("review_date") == state.frozen_context.trade_date
+                and payload.get("candidate_count") == 0
+                and payload.get("updated_count") == 0
+                and payload.get("failed_count") == 0
+                and payload.get("rows") == []
+            ),
+        ),
+    }
+    artifacts: dict[str, Any] = {}
+    for label, (artifact_name, validator) in artifact_specs.items():
+        ref = str(state.artifacts.get(artifact_name) or "").strip()
+        path = resolve_workspace_ref(workspace, ref)
+        payload = _load_json_object(path, f"standard_zero_review_{label}_invalid")
+        if not validator(payload):
+            raise CompletionEvidenceError(f"standard_zero_review_{label}_invalid")
+        artifacts[label] = {
+            "ref": workspace_relative_ref(workspace, path),
+            "sha256": _sha256_file(path),
+        }
+
+    stage_d_summary, stage_d_summary_path = _load_standard_stage_summary(
+        workspace,
+        state,
+        "D",
+        expected_context,
+    )
+    command_keys = {
+        step.get("command_key")
+        for step in stage_d_summary.get("steps", [])
+        if isinstance(step, dict) and step.get("runner_result") == "PASS"
+    }
+    if not {"review_append", "sync_review_status"}.issubset(command_keys):
+        raise CompletionEvidenceError("standard_zero_review_stage_d_invalid")
+    return {
+        "required_review_count": 0,
+        "verified_zero_review": True,
+        "manual_review_scope_ref": workspace_relative_ref(workspace, scope_path),
+        "manual_review_scope_sha256": scope_sha256,
+        "stage_b_verification_ref": workspace_relative_ref(workspace, verification_path),
+        "stage_b_verification_sha256": _sha256_file(verification_path),
+        "stage_c_summary_ref": workspace_relative_ref(workspace, stage_c_summary_path),
+        "stage_c_summary_sha256": _sha256_file(stage_c_summary_path),
+        "gate2_ref": workspace_relative_ref(workspace, gate_path),
+        "gate2_sha256": _sha256_file(gate_path),
+        "stage_d_summary_ref": workspace_relative_ref(workspace, stage_d_summary_path),
+        "stage_d_summary_sha256": _sha256_file(stage_d_summary_path),
+        "artifacts": artifacts,
+    }
 
 
 def _load_json_object(path: Path, reason: str) -> dict[str, Any]:
@@ -333,6 +534,22 @@ def build_runbook_completion_manifest(
     )
     if no_action and (execution["record_count"] or review["record_count"]):
         raise CompletionEvidenceError("no_action_same_date_rows_present")
+    if not no_action and state.artifacts.get("manual_review_scope_json"):
+        scope_payload = _load_json_object(
+            resolve_workspace_ref(workspace_path, state.artifacts["manual_review_scope_json"]),
+            "standard_zero_review_scope_invalid",
+        )
+        scope_counts = scope_payload.get("counts")
+        if (
+            scope_payload.get("action_mode") == "EXECUTION"
+            and isinstance(scope_counts, dict)
+            and scope_counts.get("total") == 0
+        ):
+            completion = build_standard_completion_context(workspace_path, state)
+            if not isinstance(completion.get("zero_review_evidence"), dict):
+                raise CompletionEvidenceError("standard_zero_review_evidence_required")
+            if execution["record_count"] or review["record_count"]:
+                raise CompletionEvidenceError("standard_zero_review_same_date_rows_present")
     eod_commit = _eod_source(workspace_path, state)
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,

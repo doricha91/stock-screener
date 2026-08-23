@@ -20,6 +20,10 @@ from core.execution_reconciliation import (  # noqa: E402
     load_reconciliation_preview,
     validate_reconciliation_preview_for_commit,
 )
+from core.execution_outcome_flow import (  # noqa: E402
+    RECONCILIATION_CONTRACT_V2,
+    build_execution_commit_plan,
+)
 from core.paper_manual_execution_commit import (  # noqa: E402
     ManualExecutionCommitError,
     commit_manual_execution_preview,
@@ -32,6 +36,8 @@ from core.notion_settings import (  # noqa: E402
     get_notion_token,
     load_notion_settings,
 )
+from scripts import runbook_state  # noqa: E402
+from scripts.runbook_no_action import sha256_file  # noqa: E402
 
 load_dotenv()
 
@@ -91,6 +97,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         payload = preview.to_dict()
+        if args.workspace and args.data_date:
+            state_path = runbook_state.get_state_path_for_context(
+                Path(args.workspace),
+                resolved_account_id,
+                args.data_date,
+                args.date,
+            )
+            if state_path.exists():
+                state = runbook_state.load_state(state_path)
+                payload["execution_contract_version"] = runbook_state.get_execution_contract(state).get("version")
         print("MANUAL EXECUTION IMPORT PREVIEW")
         print(
             f"  account_id={preview.account_id} date={preview.execution_date} candidates={preview.candidate_count} "
@@ -131,12 +147,36 @@ def main(argv: list[str] | None = None) -> int:
                 "message": f"Reconciliation preview could not be loaded: {exc}",
             },
         )
-    gate_result = validate_reconciliation_preview_for_commit(
-        reconciliation_preview,
-        account_id=resolved_account_id,
-        data_date=args.data_date,
-        trade_date=args.date,
+    reconciliation_preview_path = Path(args.reconciliation_preview_json)
+    reconciliation_preview_sha256 = sha256_file(reconciliation_preview_path)
+    reconciliation_version = (
+        reconciliation_preview.get("schema_version")
+        or reconciliation_preview.get("reconciliation_contract_version")
     )
+    commit_plan = build_execution_commit_plan(reconciliation_preview)
+    if reconciliation_version == RECONCILIATION_CONTRACT_V2:
+        context_ok = (
+            reconciliation_preview.get("account_id") == resolved_account_id
+            and reconciliation_preview.get("data_date") == args.data_date
+            and reconciliation_preview.get("trade_date") == args.date
+        )
+        gate_result = {
+            "ok": context_ok and commit_plan.get("runner_result") == "PASS",
+            "reason_code": None if context_ok else "reconciliation_context_mismatch",
+            "message": "v2 outcome preview is commit-eligible." if context_ok else "v2 outcome preview context mismatch.",
+        }
+        if context_ok and commit_plan.get("runner_result") != "PASS":
+            gate_result.update(
+                reason_code=commit_plan.get("reason_code"),
+                message="v2 outcome preview is not commit-eligible.",
+            )
+    else:
+        gate_result = validate_reconciliation_preview_for_commit(
+            reconciliation_preview,
+            account_id=resolved_account_id,
+            data_date=args.data_date,
+            trade_date=args.date,
+        )
     if not gate_result["ok"]:
         return _print_commit_blocked(args, gate_result)
     try:
@@ -150,6 +190,24 @@ def main(argv: list[str] | None = None) -> int:
             preview_json_path=Path(args.preview_json),
             allow_warnings=args.allow_warnings,
             account_paths=account_paths,
+            eligible_candidate_keys=(
+                set(commit_plan.get("candidate_keys") or [])
+                if reconciliation_version == RECONCILIATION_CONTRACT_V2
+                else None
+            ),
+            expected_outcome_rows=(
+                list(commit_plan.get("rows") or [])
+                if reconciliation_version == RECONCILIATION_CONTRACT_V2
+                else None
+            ),
+            allow_zero_write=reconciliation_version == RECONCILIATION_CONTRACT_V2,
+            data_date=args.data_date if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None,
+            reconciliation_preview_json_path=(
+                reconciliation_preview_path if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
+            ),
+            reconciliation_preview_sha256=(
+                reconciliation_preview_sha256 if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
+            ),
         )
     except ManualExecutionCommitError as exc:
         if args.json:

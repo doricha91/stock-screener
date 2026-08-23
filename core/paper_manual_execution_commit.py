@@ -5,6 +5,7 @@ import json
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,10 @@ from core.notion_account_keys import (
     build_legacy_manual_execution_canonical_key,
     build_manual_execution_canonical_key,
     normalize_notion_account_id,
+)
+from core.execution_outcome_flow import (
+    RECONCILIATION_CONTRACT_V2,
+    build_execution_commit_plan,
 )
 from core.paper_account_guard import assert_non_default_writer_target
 from core.paper_account_snapshot import (
@@ -36,6 +41,7 @@ from core.manual_execution_long_position_cap import (
     validate_manual_execution_long_position_actions,
 )
 from core.paper_market_valuation import value_paper_account_state
+from core.paper_daily_review_scope import sha256_file
 from core.paper_position_snapshot import (
     build_paper_position_snapshot_rows,
     save_paper_position_snapshot,
@@ -82,9 +88,35 @@ def commit_manual_execution_preview(
     allow_warnings: bool = False,
     account_paths: PaperAccountPaths | None = None,
     max_long_positions: int = DEFAULT_MAX_LONG_POSITIONS,
+    eligible_candidate_keys: set[str] | None = None,
+    expected_outcome_rows: list[dict[str, Any]] | None = None,
+    allow_zero_write: bool = False,
+    data_date: str | None = None,
+    reconciliation_preview_json_path: Path | None = None,
+    reconciliation_preview_sha256: str | None = None,
 ) -> ManualExecutionCommitResult:
     preview_payload = _load_preview_payload(preview_json_path)
-    resolved_account_id = _resolve_preview_account_id(preview_payload, account_paths=account_paths)
+    resolved_account_id = _resolve_preview_account_id(
+        preview_payload,
+        account_paths=account_paths,
+        require_writer_paths=not (allow_zero_write and eligible_candidate_keys == set()),
+    )
+    v2_evidence: dict[str, Any] | None = None
+    if eligible_candidate_keys is not None:
+        v2_evidence = _validate_v2_reconciliation_evidence(
+            account_id=resolved_account_id,
+            data_date=data_date,
+            execution_date=execution_date,
+            reconciliation_preview_json_path=reconciliation_preview_json_path,
+            reconciliation_preview_sha256=reconciliation_preview_sha256,
+            eligible_candidate_keys=eligible_candidate_keys,
+            expected_outcome_rows=expected_outcome_rows,
+        )
+        preview_payload = _filter_preview_for_outcomes(
+            preview_payload,
+            eligible_candidate_keys,
+            expected_outcome_rows=expected_outcome_rows,
+        )
     _validate_preview_payload(
         preview_payload,
         execution_date=execution_date,
@@ -97,6 +129,26 @@ def commit_manual_execution_preview(
         if candidate.get("validation_status") in {PASS, WARNING}
     ]
     if not candidate_payloads:
+        if allow_zero_write and eligible_candidate_keys == set():
+            sidecar_paths = _write_zero_commit_sidecar(
+                account_id=resolved_account_id,
+                execution_date=execution_date,
+                preview_json_path=preview_json_path,
+                v2_evidence=v2_evidence,
+            )
+            return ManualExecutionCommitResult(
+                account_id=resolved_account_id,
+                execution_date=execution_date,
+                preview_json_path=str(preview_json_path),
+                commit_json_path=str(sidecar_paths["json"]),
+                commit_markdown_path=str(sidecar_paths["markdown"]),
+                committed_row_count=0,
+                committed_trade_ids=[],
+                backups={},
+                current_state_written=False,
+                account_snapshot_written=False,
+                position_snapshot_written=False,
+            )
         raise ManualExecutionCommitError("Preview JSON contains no committable candidates.")
     _normalize_commit_candidate_payloads(candidate_payloads, account_id=resolved_account_id)
     allowed_root = account_paths.root if account_paths is not None and account_paths.account_id != "paper_default" else None
@@ -235,6 +287,7 @@ def commit_manual_execution_preview(
             committed_rows=committed_rows,
             backup_paths=backup_paths,
             reports_dir=writer_paths["reports_dir"],
+            v2_evidence=v2_evidence,
         )
     except Exception as exc:
         _restore_from_backups(
@@ -263,6 +316,143 @@ def commit_manual_execution_preview(
         account_snapshot_written=True,
         position_snapshot_written=True,
     )
+
+
+def _filter_preview_for_outcomes(
+    preview_payload: dict[str, Any],
+    eligible_candidate_keys: set[str],
+    *,
+    expected_outcome_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    candidates = list(preview_payload.get("candidates") or [])
+    keyed = {
+        str(candidate.get("canonical_key") or candidate.get("notion_external_key") or "").strip(): candidate
+        for candidate in candidates
+    }
+    missing = sorted(eligible_candidate_keys - set(keyed))
+    if missing:
+        raise ManualExecutionCommitError(
+            "Outcome preview candidate keys are missing from the input preview: " + ", ".join(missing)
+        )
+    selected = [keyed[key] for key in sorted(eligible_candidate_keys)]
+    if expected_outcome_rows is not None:
+        expected_by_key = {
+            str(row.get("candidate_key") or "").strip(): row for row in expected_outcome_rows
+        }
+        for key, candidate in zip(sorted(eligible_candidate_keys), selected):
+            expected = expected_by_key.get(key)
+            if expected is None:
+                raise ManualExecutionCommitError(f"Missing outcome row for commit candidate: {key}")
+            if (
+                str(candidate.get("symbol") or "").strip().upper() != str(expected.get("symbol") or "").strip().upper()
+                or str(candidate.get("side") or "").strip().upper() != str(expected.get("side") or "").strip().upper()
+                or not _same_number(candidate.get("quantity"), expected.get("actual_quantity"))
+                or not _same_number(candidate.get("actual_price"), expected.get("actual_price"))
+            ):
+                raise ManualExecutionCommitError(
+                    f"Input preview does not match the pinned outcome row: {key}"
+                )
+    filtered = dict(preview_payload)
+    filtered["candidates"] = selected
+    filtered["candidate_count"] = len(selected)
+    filtered["pass_count"] = sum(item.get("validation_status") == PASS for item in selected)
+    filtered["warning_count"] = sum(item.get("validation_status") == WARNING for item in selected)
+    filtered["fail_count"] = sum(item.get("validation_status") not in {PASS, WARNING} for item in selected)
+    filtered["commit_allowed"] = (
+        "false"
+        if filtered["fail_count"]
+        else "true_with_warnings"
+        if filtered["warning_count"]
+        else "true"
+    )
+    return filtered
+
+
+def _same_number(left: Any, right: Any) -> bool:
+    try:
+        left_number = Decimal(str(left))
+        right_number = Decimal(str(right))
+    except (InvalidOperation, ValueError):
+        return False
+    return left_number.is_finite() and right_number.is_finite() and left_number == right_number
+
+
+def _validate_v2_reconciliation_evidence(
+    *,
+    account_id: str,
+    data_date: str | None,
+    execution_date: str,
+    reconciliation_preview_json_path: Path | None,
+    reconciliation_preview_sha256: str | None,
+    eligible_candidate_keys: set[str],
+    expected_outcome_rows: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if data_date is None or not str(data_date).strip():
+        raise ManualExecutionCommitError("v2 commit requires data_date evidence.")
+    if reconciliation_preview_json_path is None or not reconciliation_preview_sha256:
+        raise ManualExecutionCommitError("v2 commit requires pinned reconciliation preview evidence.")
+    evidence_path = Path(reconciliation_preview_json_path)
+    try:
+        actual_sha256 = sha256_file(evidence_path)
+    except OSError as exc:
+        raise ManualExecutionCommitError(f"Pinned reconciliation preview could not be read: {exc}") from exc
+    if actual_sha256 != str(reconciliation_preview_sha256).strip().lower():
+        raise ManualExecutionCommitError("Pinned reconciliation preview SHA-256 mismatch.")
+    try:
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ManualExecutionCommitError(f"Pinned reconciliation preview is invalid: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ManualExecutionCommitError("Pinned reconciliation preview root must be an object.")
+    version = payload.get("schema_version") or payload.get("reconciliation_contract_version")
+    if version != RECONCILIATION_CONTRACT_V2:
+        raise ManualExecutionCommitError("Pinned reconciliation preview is not the v2 contract.")
+    expected_context = {
+        "account_id": account_id,
+        "data_date": str(data_date),
+        "trade_date": execution_date,
+    }
+    if any(payload.get(key) != value for key, value in expected_context.items()):
+        raise ManualExecutionCommitError("Pinned reconciliation preview context mismatch.")
+
+    commit_plan = build_execution_commit_plan(payload)
+    if commit_plan.get("runner_result") != PASS:
+        raise ManualExecutionCommitError("Pinned reconciliation preview is not commit-eligible.")
+    pinned_rows = list(commit_plan.get("rows") or [])
+    pinned_keys = [str(row.get("candidate_key") or "").strip() for row in pinned_rows]
+    if any(not key for key in pinned_keys) or len(set(pinned_keys)) != len(pinned_keys):
+        raise ManualExecutionCommitError("Pinned reconciliation preview has invalid trade-bearing candidate keys.")
+    if set(pinned_keys) != eligible_candidate_keys:
+        raise ManualExecutionCommitError("Pinned reconciliation preview candidate keys changed before commit.")
+    if expected_outcome_rows is None or pinned_rows != expected_outcome_rows:
+        raise ManualExecutionCommitError("Pinned reconciliation preview outcome rows changed before commit.")
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise ManualExecutionCommitError("Pinned reconciliation preview rows must be a list.")
+    all_keys = [str(row.get("candidate_key") or "").strip() for row in rows if isinstance(row, dict)]
+    if len(all_keys) != len(rows) or any(not key for key in all_keys) or len(set(all_keys)) != len(all_keys):
+        raise ManualExecutionCommitError("Pinned reconciliation preview candidate identity is invalid.")
+    try:
+        planned_count = int(payload["planned_count"])
+        executed_count = int(payload["executed_count"])
+        partial_count = int(payload["partial_count"])
+        not_executed_count = int(payload["not_executed_count"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ManualExecutionCommitError("Pinned reconciliation preview outcome counts are invalid.") from exc
+    if (
+        min(planned_count, executed_count, partial_count, not_executed_count) < 0
+        or len(rows) != planned_count
+        or planned_count != executed_count + partial_count + not_executed_count
+        or len(pinned_rows) != executed_count + partial_count
+        or not_executed_count != planned_count - len(pinned_rows)
+    ):
+        raise ManualExecutionCommitError("Pinned reconciliation preview outcome count invariant failed.")
+    return {
+        "data_date": str(data_date),
+        "reconciliation_preview_json_path": str(evidence_path),
+        "reconciliation_preview_sha256": actual_sha256,
+    }
 
 
 def _format_long_position_cap_error(
@@ -314,6 +504,7 @@ def _resolve_preview_account_id(
     payload: dict[str, Any],
     *,
     account_paths: PaperAccountPaths | None = None,
+    require_writer_paths: bool = True,
 ) -> str:
     root_account_id = payload.get("account_id")
     if root_account_id is not None and str(root_account_id).strip():
@@ -337,7 +528,7 @@ def _resolve_preview_account_id(
         resolved_account_id = candidate_account_id
     if account_paths is not None and account_paths.account_id != resolved_account_id:
         raise ManualExecutionCommitError("Provided account_paths.account_id does not match preview account_id.")
-    if resolved_account_id != "paper_default" and account_paths is None:
+    if require_writer_paths and resolved_account_id != "paper_default" and account_paths is None:
         raise ManualExecutionCommitError(
             "Non-default manual execution commit requires account-aware writer paths."
         )
@@ -493,6 +684,7 @@ def _write_commit_sidecar(
     committed_rows: list[dict[str, Any]],
     backup_paths: dict[str, Path | None],
     reports_dir: Path,
+    v2_evidence: dict[str, Any] | None,
 ) -> dict[str, Path]:
     compact_date = execution_date.replace("-", "")
     json_path = reports_dir / f"manual_execution_import_commit_{compact_date}.json"
@@ -532,6 +724,12 @@ def _write_commit_sidecar(
             for candidate, row in zip(candidate_payloads, committed_rows)
         ],
     }
+    if v2_evidence is not None:
+        payload.update(
+            schema_version="execution_commit.v2",
+            execution_contract_version=RECONCILIATION_CONTRACT_V2,
+            **v2_evidence,
+        )
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     lines = [
@@ -557,6 +755,43 @@ def _write_commit_sidecar(
             ]
         )
     markdown_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    return {"json": json_path, "markdown": markdown_path}
+
+
+def _write_zero_commit_sidecar(
+    *,
+    account_id: str,
+    execution_date: str,
+    preview_json_path: Path,
+    v2_evidence: dict[str, Any] | None,
+) -> dict[str, Path]:
+    if v2_evidence is None:
+        raise ManualExecutionCommitError("v2 zero-write commit requires pinned reconciliation evidence.")
+    compact_date = execution_date.replace("-", "")
+    json_path = preview_json_path.parent / f"manual_execution_import_commit_{compact_date}.json"
+    markdown_path = preview_json_path.parent / f"manual_execution_import_commit_{compact_date}.md"
+    payload = {
+        "schema_version": "execution_commit.v2",
+        "execution_contract_version": "execution_reconciliation_preview.v2",
+        "status": "COMMITTED",
+        "zero_write": True,
+        "account_id": account_id,
+        "execution_date": execution_date,
+        "preview_json_path": str(preview_json_path),
+        "committed_row_count": 0,
+        "committed_trade_ids": [],
+        "current_state_written": False,
+        "account_snapshot_written": False,
+        "position_snapshot_written": False,
+        "backup_paths": {},
+        "committed_rows": [],
+        **v2_evidence,
+    }
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    markdown_path.write_text(
+        f"# Manual Execution Commit [{execution_date}]\n\n- Outcome: all NOT_EXECUTED\n- Domain writes: 0\n",
+        encoding="utf-8",
+    )
     return {"json": json_path, "markdown": markdown_path}
 
 

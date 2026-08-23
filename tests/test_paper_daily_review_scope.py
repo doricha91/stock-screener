@@ -137,6 +137,18 @@ def test_execution_symbols_are_unique_in_first_commit_order(tmp_path: Path) -> N
     assert manifest["execution_symbols"] == ["B", "A", "C"]
 
 
+def test_not_executed_symbol_is_not_resurrected_as_execution_review(tmp_path: Path) -> None:
+    manifest = _build(
+        tmp_path,
+        open_symbols=[],
+        manual_symbols=["NOT_EXECUTED"],
+        committed_symbols=[],
+    )
+
+    assert manifest["execution_symbols"] == []
+    assert "NOT_EXECUTED" not in {row["symbol"] for row in manifest["rows"]}
+
+
 @pytest.mark.parametrize("account_id", ["paper_default", "paper_growth"])
 def test_default_and_non_default_account_keys_are_account_aware(tmp_path: Path, account_id: str) -> None:
     manifest = _build(tmp_path, account_id=account_id, open_symbols=[], manual_symbols=[], committed_symbols=["AAPL"])

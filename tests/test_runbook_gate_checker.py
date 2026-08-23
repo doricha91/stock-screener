@@ -84,6 +84,14 @@ def _save_no_action_state(tmp_path: Path) -> Path:
 
 def _stage_a_pass_state() -> runbook_state.RunbookState:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = replace(
+        state,
+        execution_contract={
+            "version": runbook_state.EXECUTION_CONTRACT_V1,
+            "input_finalized": False,
+            "finalized_at": None,
+        },
+    )
     return runbook_state.complete_stage(state, "A")
 
 
@@ -177,6 +185,27 @@ def test_gate1_passes_when_all_rows_ready(tmp_path: Path) -> None:
     loaded = runbook_state.load_state(Path(result["state_path"]) if "state_path" in result else runbook_state.get_state_path_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE))
     assert loaded.stage_status["GATE1"] == "PASS"
     assert loaded.current_status == "PASS"
+
+
+def test_new_v2_gate1_waits_until_execution_input_is_finalized(tmp_path: Path) -> None:
+    state = runbook_state.complete_stage(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        "A",
+    )
+    _save_state(tmp_path, state)
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: _ready_rows(),
+    )
+
+    assert result["runner_result"] == "WAIT"
+    payload = json.loads(Path(result["gate_result_json"]).read_text(encoding="utf-8"))
+    assert payload["ready_count"] == 0
+    assert all("execution_input_not_finalized" in row["missing"] for row in payload["rows"])
 
 
 def test_gate1_waits_when_actual_price_missing(tmp_path: Path) -> None:

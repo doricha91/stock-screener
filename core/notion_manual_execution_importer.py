@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,8 +58,8 @@ class ManualExecutionCandidate:
     plan_date: str | None
     symbol: str
     side: str
-    quantity: int
-    actual_price: float
+    quantity: int | float | None
+    actual_price: float | None
     commission: float
     currency: str
     broker: str | None
@@ -182,6 +183,16 @@ def build_manual_execution_preview(
     running_cash = available_cash
     running_holdings = dict(holdings)
     for candidate in candidates:
+        if (
+            candidate.quantity is None
+            or not float(candidate.quantity).is_integer()
+            or not math.isfinite(float(candidate.quantity))
+            or candidate.quantity <= 0
+            or candidate.actual_price is None
+            or not math.isfinite(float(candidate.actual_price))
+            or candidate.actual_price <= 0
+        ):
+            continue
         cash_delta = _calculate_cash_delta(candidate)
         position_delta = candidate.quantity if candidate.side == "BUY" else -candidate.quantity
         candidate.projected_cash_delta = cash_delta
@@ -230,6 +241,10 @@ def build_manual_execution_preview(
                 quantity=candidate.quantity,
             )
             for candidate in candidates
+            if candidate.quantity is not None
+            and math.isfinite(float(candidate.quantity))
+            and float(candidate.quantity).is_integer()
+            and candidate.quantity > 0
         ],
         max_long_positions=max_long_positions,
         hedge_symbols=hedge_symbols,
@@ -344,7 +359,7 @@ def normalize_manual_execution_pages(
         side = _extract_select(properties, resolve_notion_property_name(mapping, "side")).upper().strip()
         quantity_value = _extract_number(properties, resolve_notion_property_name(mapping, "quantity"))
         actual_price = _extract_number(properties, resolve_notion_property_name(mapping, "actual_price"))
-        quantity = int(quantity_value) if quantity_value is not None and float(quantity_value).is_integer() else 0
+        quantity = int(quantity_value) if quantity_value is not None and float(quantity_value).is_integer() else quantity_value
         candidate = ManualExecutionCandidate(
             account_id=resolved_account_id,
             page_id=str(page.get("id") or "").strip(),
@@ -354,7 +369,7 @@ def normalize_manual_execution_pages(
             symbol=symbol,
             side=side,
             quantity=quantity,
-            actual_price=actual_price or 0.0,
+            actual_price=actual_price,
             commission=0.0,
             currency="USD",
             broker=_extract_optional_text(properties, mapping.get("broker")),
@@ -434,11 +449,20 @@ def _validate_candidate_shape(candidate: ManualExecutionCandidate) -> None:
         candidate.validation_issues.append(
             ManualExecutionIssue(FAIL, "invalid_side", f"Side must be BUY or SELL, got {candidate.side or 'blank'}.")
         )
-    if candidate.quantity <= 0:
+    if (
+        candidate.quantity is None
+        or not math.isfinite(float(candidate.quantity))
+        or not float(candidate.quantity).is_integer()
+        or candidate.quantity <= 0
+    ):
         candidate.validation_issues.append(
             ManualExecutionIssue(FAIL, "invalid_quantity", f"Quantity must be a positive whole number, got {candidate.quantity}.")
         )
-    if candidate.actual_price <= 0:
+    if (
+        candidate.actual_price is None
+        or not math.isfinite(float(candidate.actual_price))
+        or candidate.actual_price <= 0
+    ):
         candidate.validation_issues.append(
             ManualExecutionIssue(FAIL, "invalid_actual_price", f"Actual Price must be > 0, got {candidate.actual_price}.")
         )
@@ -508,7 +532,8 @@ def _validate_duplicate_trade_ids(
 
 
 def _build_prospective_trade_id(candidate: ManualExecutionCandidate) -> str:
-    signed_shares = candidate.quantity if candidate.side == "BUY" else -candidate.quantity
+    quantity = candidate.quantity or 0
+    signed_shares = quantity if candidate.side == "BUY" else -quantity
     return build_paper_trade_id(
         {
             "date": candidate.execution_date,
@@ -612,6 +637,8 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 
 def _calculate_cash_delta(candidate: ManualExecutionCandidate) -> float:
+    if candidate.quantity is None or candidate.actual_price is None:
+        raise ManualExecutionImportError("Cash delta requires non-blank quantity and actual price.")
     gross = candidate.quantity * candidate.actual_price
     if candidate.side == "BUY":
         return -(gross + candidate.commission)

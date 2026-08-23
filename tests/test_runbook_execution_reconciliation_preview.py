@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from core.notion_account_keys import build_daily_plan_external_key
+from scripts import runbook_state
 from scripts import runbook_execution_reconciliation_preview as preview_script
 from core.execution_reconciliation import build_manual_execution_key
 
@@ -81,9 +83,46 @@ def test_preview_writes_json_md_and_latest_artifacts(tmp_path: Path) -> None:
     assert result["runbook_day_id"] in result["preview_json"]
 
     payload = json.loads(Path(result["latest_preview_json"]).read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "execution_reconciliation_preview.v2"
+    assert payload["resolved_count"] == 2
+    assert payload["count_invariant_satisfied"] is True
+    assert "Execution Outcome Preview" in Path(result["latest_preview_md"]).read_text(encoding="utf-8")
+
+
+def test_preview_preserves_persisted_explicit_v1_dispatch(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    account_root = tmp_path / "account"
+    daily_plan_path = tmp_path / "daily_action_plan_20260701.json"
+    executions_path = tmp_path / "manual_executions.json"
+    _write_daily_plan(daily_plan_path)
+    _write_manual_executions(executions_path)
+    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = replace(
+        state,
+        execution_contract={
+            "version": runbook_state.EXECUTION_CONTRACT_V1,
+            "input_finalized": False,
+            "finalized_at": None,
+        },
+    )
+    runbook_state.save_state(
+        state,
+        runbook_state.get_state_path_for_context(workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+    )
+
+    result = preview_script.run_execution_reconciliation_preview(
+        workspace,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        daily_plan_path=daily_plan_path,
+        manual_executions_path=executions_path,
+        account_root=account_root,
+    )
+
+    payload = json.loads(Path(result["latest_preview_json"]).read_text(encoding="utf-8"))
     assert payload["schema_version"] == "execution_reconciliation_preview.v1"
     assert payload["matched_count"] == 2
-    assert "Execution Reconciliation Preview" in Path(result["latest_preview_md"]).read_text(encoding="utf-8")
 
 
 def test_preview_paths_are_separated_by_runbook_day_id(tmp_path: Path) -> None:

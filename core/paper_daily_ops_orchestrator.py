@@ -200,7 +200,16 @@ def build_daily_ops_status(
         _stage_manual_review_status_sync(stage_context),
         _stage_final_status(stage_context),
     ]
-    workflow_status = _safe_workflow_status(root, normalized_trade_date)
+    zero_review_standard_completion = bool(
+        standard_completion
+        and isinstance(standard_completion.get("zero_review_evidence"), dict)
+        and standard_completion["zero_review_evidence"].get("verified_zero_review") is True
+    )
+    workflow_status = (
+        WORKFLOW_REVIEW_DONE
+        if zero_review_standard_completion
+        else _safe_workflow_status(root, normalized_trade_date)
+    )
     _apply_notion_report(stages, notion_report)
     reconciliation_summary = apply_reconciliation(stages, workflow_status=workflow_status)
     _suppress_manual_execution_no_candidate_skips_when_notion_rows_exist(stages)
@@ -210,6 +219,8 @@ def build_daily_ops_status(
         _apply_verified_no_action_completion(stages)
     elif standard_completion:
         _apply_verified_standard_completion(stages)
+        if zero_review_standard_completion:
+            _apply_verified_standard_zero_review_completion(stages)
     terminal = _is_terminal_workflow(workflow_status, stages, completion_mode=completion_mode)
     if terminal:
         for stage in stages:
@@ -386,6 +397,46 @@ def _validate_standard_completion_context(
             value = evidence.get(field)
             if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
                 raise ValueError(f"standard_completion_evidence_invalid:{stage_name}:{field}")
+    zero_review = context.get("zero_review_evidence")
+    if zero_review is not None:
+        if not isinstance(zero_review, dict):
+            raise ValueError("standard_completion_zero_review_evidence_invalid")
+        if zero_review.get("required_review_count") != 0 or zero_review.get(
+            "verified_zero_review"
+        ) is not True:
+            raise ValueError("standard_completion_zero_review_evidence_invalid")
+        for field in (
+            "manual_review_scope_ref",
+            "stage_b_verification_ref",
+            "stage_c_summary_ref",
+            "gate2_ref",
+            "stage_d_summary_ref",
+        ):
+            if not isinstance(zero_review.get(field), str) or not zero_review[field].strip():
+                raise ValueError(f"standard_completion_zero_review_evidence_invalid:{field}")
+        for field in (
+            "manual_review_scope_sha256",
+            "stage_b_verification_sha256",
+            "stage_c_summary_sha256",
+            "gate2_sha256",
+            "stage_d_summary_sha256",
+        ):
+            value = zero_review.get(field)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"standard_completion_zero_review_evidence_invalid:{field}")
+        artifacts = zero_review.get("artifacts")
+        if not isinstance(artifacts, dict) or set(artifacts) != {
+            "review_preview",
+            "review_append",
+            "review_status_sync",
+        }:
+            raise ValueError("standard_completion_zero_review_evidence_invalid:artifacts")
+        for name, artifact in artifacts.items():
+            if not isinstance(artifact, dict) or not isinstance(artifact.get("ref"), str):
+                raise ValueError(f"standard_completion_zero_review_evidence_invalid:{name}")
+            digest = artifact.get("sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError(f"standard_completion_zero_review_evidence_invalid:{name}")
     return dict(context)
 
 
@@ -409,6 +460,26 @@ def _apply_verified_standard_completion(stages: list[dict[str, Any]]) -> None:
         stage["next_command"] = None
         stage["next_action"] = None
         stage["note"] = "Verified official runbook command evidence supersedes the legacy diagnostic sidecar."
+
+
+def _apply_verified_standard_zero_review_completion(stages: list[dict[str, Any]]) -> None:
+    completed = {
+        "DAILY_REVIEW",
+        "MANUAL_REVIEW_TEMPLATE",
+        "MANUAL_REVIEW_PREVIEW",
+        "MANUAL_REVIEW_APPEND",
+        "MANUAL_REVIEW_STATUS_SYNC",
+        "FINAL_STATUS",
+    }
+    for stage in stages:
+        if stage.get("stage_name") not in completed:
+            continue
+        stage["status"] = DONE
+        stage["blockers"] = []
+        stage["warnings"] = []
+        stage["next_command"] = None
+        stage["next_action"] = None
+        stage["note"] = "Verified zero-required-review STANDARD runbook evidence is complete."
 
 
 def _validate_required_account_id(account_id: str) -> str:

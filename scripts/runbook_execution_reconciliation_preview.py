@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.execution_reconciliation import reconcile_plan_and_executions
+from core.execution_outcome_flow import derive_execution_preview
 from core.paper_account_paths import build_paper_account_paths
 from scripts import runbook_state
 from scripts.runbook_gate_checker import query_manual_execution_rows
@@ -49,12 +49,15 @@ def run_execution_reconciliation_preview(
     )
     daily_plan = _read_json_file(resolved_plan_path)
     execution_rows = _load_execution_rows(state, manual_executions_path, row_fetcher)
-    preview = reconcile_plan_and_executions(
+    execution_contract = runbook_state.get_execution_contract(state)
+    preview = derive_execution_preview(
         daily_plan,
         execution_rows,
         account_id=account_id,
         data_date=data_date,
         trade_date=trade_date,
+        contract_version=str(execution_contract.get("version") or ""),
+        input_finalized=execution_contract.get("input_finalized"),
         daily_plan_path=str(resolved_plan_path),
     )
     workspace_paths = write_workspace_preview(workspace, state, preview)
@@ -62,23 +65,23 @@ def run_execution_reconciliation_preview(
     return {
         "runner_result": preview["runner_result"],
         "runbook_day_id": state.runbook_day_id,
-        "planned_count": preview["planned_count"],
-        "actual_count": preview["actual_count"],
-        "notion_row_count": preview["notion_row_count"],
-        "matched_count": preview["matched_count"],
-        "deviated_count": preview["deviated_count"],
-        "missing_count": preview["missing_count"],
-        "extra_count": preview["extra_count"],
-        "warning_count": preview["warning_count"],
-        "needs_review_count": preview["needs_review_count"],
-        "blocked_count": preview["blocked_count"],
+        "planned_count": preview.get("planned_count", 0),
+        "actual_count": preview.get("actual_count", preview.get("execution_input_count", 0)),
+        "notion_row_count": preview.get("notion_row_count", preview.get("execution_input_count", 0)),
+        "matched_count": preview.get("matched_count", preview.get("resolved_count", 0)),
+        "deviated_count": preview.get("deviated_count", 0),
+        "missing_count": preview.get("missing_count", 0),
+        "extra_count": preview.get("extra_count", 0),
+        "warning_count": preview.get("warning_count", 0),
+        "needs_review_count": preview.get("needs_review_count", preview.get("waiting_count", 0)),
+        "blocked_count": preview.get("blocked_count", preview.get("invalid_count", 0)),
         "preview_json": str(workspace_paths["json"]),
         "preview_md": str(workspace_paths["md"]),
         "latest_preview_json": str(workspace_paths["latest_json"]),
         "latest_preview_md": str(workspace_paths["latest_md"]),
         "account_preview_json": str(account_paths["json"]),
         "account_preview_md": str(account_paths["md"]),
-        "next_required_action": preview["next_required_action"],
+        "next_required_action": preview.get("next_required_action", "Proceed to commit." if preview["runner_result"] == "PASS" else "Resolve execution outcome input."),
     }
 
 
@@ -130,6 +133,8 @@ def get_workspace_preview_paths(
 
 
 def format_preview_markdown(preview: dict[str, Any]) -> str:
+    if preview.get("schema_version") == "execution_reconciliation_preview.v2":
+        return _format_outcome_preview_markdown(preview)
     lines = [
         f"# Execution Reconciliation Preview - {preview['runner_result']}",
         "",
@@ -162,6 +167,38 @@ def format_preview_markdown(preview: dict[str, Any]) -> str:
                 p_price=_md_value(row.get("planned_price")),
                 a_price=_md_value(row.get("actual_price")),
                 message=_escape_md_cell(row.get("message")),
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _format_outcome_preview_markdown(preview: dict[str, Any]) -> str:
+    lines = [
+        f"# Execution Outcome Preview - {preview['runner_result']}",
+        "",
+        f"- Contract: {preview.get('schema_version')}",
+        f"- Finalized: {preview.get('input_finalized')}",
+        f"- Planned: {preview.get('planned_count', 0)}",
+        f"- Executed: {preview.get('executed_count', 0)}",
+        f"- Partial: {preview.get('partial_count', 0)}",
+        f"- Not executed: {preview.get('not_executed_count', 0)}",
+        f"- Waiting: {preview.get('waiting_count', 0)}",
+        f"- Invalid: {preview.get('invalid_count', 0)}",
+        "",
+        "| Outcome | Status | Symbol | Side | Planned Qty | Actual Qty | Actual Price | Reason |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in preview.get("rows", []):
+        lines.append(
+            "| {outcome} | {status} | {symbol} | {side} | {planned} | {actual} | {price} | {reason} |".format(
+                outcome=row.get("outcome") or "",
+                status=row.get("status") or "",
+                symbol=row.get("symbol") or "",
+                side=row.get("side") or "",
+                planned=_md_value(row.get("planned_quantity")),
+                actual=_md_value(row.get("actual_quantity")),
+                price=_md_value(row.get("actual_price")),
+                reason=row.get("reason_code") or "",
             )
         )
     return "\n".join(lines) + "\n"
