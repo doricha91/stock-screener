@@ -40,6 +40,7 @@ from core.paper_prepare_data import (  # noqa: E402
     format_paper_prepare_data_summary,
     run_paper_prepare_data,
 )
+from core.stage_a_asof_contract import StageAAsOfContractError  # noqa: E402
 from core.paths import PAPER_TEST_DIR  # noqa: E402
 from scripts.generate_paper_daily_review_summary import generate_paper_daily_review_summary  # noqa: E402
 from scripts.generate_paper_drawdown import generate_paper_drawdown_for_account  # noqa: E402
@@ -209,12 +210,18 @@ def handle_preflight(args: argparse.Namespace) -> int:
 
 
 def handle_prepare_data(args: argparse.Namespace) -> int:
-    summary = run_paper_prepare_data(
-        args.date,
-        skip_prices=args.skip_prices,
-        skip_indicators=args.skip_indicators,
-        include_universe=args.universe,
-    )
+    try:
+        summary = run_paper_prepare_data(
+            args.date,
+            skip_prices=args.skip_prices,
+            skip_indicators=args.skip_indicators,
+            include_universe=args.universe,
+            trade_date=getattr(args, "trade_date", None),
+            account_id=getattr(args, "account_id", None) or "paper_default",
+        )
+    except StageAAsOfContractError as exc:
+        print(json.dumps(exc.as_payload(), ensure_ascii=False))
+        return 2
     print(format_paper_prepare_data_summary(summary))
     return 0
 
@@ -636,6 +643,7 @@ def handle_plan(args: argparse.Namespace) -> int:
                 account_paths=account_paths,
                 data_date=data_date,
                 trade_date=preflight_date,
+                enforce_asof_contract=bool(getattr(args, "enforce_asof_contract", False)),
             )
         else:
             report_path = _call_with_optional_account_paths(
@@ -643,6 +651,9 @@ def handle_plan(args: argparse.Namespace) -> int:
                 args.date,
                 account_paths=account_paths,
             )
+    except StageAAsOfContractError as exc:
+        print(json.dumps(exc.as_payload(), ensure_ascii=False))
+        return 2
     except ValueError as exc:
         print(f"Paper plan aborted: {exc}")
         return 1
@@ -895,6 +906,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh minimal paper market-data inputs explicitly. This command may update market_data.db.",
     )
     prepare_data_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+    prepare_data_parser.add_argument("--trade-date", help="Official Stage A trade date (YYYYMMDD or YYYY-MM-DD)")
+    prepare_data_parser.add_argument("--account-id", help="Official Stage A paper account id")
     prepare_data_parser.add_argument("--universe", action="store_true", help="Refresh universe snapshot for the requested date")
     prepare_data_parser.add_argument("--skip-prices", action="store_true", help="Skip market index / tickers / daily price refresh")
     prepare_data_parser.add_argument("--skip-indicators", action="store_true", help="Skip daily_indicators refresh")
@@ -1001,6 +1014,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
     plan_parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
     plan_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    plan_parser.add_argument("--enforce-asof-contract", action="store_true", help=argparse.SUPPRESS)
     plan_parser.set_defaults(handler=handle_plan)
 
     eod_parser = subparsers.add_parser(

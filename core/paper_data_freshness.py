@@ -218,6 +218,9 @@ def run_paper_data_freshness_check(
 
         daily_price_row_count = int(_query_scalar(conn, "SELECT COUNT(*) FROM daily_price") or 0)
         daily_price_latest = _query_scalar(conn, "SELECT MAX(date) FROM daily_price")
+        daily_price_target_count = int(
+            _query_scalar(conn, "SELECT COUNT(*) FROM daily_price WHERE date = ?", (target_date,)) or 0
+        )
         daily_price_symbol_count = int(_query_scalar(conn, "SELECT COUNT(DISTINCT symbol) FROM daily_price") or 0)
         if daily_price_row_count == 0 or not daily_price_latest:
             checks.append(
@@ -229,6 +232,19 @@ def run_paper_data_freshness_check(
                     table="daily_price",
                     row_count=daily_price_row_count,
                     suggestion="Refresh daily price data before planning",
+                )
+            )
+        elif daily_price_target_count == 0:
+            checks.append(
+                _issue(
+                    "error",
+                    "daily_price_target_coverage",
+                    "missing",
+                    "daily_price has no rows for target_date",
+                    table="daily_price",
+                    latest_date=daily_price_latest,
+                    row_count=daily_price_target_count,
+                    suggestion="Refresh or restore exact target_date price coverage",
                 )
             )
         elif datetime.strptime(daily_price_latest, "%Y-%m-%d").date() < target_ts:
@@ -272,6 +288,14 @@ def run_paper_data_freshness_check(
                 _query_scalar(conn, "SELECT COUNT(*) FROM market_index WHERE symbol = ?", (symbol,)) or 0
             )
             latest_date = _query_scalar(conn, "SELECT MAX(date) FROM market_index WHERE symbol = ?", (symbol,))
+            target_count = int(
+                _query_scalar(
+                    conn,
+                    "SELECT COUNT(*) FROM market_index WHERE symbol = ? AND date = ?",
+                    (symbol, target_date),
+                )
+                or 0
+            )
             if row_count == 0 or not latest_date:
                 severity = "error" if symbol == "SPY" else "warning"
                 checks.append(
@@ -288,18 +312,18 @@ def run_paper_data_freshness_check(
                 )
                 continue
 
-            if symbol == "SPY" and datetime.strptime(latest_date, "%Y-%m-%d").date() < target_ts:
+            if target_count == 0:
                 checks.append(
                     _issue(
-                        "error" if strict else "warning",
-                        "market_index_spy_freshness",
-                        "stale",
-                        "SPY latest date is older than target_date",
+                        "error" if symbol == "SPY" or strict else "warning",
+                        "market_index_target_coverage",
+                        "missing",
+                        f"market_index has no {symbol} row for target_date",
                         table="market_index",
                         symbol=symbol,
                         latest_date=latest_date,
-                        row_count=row_count,
-                        suggestion="Refresh market index data or verify market holiday timing",
+                        row_count=target_count,
+                        suggestion="Refresh or restore exact target_date index coverage",
                     )
                 )
             else:
@@ -318,6 +342,9 @@ def run_paper_data_freshness_check(
 
         indicators_row_count = int(_query_scalar(conn, "SELECT COUNT(*) FROM daily_indicators") or 0)
         indicators_latest = _query_scalar(conn, "SELECT MAX(date) FROM daily_indicators")
+        indicators_target_count = int(
+            _query_scalar(conn, "SELECT COUNT(*) FROM daily_indicators WHERE date = ?", (target_date,)) or 0
+        )
         indicators_symbol_count = int(_query_scalar(conn, "SELECT COUNT(DISTINCT symbol) FROM daily_indicators") or 0)
         if indicators_row_count == 0 or not indicators_latest:
             checks.append(
@@ -331,17 +358,17 @@ def run_paper_data_freshness_check(
                     suggestion="Run indicator refresh before planning",
                 )
             )
-        elif daily_price_latest and indicators_latest < daily_price_latest:
+        elif indicators_target_count == 0:
             checks.append(
                 _issue(
-                    "error" if strict else "warning",
-                    "daily_indicators_freshness",
-                    "stale",
-                    "daily_indicators latest date is older than daily_price latest date",
+                    "error",
+                    "daily_indicators_target_coverage",
+                    "missing",
+                    "daily_indicators has no rows for target_date",
                     table="daily_indicators",
                     latest_date=indicators_latest,
-                    row_count=indicators_row_count,
-                    suggestion="Refresh daily_indicators before planning",
+                    row_count=indicators_target_count,
+                    suggestion="Refresh or restore exact target_date indicator coverage",
                 )
             )
         else:
@@ -350,7 +377,7 @@ def run_paper_data_freshness_check(
                     "info",
                     "daily_indicators_freshness",
                     "ok",
-                    "daily_indicators is aligned with daily_price freshness",
+                    "daily_indicators has exact target_date coverage",
                     table="daily_indicators",
                     latest_date=indicators_latest or "",
                     row_count=indicators_row_count,

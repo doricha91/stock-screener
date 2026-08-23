@@ -10,6 +10,8 @@ import core.daily_plan_generator as daily_plan_generator
 import scripts.run_paper_daily_plan as run_paper_daily_plan
 from core.paper_account_paths import build_paper_account_paths
 from core.paper_account_state import build_paper_state_from_trades
+from core.paper_config_snapshot import save_paper_config_snapshot
+from core.stage_a_asof_contract import StageAAsOfContext, StageAAsOfContractError
 from core.paths import (
     front_daily_action_plan_path,
     paper_config_snapshot_archive_dir,
@@ -521,6 +523,10 @@ def test_run_paper_daily_plan_explicit_dates_use_trade_date_artifacts_and_data_d
         '{"current_symbols":[],"absolute_cash":100000.0}\n',
         encoding="utf-8",
     )
+    account_paths.current_state_snapshot_path("20260608").write_text(
+        '{"current_symbols":["FUTURE"],"absolute_cash":1.0}\n',
+        encoding="utf-8",
+    )
 
     provider_calls: dict = {}
     captured: dict = {}
@@ -549,6 +555,100 @@ def test_run_paper_daily_plan_explicit_dates_use_trade_date_artifacts_and_data_d
     assert captured["output_path"] == account_paths.daily_action_plan_path("20260608")
     assert captured["config_snapshot_path"] == account_paths.config_snapshot_path("20260608")
     assert captured["state_snapshot_path"] == account_paths.current_state_snapshot_path("20260605")
+
+
+def test_historical_official_plan_blocks_when_config_snapshot_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    account_paths.execution_log_path.write_text(
+        "trade_id,date,symbol,side,shares,price,gross_amount\n",
+        encoding="utf-8",
+    )
+    _write_account_snapshot(account_paths, initial_cash="100000", cash="100000")
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "load_official_paper_state_for_daily_plan",
+        lambda *args, **kwargs: _empty_state(),
+    )
+
+    with pytest.raises(StageAAsOfContractError) as exc_info:
+        run_paper_daily_plan.run_paper_daily_plan(
+            data_date="2026-06-05",
+            trade_date="2026-06-08",
+            account_paths=account_paths,
+            enforce_asof_contract=True,
+            observed_at="2026-06-09T08:00:00+09:00",
+        )
+
+    assert exc_info.value.reason == "historical_config_snapshot_missing"
+
+
+def test_historical_official_plan_reuses_valid_config_and_data_date_account_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    account_paths = build_paper_account_paths(
+        "paper_pilot_test",
+        account_root=tmp_path / "paper_pilot_test",
+        create=True,
+    )
+    account_paths.execution_log_path.write_text(
+        "trade_id,date,symbol,side,shares,price,gross_amount\n",
+        encoding="utf-8",
+    )
+    _write_account_snapshot(account_paths, initial_cash="100000", cash="100000")
+    data_state = account_paths.current_state_snapshot_path("20260605")
+    data_state.write_text('{"current_symbols":[],"absolute_cash":100000.0}\n', encoding="utf-8")
+    account_paths.current_state_snapshot_path("20260608").write_text(
+        '{"current_symbols":["FUTURE"],"absolute_cash":1.0}\n',
+        encoding="utf-8",
+    )
+    capture_context = StageAAsOfContext.build(
+        account_id=account_paths.account_id,
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        observed_at="2026-06-08T08:00:00+09:00",
+    )
+    save_paper_config_snapshot(
+        plan_date="2026-06-08",
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        market_state={"date": "2026-06-05", "regime": "BULL"},
+        final_config={"max_positions": 10},
+        output_path=account_paths.config_snapshot_path("20260608"),
+        archive_dir=account_paths.config_snapshot_archive_dir,
+        asof_context=capture_context,
+        immutable=True,
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "load_official_paper_state_for_daily_plan",
+        lambda *args, **kwargs: _empty_state(),
+    )
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "generate_daily_plan",
+        lambda **kwargs: captured.update(kwargs) or str(kwargs["output_path"]),
+    )
+
+    run_paper_daily_plan.run_paper_daily_plan(
+        data_date="2026-06-05",
+        trade_date="2026-06-08",
+        account_paths=account_paths,
+        enforce_asof_contract=True,
+        observed_at="2026-06-09T08:00:00+09:00",
+    )
+
+    assert captured["pinned_config_snapshot"]["full_config"] == {"max_positions": 10}
+    assert captured["state_snapshot_path"] == data_state
+    assert captured["account_lineage"]["selected_max_date"] == "2026-06-05"
 
 
 def test_run_paper_daily_plan_non_default_rejects_plan_before_account_inception(

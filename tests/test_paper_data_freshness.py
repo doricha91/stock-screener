@@ -109,7 +109,7 @@ def test_spy_missing_fails(tmp_path):
     assert any(item["symbol"] == "SPY" and item["severity"] == "error" for item in summary["checks"])
 
 
-def test_daily_indicators_stale_warns(tmp_path):
+def test_daily_indicators_missing_target_fails(tmp_path):
     db_path = tmp_path / "market.db"
     _create_base_db(
         db_path,
@@ -119,9 +119,9 @@ def test_daily_indicators_stale_warns(tmp_path):
         ticker_rows=[(f"T{i}", "NASDAQ100") for i in range(60)],
     )
     summary = run_paper_data_freshness_check(date_str="20260513", db_path=db_path, universe_root=tmp_path / "universe")
-    assert summary["result"] == "PASS_WITH_WARNINGS"
+    assert summary["result"] == "FAIL"
     assert any(
-        item["check_name"] == "daily_indicators_freshness" and item["severity"] == "warning"
+        item["check_name"] == "daily_indicators_target_coverage" and item["severity"] == "error"
         for item in summary["checks"]
     )
 
@@ -142,7 +142,32 @@ def test_strict_escalates_stale_warning_to_error(tmp_path):
         universe_root=tmp_path / "universe",
     )
     assert summary["result"] == "FAIL"
-    assert any(item["severity"] == "error" and item["check_name"] in {"market_index_spy_freshness", "daily_indicators_freshness"} for item in summary["checks"])
+    assert any(item["severity"] == "error" and item["check_name"] in {"market_index_target_coverage", "daily_indicators_target_coverage"} for item in summary["checks"])
+
+
+def test_future_global_max_with_exact_target_coverage_can_pass(tmp_path):
+    db_path = tmp_path / "market.db"
+    _create_base_db(
+        db_path,
+        daily_price_rows=[("AAPL", "2026-05-13"), ("AAPL", "2026-05-14")],
+        market_index_rows=[
+            ("SPY", "2026-05-13"), ("SPY", "2026-05-14"),
+            ("QQQ", "2026-05-13"), ("QQQ", "2026-05-14"),
+            ("^VIX", "2026-05-13"), ("^VIX", "2026-05-14"),
+        ],
+        daily_indicator_rows=[("AAPL", "2026-05-13"), ("AAPL", "2026-05-14")],
+        ticker_rows=[(f"T{i}", "NASDAQ100") for i in range(60)],
+    )
+
+    summary = run_paper_data_freshness_check(
+        date_str="20260513",
+        strict=True,
+        db_path=db_path,
+        universe_root=tmp_path / "universe",
+    )
+
+    assert summary["result"] in {"PASS", "PASS_WITH_WARNINGS"}
+    assert not any(item["severity"] == "error" for item in summary["checks"])
 
 
 def test_tickers_zero_fails(tmp_path):

@@ -30,6 +30,13 @@ from core.decision_core import compute_candidate_score
 from core.paper_config_snapshot import save_paper_config_snapshot
 from core.paper_config_hash import PAPER_CONFIG_HASH_POLICY, compute_paper_config_hash_from_file
 from core.paper_execution_intent import build_execution_intent
+from core.stage_a_asof_contract import (
+    StageAAsOfContext,
+    StageAAsOfContractError,
+    validate_config_snapshot,
+    validate_stage_a_lineage,
+    validate_universe_snapshot,
+)
 from core.position_sizing import calculate_entry_shares
 from core.long_position_policy import (
     DEFAULT_MAX_LONG_POSITIONS,
@@ -111,6 +118,28 @@ def load_price_history_until(symbol: str, end_date: str, lookback_days: int = 10
     if df is None or df.empty:
         return pd.DataFrame()
     return df.sort_index()[df.index <= end_ts]
+
+
+def resolve_official_universe_membership(
+    universe_snapshot: Dict[str, Any],
+    universe_metadata: Dict[str, Any],
+    context: StageAAsOfContext,
+) -> tuple[list[str], Dict[str, Any]]:
+    snapshot_path_raw = universe_metadata.get("snapshot_path")
+    snapshot_path = Path(str(snapshot_path_raw)) if snapshot_path_raw else None
+    lineage = validate_universe_snapshot(
+        universe_snapshot,
+        context=context,
+        artifact_path=snapshot_path,
+    )
+    symbols = sorted(
+        {
+            str(symbol).strip().upper()
+            for symbol in universe_snapshot.get("active_symbols", [])
+            if str(symbol).strip()
+        }
+    )
+    return symbols, lineage
 
 
 def calculate_candidate_rs_val(
@@ -664,6 +693,7 @@ def build_daily_plan_json_payload(
     fingerprints: Dict[str, Any] | None = None,
     config_snapshot_path: str | Path | None = None,
     state_snapshot_path: str | Path | None = None,
+    as_of_lineage: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     resolved_fingerprints = build_daily_plan_fingerprints(
         fingerprints=fingerprints,
@@ -671,7 +701,7 @@ def build_daily_plan_json_payload(
         state_snapshot_path=state_snapshot_path,
     )
     normalized_items = [normalize_daily_plan_item(item) for item in action_items]
-    return {
+    payload = {
         "schema_version": DAILY_PLAN_JSON_SCHEMA_VERSION,
         "account_id": account_id,
         "data_date": data_date or plan_date,
@@ -684,6 +714,9 @@ def build_daily_plan_json_payload(
         "execution_intent": build_execution_intent(normalized_items),
         "fingerprints": resolved_fingerprints,
     }
+    if as_of_lineage is not None:
+        payload["as_of_lineage"] = as_of_lineage
+    return payload
 
 
 def build_daily_plan_fingerprints(
@@ -1114,6 +1147,9 @@ def generate_daily_plan(
     write_json_sidecar: bool = True,
     sidecar_fingerprints: Dict[str, Any] | None = None,
     state_snapshot_path: str | Path | None = None,
+    asof_context: StageAAsOfContext | None = None,
+    pinned_config_snapshot: Dict[str, Any] | None = None,
+    account_lineage: Dict[str, Any] | None = None,
 ) -> str:
     """
     일일 판단 산출물(Action Plan)을 생성하고 파일로 저장합니다.
@@ -1146,8 +1182,17 @@ def generate_daily_plan(
     signal_date = data_date if explicit_data_date else plan_date
     regime = m_state["regime"]
     print(f"[INFO] plan_date={plan_date}, data_date={data_date}, trade_date={trade_date}")
-    base_config = make_config({}, data_date, data_date)
-    merged_config = get_regime_config(regime, base_config)
+    if asof_context is not None and data_date > asof_context.data_date:
+        raise StageAAsOfContractError(
+            "asof_future_source",
+            f"market selected date {data_date} is after DATA_DATE {asof_context.data_date}",
+            source="market",
+        )
+    if pinned_config_snapshot is not None:
+        merged_config = dict(pinned_config_snapshot["full_config"])
+    else:
+        base_config = make_config({}, data_date, data_date)
+        merged_config = get_regime_config(regime, base_config)
     rs_lookback = int(merged_config.get('rs_lookback', 120))
     benchmark_symbol = merged_config.get('MARKET_BENCHMARK_SYMBOL', 'SPY')
     asof_date = pd.to_datetime(data_date)
@@ -1160,6 +1205,14 @@ def generate_daily_plan(
     universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
     universe_snapshot = universe_selection.get("snapshot", {})
     universe_metadata = universe_selection.get("metadata", {})
+    universe_lineage: Dict[str, Any] | None = None
+    official_universe_symbols: list[str] | None = None
+    if asof_context is not None:
+        official_universe_symbols, universe_lineage = resolve_official_universe_membership(
+            universe_snapshot,
+            universe_metadata,
+            asof_context,
+        )
     removed_universe_symbols = {
         str(symbol).strip().upper()
         for symbol in universe_snapshot.get("removed", [])
@@ -1169,7 +1222,28 @@ def generate_daily_plan(
     stale_holdings_alert: List[str] = []
     
     # 3. 신규 매수 후보 스크리닝 (Raw Signals)
-    df_candidates = build_screener_results(market_state=m_state, end_date=signal_date)
+    screener_kwargs: Dict[str, Any] = {
+        "market_state": m_state,
+        "end_date": signal_date,
+    }
+    if official_universe_symbols is not None:
+        screener_kwargs["tickers"] = official_universe_symbols
+    df_candidates = build_screener_results(**screener_kwargs)
+    if asof_context is not None and not df_candidates.empty:
+        candidate_date_col = "Date" if "Date" in df_candidates.columns else "date" if "date" in df_candidates.columns else None
+        if candidate_date_col is None:
+            raise StageAAsOfContractError(
+                "asof_provenance_missing",
+                "official screener result is missing selected source date",
+                source="indicator",
+            )
+        future_dates = pd.to_datetime(df_candidates[candidate_date_col], errors="coerce") > pd.to_datetime(asof_context.data_date)
+        if bool(future_dates.fillna(False).any()):
+            raise StageAAsOfContractError(
+                "asof_future_source",
+                "official screener selected a future source row",
+                source="indicator",
+            )
     if not df_candidates.empty and removed_universe_symbols:
         symbol_col = "Symbol" if "Symbol" in df_candidates.columns else "symbol" if "symbol" in df_candidates.columns else None
         if symbol_col:
@@ -1648,6 +1722,73 @@ def generate_daily_plan(
         f"unavailable={atr_source_counts['unavailable']}"
     )
 
+    as_of_lineage: Dict[str, Any] | None = None
+    if config_snapshot_path is not None and config_snapshot_archive_dir is not None:
+        if pinned_config_snapshot is None:
+            save_paper_config_snapshot(
+                plan_date=plan_date,
+                data_date=data_date,
+                trade_date=trade_date,
+                market_state=m_state,
+                final_config=merged_config,
+                output_path=Path(config_snapshot_path),
+                archive_dir=Path(config_snapshot_archive_dir),
+                source=config_snapshot_source,
+                market_state_write_log=market_state_write_log,
+                universe_metadata=universe_metadata,
+                asof_context=asof_context,
+                immutable=asof_context is not None,
+            )
+
+    if asof_context is not None:
+        if config_snapshot_path is None or not Path(config_snapshot_path).is_file():
+            raise StageAAsOfContractError(
+                "asof_provenance_missing",
+                "official Stage A config snapshot is missing",
+                source="config",
+            )
+        config_payload = json.loads(Path(config_snapshot_path).read_text(encoding="utf-8"))
+        config_lineage = validate_config_snapshot(
+            config_payload,
+            context=asof_context,
+            artifact_path=config_snapshot_path,
+        )
+        if benchmark_close.empty:
+            raise StageAAsOfContractError(
+                "asof_provenance_missing",
+                "official Stage A benchmark series is empty",
+                source="rs",
+            )
+        benchmark_max_date = pd.Timestamp(benchmark_close.index.max()).strftime("%Y-%m-%d")
+        observed_at = asof_context.observed_at
+        as_of_lineage = {
+            "market": {
+                "source": "market_index",
+                "selected_max_date": data_date,
+                "observed_at": observed_at,
+                "revision": f"market_state:{data_date}:{regime}",
+                "validator_result": "PASS",
+            },
+            "indicator": {
+                "source": "daily_indicators_and_cutoff_price_frame",
+                "selected_max_date": data_date,
+                "observed_at": observed_at,
+                "revision": f"indicator_cutoff:{data_date}",
+                "validator_result": "PASS",
+            },
+            "rs": {
+                "source": f"market_index:{benchmark_symbol}",
+                "selected_max_date": benchmark_max_date,
+                "observed_at": observed_at,
+                "revision": f"rs:{benchmark_symbol}:{benchmark_max_date}:{rs_lookback}",
+                "validator_result": "PASS",
+            },
+            "universe": universe_lineage,
+            "account": account_lineage,
+            "config": config_lineage,
+        }
+        as_of_lineage = validate_stage_a_lineage(as_of_lineage, context=asof_context)
+
     report_content = format_markdown_report(
         plan_date,
         m_state,
@@ -1670,20 +1811,6 @@ def generate_daily_plan(
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_content)
 
-    if config_snapshot_path is not None and config_snapshot_archive_dir is not None:
-        save_paper_config_snapshot(
-            plan_date=plan_date,
-            data_date=data_date,
-            trade_date=trade_date,
-            market_state=m_state,
-            final_config=merged_config,
-            output_path=Path(config_snapshot_path),
-            archive_dir=Path(config_snapshot_archive_dir),
-            source=config_snapshot_source,
-            market_state_write_log=market_state_write_log,
-            universe_metadata=universe_metadata,
-        )
-
     if write_json_sidecar:
         sidecar_path = resolve_daily_plan_json_sidecar_path(report_path, json_sidecar_path)
         sidecar_payload = build_daily_plan_json_payload(
@@ -1697,6 +1824,7 @@ def generate_daily_plan(
             fingerprints=sidecar_fingerprints,
             config_snapshot_path=config_snapshot_path,
             state_snapshot_path=state_snapshot_path,
+            as_of_lineage=as_of_lineage,
         )
         write_daily_plan_json_sidecar(path=sidecar_path, payload=sidecar_payload)
         

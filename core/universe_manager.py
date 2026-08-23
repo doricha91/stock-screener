@@ -178,6 +178,12 @@ def load_universe_snapshot_as_of_quarter(
             "snapshot_path": str(chosen_path),
             "snapshot_date": chosen_ts.strftime("%Y-%m-%d"),
             "snapshot_quarter": _snapshot_quarter(chosen_ts),
+            "effective_as_of": payload.get("effective_as_of"),
+            "observed_at": payload.get("observed_at"),
+            "source": payload.get("source"),
+            "source_revision": payload.get("source_revision"),
+            "artifact_hash": payload.get("artifact_hash"),
+            "capture_mode": payload.get("capture_mode"),
         }
     )
     return {"snapshot": payload, "metadata": metadata}

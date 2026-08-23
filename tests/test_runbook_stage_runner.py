@@ -24,6 +24,31 @@ def _daily_plan_payload(
     items: list[dict] | None = None,
 ) -> dict:
     resolved_items = items if items is not None else [{"symbol": "AAPL", "action": "BUY", "quantity": 2}]
+    observed_at = f"{DATA_DATE}T12:00:00+09:00"
+    lineage = {
+        source: {
+            "source": source,
+            "selected_max_date": DATA_DATE,
+            "observed_at": observed_at,
+            "revision": f"test:{source}",
+            "validator_result": "PASS",
+        }
+        for source in ("market", "indicator", "rs", "account")
+    }
+    lineage["universe"] = {
+        "source": "test_universe",
+        "effective_as_of": DATA_DATE,
+        "observed_at": observed_at,
+        "revision": "test:universe",
+        "validator_result": "PASS",
+    }
+    lineage["config"] = {
+        "source": "test_config",
+        "effective_as_of": TRADE_DATE,
+        "observed_at": observed_at,
+        "revision": "test:config",
+        "validator_result": "PASS",
+    }
     return {
         "schema_version": "paper_daily_plan.v1",
         "account_id": account_id,
@@ -36,6 +61,7 @@ def _daily_plan_payload(
         "items": resolved_items,
         "execution_intent": build_execution_intent(resolved_items),
         "fingerprints": {"generator_version": "paper_daily_plan.v1"},
+        "as_of_lineage": lineage,
     }
 
 
@@ -604,6 +630,48 @@ def test_stage_a_context_mismatch_blocks_before_exports(tmp_path: Path, monkeypa
     assert result["runner_result"] == "BLOCKED"
     assert result["reason"] == "daily_plan_context_mismatch"
     assert len(calls) == 4
+
+
+def test_stage_a_missing_asof_lineage_blocks_before_exports(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    payload = _daily_plan_payload()
+    del payload["as_of_lineage"]
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        stdout = _write_daily_plan_for_fake_run(tmp_path, payload) if _is_daily_plan_command(argv) else ""
+        return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "asof_provenance_missing"
+    assert len(calls) == 4
+    assert not any("--daily-plan" in argv for argv in calls)
+
+
+def test_stage_a_future_lineage_blocks_before_exports(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    payload = _daily_plan_payload()
+    payload["as_of_lineage"]["indicator"]["selected_max_date"] = "2026-06-13"
+
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+        calls.append(argv)
+        stdout = _write_daily_plan_for_fake_run(tmp_path, payload) if _is_daily_plan_command(argv) else ""
+        return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
+    result = runbook_stage_runner.run_stage_a(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert result["reason"] == "asof_future_source"
+    assert len(calls) == 4
+    assert not any("--daily-plan" in argv for argv in calls)
 
 
 def test_stage_a_missing_daily_plan_evidence_blocks_before_exports(tmp_path: Path, monkeypatch) -> None:

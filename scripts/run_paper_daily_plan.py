@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import math
 import sys
 from datetime import datetime
@@ -10,8 +11,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.daily_plan_generator import generate_daily_plan
-from core.paper_account_paths import PaperAccountPaths
+from core.paper_account_paths import PaperAccountPaths, latest_current_state_snapshot_path
 from core.paper_state_provider import load_official_paper_state_for_daily_plan
+from core.stage_a_asof_contract import (
+    StageAAsOfContext,
+    StageAAsOfContractError,
+    sha256_file,
+    sha256_payload,
+    validate_config_snapshot,
+)
 from core.paths import (
     paper_config_snapshot_archive_dir,
     paper_config_snapshot_path,
@@ -116,27 +124,14 @@ def _account_inception_date(account_paths: PaperAccountPaths) -> str | None:
     return min(dates) if dates else None
 
 
-def _latest_existing_current_state_path(
-    account_paths: PaperAccountPaths,
-    normalized_db_date: str,
-) -> Path | None:
-    clean_limit = normalized_db_date.replace("-", "")
-    candidates: list[tuple[str, Path]] = []
-    for path in account_paths.root.glob("paper_current_state_*.json"):
-        date_part = path.stem.replace("paper_current_state_", "")
-        if len(date_part) == 8 and date_part.isdigit() and date_part <= clean_limit:
-            candidates.append((date_part, path))
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda item: item[0])[-1][1]
-
-
 def run_paper_daily_plan(
     date_str: str | None = None,
     account_paths: PaperAccountPaths | None = None,
     *,
     data_date: str | None = None,
     trade_date: str | None = None,
+    enforce_asof_contract: bool = False,
+    observed_at: str | None = None,
 ) -> str:
     explicit_mode = data_date is not None or trade_date is not None
     if explicit_mode:
@@ -150,6 +145,19 @@ def run_paper_daily_plan(
         normalized_data_date = None
         normalized_db_date = _normalize_date_for_db(date_str)
         artifact_date = normalized_db_date
+    asof_context = None
+    if enforce_asof_contract:
+        if normalized_data_date is None:
+            raise StageAAsOfContractError(
+                "asof_context_mismatch",
+                "official Stage A AS-OF contract requires explicit data_date and trade_date",
+            )
+        asof_context = StageAAsOfContext.build(
+            account_id=account_paths.account_id if account_paths is not None else "paper_default",
+            data_date=normalized_data_date,
+            trade_date=normalized_db_date,
+            observed_at=observed_at,
+        )
     state_log_path = None
     initial_cash = 100000.0
     currency = "USD"
@@ -195,10 +203,55 @@ def run_paper_daily_plan(
         else paper_config_snapshot_archive_dir()
     )
     if account_paths is not None and account_paths.account_id != "paper_default":
-        state_snapshot_path = _latest_existing_current_state_path(account_paths, normalized_db_date)
+        state_snapshot_path = latest_current_state_snapshot_path(account_paths, state_cutoff_date)
     else:
-        default_state_snapshot_path = paper_current_state_snapshot_path(artifact_date)
+        default_state_snapshot_path = paper_current_state_snapshot_path(state_cutoff_date)
         state_snapshot_path = default_state_snapshot_path if default_state_snapshot_path.exists() else None
+    pinned_config_snapshot = None
+    if asof_context is not None and Path(config_snapshot_output_path).exists():
+        try:
+            pinned_config_snapshot = json.loads(Path(config_snapshot_output_path).read_text(encoding="utf-8"))
+            validate_config_snapshot(
+                pinned_config_snapshot,
+                context=asof_context,
+                artifact_path=config_snapshot_output_path,
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, StageAAsOfContractError) as exc:
+            if asof_context.historical:
+                detail = exc.detail if isinstance(exc, StageAAsOfContractError) else str(exc)
+                raise StageAAsOfContractError(
+                    "historical_config_snapshot_missing",
+                    f"No valid immutable config snapshot exists for {normalized_db_date}: {detail}",
+                    source="config",
+                ) from exc
+            raise
+    elif asof_context is not None and asof_context.historical:
+        raise StageAAsOfContractError(
+            "historical_config_snapshot_missing",
+            f"No immutable config snapshot exists for {normalized_db_date}",
+            source="config",
+        )
+
+    account_source_path = state_snapshot_path or state_log_path
+    account_revision = (
+        sha256_file(account_source_path)
+        if account_source_path is not None and Path(account_source_path).is_file()
+        else sha256_payload(
+            {
+                "cutoff": state_cutoff_date,
+                "symbols": sorted(paper_state.current_symbols),
+                "shares": paper_state.shares,
+                "cash": paper_state.absolute_cash,
+            }
+        )
+    )
+    account_lineage = {
+        "source": str(account_source_path or "derived_paper_state"),
+        "selected_max_date": state_cutoff_date,
+        "observed_at": asof_context.observed_at if asof_context is not None else datetime.now().astimezone().isoformat(timespec="seconds"),
+        "revision": account_revision,
+        "validator_result": "PASS",
+    }
     return generate_daily_plan(
         date_str=normalized_db_date,
         data_date=normalized_data_date,
@@ -212,6 +265,9 @@ def run_paper_daily_plan(
         run_mode="official",
         official_run=True,
         state_snapshot_path=state_snapshot_path,
+        asof_context=asof_context,
+        pinned_config_snapshot=pinned_config_snapshot,
+        account_lineage=account_lineage if asof_context is not None else None,
     )
 
 

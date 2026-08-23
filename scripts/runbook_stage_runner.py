@@ -46,6 +46,11 @@ from core.paper_daily_review_scope import (
     write_scope_manifest,
 )
 from core.paper_execution_intent import validate_daily_plan_execution_intent
+from core.stage_a_asof_contract import (
+    StageAAsOfContext,
+    StageAAsOfContractError,
+    validate_stage_a_lineage,
+)
 
 
 STAGE_A_ID = "A"
@@ -4956,6 +4961,16 @@ def _validate_stage_a_daily_plan(
             else "daily_plan_execution_intent_invalid"
         )
         return None, {"reason": reason, "detail": detail}
+    try:
+        context = StageAAsOfContext.build(
+            account_id=state.frozen_context.account_id,
+            data_date=state.frozen_context.data_date,
+            trade_date=state.frozen_context.trade_date,
+            observed_at=payload.get("generated_at"),
+        )
+        validate_stage_a_lineage(payload.get("as_of_lineage"), context=context)
+    except StageAAsOfContractError as exc:
+        return None, {"reason": exc.reason, "detail": exc.detail}
     return intent, None
 
 
@@ -5007,7 +5022,8 @@ def _run_stage_a_command(
     stdout = str(execution.get("stdout") or "")
     stderr = str(execution.get("stderr") or "")
     exit_code = execution.get("exit_code")
-    runner_result = "PASS" if exit_code == 0 else "FAILED"
+    raw_payload = _parse_stdout_json(stdout)
+    runner_result = "PASS" if exit_code == 0 else "BLOCKED" if raw_payload.get("blocked") is True else "FAILED"
     artifacts: dict[str, str] = {}
     if runner_result == "PASS" and command.command_key == "daily_plan":
         discovered = _extract_daily_plan_artifact_refs(stdout, repo_root)
@@ -5032,7 +5048,7 @@ def _run_stage_a_command(
         runner_result,
         "Command completed successfully." if runner_result == "PASS" else "Command failed.",
         artifact_refs=artifacts,
-        raw_payload=_parse_stdout_json(stdout),
+        raw_payload=raw_payload,
         blockers=[] if runner_result == "PASS" else [stderr.strip() or f"exit_code={exit_code}"],
         process=process,
         workspace=workspace,
