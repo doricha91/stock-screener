@@ -1,203 +1,401 @@
-# StockScreener 현재 로드맵
+# StockScreener 현재 로드맵 및 기능 기준선
 
-상태: 공식 기준(Canonical)
+- 상태: **공식 기준(Canonical)**
+- 최종 갱신일: **2026-08-24**
+- 기준 브랜치: `gemini_cli_update`
+- 검증 기준 HEAD: `4fdb9b0da92626a0fee765106389aff2bd756e70`
+- 로드맵 비교 기준선: `6b00fe47d825eae7c0307ebffa02359ef6c1c2df` (마지막 로드맵 내용 변경)
+- 이전 문서의 검증 기준: `6ef2c85d95b276d863e71b1104eab39692d8fca4`
+- 검증 범위: 마지막 로드맵 내용 변경 이후의 Git commit, 현재 코드·테스트·승인 계약, 최신 읽기 전용 Paper Ops state
+- 최신 실제 운영 증거: `D:\n8n\workspace\stock_screener_ops\runbook_states\paper_pilot_202606_2026-08-21_2026-08-24.json`, `updated_at=2026-08-23T16:04:45.065597+09:00`
 
-최종 갱신일: 2026-08-11
+## A. 문서 권한과 사용법
 
-기준 브랜치: `gemini_cli_update`
+`docs/ROADMAP_CURRENT.md`는 StockScreener의 현재 개발 상태, 운영 범위, 공식 우선순위를 판단하는 유일한 current roadmap이다. 과거 로드맵이나 평가 문서의 “현재 상태” 또는 “다음 작업”이 이 문서와 충돌하면 이 문서를 따른다.
 
-검증 기준 HEAD: `6ef2c85d95b276d863e71b1104eab39692d8fca4`
-
-근거 기준선: `SYSTEM-AUDIT-20260810`
-
-## A. 문서 권한
-
-`docs/ROADMAP_CURRENT.md`는 StockScreener의 현재 개발 상태, 운영 범위, 우선순위를 판단하는 유일한 공식 로드맵이다.
-
-과거 로드맵의 “현재 상태” 또는 “다음 작업”이 이 문서와 충돌하면 현재 상태와 우선순위는 이 문서를 따른다. 다만 실제 런타임 동작과 기술 계약은 현재 구현 및 승인된 계약을 기준으로 확인해야 한다. 이 로드맵은 상세 PRD/TRD를 대체하지 않는다.
-
-권한 우선순위:
+이 문서는 상세 PRD/TRD나 실행 계약을 대체하지 않는다. 실제 동작과 완료 판정은 코드, 테스트, 승인된 계약, 실제 운영 evidence를 함께 확인한다.
 
 ```text
-현재 코드 / 테스트 / 승인된 운영 계약
--> ROADMAP_CURRENT.md의 현재 상태 및 우선순위
--> 최신 승인 initiative별 PRD/TRD
--> 과거 로드맵 및 설계 이력
+현재 코드 / 테스트 / 승인된 운영 계약 / 실제 운영 evidence
+-> ROADMAP_CURRENT.md의 현재 상태 및 공식 우선순위
+-> 최신 initiative별 PRD/TRD
+-> 과거 로드맵, 설계 및 평가 이력
 ```
 
-과거 로드맵, PRD, TRD는 설계 근거로 보존한다. 세부 기술 계약의 충돌을 로드맵 문구만으로 판단하지 말고 현재 구현과 승인된 initiative 계약을 확인한다.
+과거 문서는 설계 근거와 감사 이력으로 보존한다. 새로운 로드맵 파일을 늘리지 않고 현재 상태가 바뀔 때 이 파일을 갱신한다.
 
-## B. 현재 시스템 상태
+## B. 프로젝트 목표와 핵심 설계 원칙
 
-StockScreener는 안전성을 중시하는 성숙한 paper-trading 운영 시스템이다. 검증된 paper 계좌 범위에서는 일간 및 주간 운영이 가능하다.
+목표는 재현 가능하고 fail-closed인 paper 투자 운영을 유지하면서, 계좌·데이터·실행 evidence의 경계를 먼저 닫고 연구·자동화·소비 계층을 단계적으로 확장하는 것이다. 기능 수보다 데이터 무결성, 수치 정합성, 운영 복구 가능성을 우선한다.
 
-- 승인된 lifecycle은 Stage A -> Gate 1 -> Stage B -> verification -> Stage C -> Gate 2 -> Stage D -> Stage E -> Stage F -> completion -> rollover까지 포함한다.
-- 멱등성, 복구, no-action 운영, completion manifest, legacy completion 분류, zero-progress retirement, 다음 운영일 준비가 구현되어 있다.
-- 근거가 확인된 P0 blocker는 없다.
-- 현재 단계는 **안전하게 운영하면서 확장 전에 신뢰성을 보강하는 단계**다.
+핵심 원칙:
 
-이는 모든 과거 로드맵이 완료됐다는 뜻이 아니다. 현재 시스템은 live-ready, 완전 자동화, 모든 계좌/profile로 확장 완료, 또는 모든 연구 architecture 완료 상태가 아니다.
+- 실제 사용 evidence 없이 capability를 완료로 올리지 않는다.
+- 현재 전략 성능을 높이기 위한 임의 변경보다 timing/as-of/reconciliation 계약을 우선한다.
+- 같은 책임의 두 번째 validation, regime, ledger 계층을 만들지 않는다.
+- write는 승인·preview·idempotency·evidence 경계를 유지하고 자동화는 read-only부터 확장한다.
+- 장기 연구는 현재 paper 운영 backlog와 분리한다.
 
-## C. 현재 운영 범위
+### 상태 분류
+
+- `COMPLETE`: 코드, 테스트, 계약, 필요한 운영 evidence가 완료 조건을 충족한다.
+- `PARTIAL`: 유용한 subset은 구현됐지만 initiative 전체 완료 조건은 충족하지 않는다.
+- `DOCUMENTED_ONLY`: 문서 또는 관행만 있고 실행 가능한 구현·검증이 없다.
+- `MISSING_NEEDED`: 현재 목표에 필요하지만 canonical 구현이 없다.
+- `MISSING_OPTIONAL`: 있으면 유용하지만 현재 운영의 필수 조건은 아니다.
+- `DUPLICATE`: 기존 owner가 목적을 이미 담당하므로 별도 계층을 만들지 않는다.
+- `DEFERRED`: 선행조건이나 별도 승인이 필요한 장기 항목이다.
+- `DROP`: 현재 방향과 충돌하거나 안전상 채택하지 않는다.
+
+`PARTIAL`은 기능 전체가 아니라 확인된 subset만 의미한다. 문서 존재, interface 선언, 테스트 일부, 과거 산출물만으로 `COMPLETE`로 올리지 않는다. 실제 운영 상태와 구현 capability도 분리한다.
+
+### 우선순위 평가 축
+
+우선순위는 다음을 함께 본다.
+
+1. 데이터·계좌 격리와 fail-closed 안전성
+2. 현재 paper lifecycle의 미완료 운영 단계
+3. 재현성, 관측성, 회귀 방지
+4. 확장 전에 닫아야 할 신뢰성 계약
+5. 사용자 의사결정 가치와 구현 비용
+6. 기존 owner와의 중복 여부
+
+성과를 높이기 위한 전략 변경은 Research Gate와 별도 승인을 거친다. live broker 주문은 이 로드맵 범위가 아니다.
+
+## C. 현재 시스템과 Source of Truth
+
+StockScreener는 안전성을 우선하는 paper-trading 운영 시스템이다. 검증된 계좌 범위에서는 Daily Plan, Manual Execution, reconciliation, review, reporting, A-F runbook과 recovery를 수행할 기반이 있다. 이는 live-ready, 무인 write 자동화, 모든 계좌·전략 확장 완료를 뜻하지 않는다.
+
+Source of Truth 역할은 다음과 같이 고정한다.
+
+- **계좌 범위의 local CSV/JSON/Markdown/SQLite artifact**가 기능적 Source of Truth다.
+- **Python**이 validation과 business judgment를 담당한다.
+- **Notion**은 staging/input/review/presentation 계층이다.
+- **n8n/Telegram**은 allowlist된 orchestration/notification만 담당한다.
+- Notion, n8n 또는 Telegram을 원장이나 trading judgment engine으로 승격하지 않는다.
 
 ### 현재 허용
 
-- 검증된 paper 계좌를 현재 Windows wrapper와 runbook으로 운영한다.
-- 날짜를 인식하는 Daily Plan을 생성한다.
-- Manual Execution을 공식 paper execution 경로로 사용한다.
-- 현재 local 및 Notion staging/input/review 흐름으로 Manual Review를 수행한다.
-- 고정된 A-F lifecycle, completion 검증, rollover를 완료한다.
-- 일간 paper 운영 근거와 주간 report, review, 현재 benchmark 비교를 생성한다.
-- Python을 validation 및 business-judgment engine으로 사용한다. Local CSV/JSON/Markdown/SQLite artifact는 source of truth이고, Notion은 staging/input/review/presentation 계층이다.
+- 검증된 paper 계좌와 현재 Windows wrapper/runbook
+- as-of 계약을 지키는 Daily Plan
+- Manual Execution을 통한 공식 paper execution
+- local 및 Notion 기반 review/staging 흐름
+- 승인된 Gate와 A-F lifecycle, evidence 검증, recovery 및 rollover
+- 일간·주간 report와 현재 exploratory initial-capital benchmark
 
 ### 현재 확대하거나 활성화하지 않음
 
-- 검증되지 않은 계좌로의 광범위한 확대
-- strategy, risk, universe profile의 대규모 추가
-- Telegram 승인으로 시작되는 write 실행
-- n8n 내부의 trading 또는 business judgment
+- 검증되지 않은 계좌/profile의 광범위한 확대
+- strategy/risk/universe profile 대량 추가
+- Telegram 승인만으로 시작되는 write 실행
+- n8n 내부 business/trading judgment
 - live broker 또는 real-order 연동
 
-남은 P1 작업은 확장 범위를 제한하지만 검증된 paper 운영 범위를 사용할 수 없게 만드는 blocker는 아니다.
+## D. 2026-08-24 구현 기준선
 
-## D. 완료된 기반
+`6b00fe47…` 이후 `4fdb9b0…`까지의 변경을 대조한 현재 판정이다.
 
-- 시장 데이터, as-of universe, 기술적 screening 및 ensemble 기반
-- 시장 regime, safety trigger, cash, hedge, sizing 및 long-position cap 정책
-- Paper ledger, account state, valuation, snapshot 및 report
-- Sidecar와 replay 기반을 포함한 date-aware Daily Plan
-- Manual Execution, reconciliation, commit 및 status sync
-- Manual Review 준비, append 및 status sync
-- Reporting 및 현재 initial-capital benchmark 비교
-- Read-only Daily Ops Orchestrator 및 operator summary
-- Gate와 Stage B verification을 포함한 고정 A-F runbook
-- 멱등성, 안전한 복구, no-action lifecycle 및 엄격한 completion evidence
-- Legacy completion 분류, zero-progress retirement 및 rollover/day preparation
-- Windows operator wrapper
+### 완료된 계약
 
-## E. 지금 운영에 필요한 P1
+- **MFU-EO2 execution outcome contract — COMPLETE**: pure outcome derivation, invalid-context fail-closed, finalize/commit 소비 계약과 zero-count downstream compatibility가 구현·회귀 테스트로 고정됐다. 핵심 근거는 `core/execution_reconciliation.py`, `core/execution_outcome_flow.py`, `scripts/runbook_state.py`, 관련 `tests/test_execution_outcome_*.py`다.
+- **Stage A official AS-OF scope — COMPLETE**: source별 cutoff/provenance, immutable universe/config, fail-closed 계약이 `core/stage_a_asof_contract.py`, `core/daily_plan_generator.py`, `tests/test_stage_a_asof_contract.py`에 반영됐다.
+- **Runbook recovery contract — COMPLETE**: 승인 토큰, workspace/context 제한, immutable state transition, deny/fail-closed 경로가 `core/runbook_recovery.py`, `tests/test_runbook_recovery.py`에 구현됐다.
+- **Stage F historical completion evidence hardening — COMPLETE**: 과거 completion evidence 보존과 strict validation/self-heal 경로가 Stage F evidence 및 회귀 테스트에 반영됐다.
 
-P0: **없음**.
+### 완료된 운영 기반
 
-### 1. ACCT-01 — Multi-account vertical-slice closure
+- 시장 데이터, as-of universe, 기술 screening과 ensemble 기반
+- 결정론적 market regime, safety trigger, cash/hedge/sizing/long-position cap 정책
+- paper ledger, valuation, snapshot, report와 account-aware 경로 기반
+- Manual Execution, reconciliation, commit/status sync와 Manual Review 흐름
+- read-only Daily Ops Orchestrator, operator summary, fixed A-F runbook
+- idempotency, no-action lifecycle, strict completion evidence와 rollover/day preparation
 
-| 항목 | 값 |
-|---|---|
-| 상태 | MOSTLY_COMPLETE |
-| 필요성 | MUST |
-| 긴급성 | P1 |
-| 지금 필요한 이유 | 남아 있는 default-root 또는 profile fallback이 검증된 계좌 밖으로 운영을 확대할 때 계좌 데이터를 섞을 수 있다. |
-| 완료 조건 | 모든 plan, report, replay, alert, export 및 write 경계가 하나의 account root를 해석하고 검증하며, 조용한 `paper_test` fallback이 없어야 한다. |
-| 완료 전 확장 차단? | **YES** — 광범위한 multi-account 및 profile 확장 |
+### 부분 완료 기반
 
-### 2. REPLAY-01 — Stable action identity와 non-empty replay
+- Account-aware path와 guard는 폭넓게 구현됐지만 모든 legacy default fallback이 제거되지는 않았다.
+- Replay diff와 fingerprint는 구현됐지만 stable action identity와 대표 non-empty corpus가 닫히지 않았다.
+- Notion schema/options 검증은 구현됐지만 view drift는 수동 evidence에 의존한다.
+- IS/OOS optimizer, paper performance, benchmark, HWM, event/alert, Notion UI는 각 capability의 일부만 충족한다.
 
-| 항목 | 값 |
-|---|---|
-| 상태 | MOSTLY_COMPLETE |
-| 필요성 | MUST |
-| 긴급성 | P1 |
-| 지금 필요한 이유 | 같은 symbol/date에 여러 action이 있거나 row 순서가 바뀌어도 replay가 결정론적으로 동작해야 한다. |
-| 완료 조건 | Stable action identity 정책과 non-empty replay corpus가 같은 symbol/action의 중복을 포함해 순서와 무관한 결정론적 matching을 입증해야 한다. |
-| 완료 전 확장 차단? | **YES** — replay 신뢰성에 의존하는 자동화 또는 확장 |
+### 완료 판정 원칙
 
-### 3. NOTION-02 — Schema 및 view drift guard
+완료된 좁은 계약을 더 큰 initiative 전체 완료로 확대 해석하지 않는다. 예를 들어 Stage A lineage 완료는 `DQ-01` 전체 완료가 아니며, account-aware path 존재는 `ACCT-01` 또는 `PF-01` 전체 완료가 아니다.
 
-| 항목 | 값 |
-|---|---|
-| 상태 | PARTIAL |
-| 필요성 | MUST |
-| 긴급성 | P1 |
-| 지금 필요한 이유 | 외부 Notion property, option, schema, view 변경이 정상적인 운영을 차단하거나 잘못된 경로로 보낼 수 있다. |
-| 완료 조건 | 주기적인 read-only preflight가 필수 schema/options/mapping을 검증하고, 문서화된 FAIL/WARNING 대응과 view-drift checklist를 제공해야 한다. |
-| 완료 전 확장 차단? | 검증된 현재 흐름에는 차단 아님. 더 넓은 Notion 의존 확장에는 **YES** |
+## E. 최신 실제 Paper Ops 상태
 
-### 최근 완료
+### 실제 확인된 상태
 
-- `DOC-01` — **COMPLETE**: 이 공식 `ROADMAP_CURRENT.md`가 현재 로드맵의 권한을 확립했으며 문서 supersession 문제는 pending P1 목록에서 제거됐다.
+최신 상태 파일은 문서 수정 중 읽기 전용으로 재확인했다.
 
-## F. 다음 단계
+| 항목 | 실제 값 | 판정 |
+|---|---|---|
+| Account | `paper_pilot_202606` | frozen context 고정 |
+| Data date / Trade date | `2026-08-21` / `2026-08-24` | 날짜 범위 고정 |
+| Stage A | `PASS`, step 0-5 완료 | 완료 |
+| Plan | Daily Plan artifact 2개, execution candidate 4건 | 생성 완료 |
+| Execution contract | `execution_reconciliation_preview.v2` | v2 적용 |
+| Actual input finalize | `input_finalized=false` | **미완료** |
+| Gate 1 | `PENDING` | 미실행 |
+| Stage B-F / Gate 2 | 모두 `PENDING` | 미실행 |
+| State updated_at | `2026-08-23T16:04:45.065597+09:00` | 최신 파일 기준 |
 
-| 순서 | Initiative | 결과 / 의존성 |
-|---:|---|---|
-| 1 | `OPS-04` + `OBS-01` | Artifact retention, run index, 운영 SLO 및 observability. 실패·차단된 복구 근거를 보존한다. |
-| 2 | `TEST-01` | Side-effect 기준으로 분류된 안전한 CI. 격리가 입증된 suite부터 자동화한다. |
-| 3 | `AUTO-03` / `AUTO-01` | Read-only scheduling과 deployment/run evidence. Write stage는 계속 승인을 요구한다. |
-| 4 | `BENCH-02` | Cash-flow/dividend/fee/fraction 정책 승인 후 월적립식 SPY benchmark를 설계·구현한다. |
-| 5 | `CFG-01` / `STRAT-04` / `BT-01` | 점진적인 정합성 개선만 수행하며 광범위한 refactor는 하지 않는다. |
-| 6 | `EXP-01` | 현재 P1 신뢰성 공백을 닫은 뒤 account/universe/strategy/risk profile을 공식화한다. |
-
-## G. 장기 / 연구
-
-- `BT-02`: 구체적인 no-lookahead loader, hybrid simulator, rolling walk-forward optimization 및 plateau evaluator
-- `FUND-01`: Point-in-time fundamental 및 quality data 수집·filtering
-- `UX-01`: Drift validation을 재현 가능하게 만든 뒤 Notion operator view와 input UX 개선
-- `AUTO-02`: Read-only 운영과 승인 threat model이 수용된 뒤 approval-based Telegram execution
-
-이들은 연구 또는 장기 capability이며 현재 production requirement가 아니다. WFO, fundamentals, approval execution은 COMPLETE가 아니다.
-
-## H. 보류 / 폐기 / 보관
-
-| 항목 | 현재 결정 |
-|---|---|
-| CSV-only market database | Historical. SQLite로 대체됨. |
-| n8n 내부 business/trading judgment | DROP / 대체됨. Python이 judgment engine으로 유지된다. |
-| 공식 operator 경로로서의 `paper_virtual_fill` | Historical compatibility로만 유지한다. Manual Execution이 공식 경로다. |
-| 단일 hard-coded `paper_test` architecture | Account-aware path 및 identity 처리로 대체됨. |
-| 과거 v5.x performance-tuning 예시 | 활성 backlog가 아닌 연구 이력이다. |
-| Live broker integration | 현재 paper 목표에서는 DEFER / DROP_CANDIDATE다. 별도로 승인된 safety program 없이는 재개하지 않는다. |
-
-## I. 개발 순서
+현재 운영 순서는 다음과 같다.
 
 ```text
-ACCT-01
--> REPLAY-01
--> NOTION-02
--> retention / observability
--> safe CI
--> read-only scheduling / deployment proof
--> monthly-contribution benchmark
--> account / universe / strategy / risk expansion
--> optional WFO / fundamentals research
+Stage A PASS
+-> 2026-08-24 실제 execution 확인
+-> Notion Execute 입력 및 finalize
+-> Gate 1
+-> Stage B-F와 Gate 2
+-> completion / rollover
 ```
 
-`DOC-01`은 완료됐으며 pending sequence에 포함하지 않는다.
+아직 실행하지 않은 단계는 구현 capability가 있어도 현재 run의 `COMPLETE`로 보지 않는다.
 
-## J. 공식 참고 자료
+### 확인하지 못한 상태
 
-현재 운영 및 audit 참고 자료:
+상태 파일의 마지막 갱신 뒤에 operator가 외부 화면에서 입력했는지, 시장 개장 후 실제 execution이 발생했는지, Notion view가 현재 spec과 시각적으로 일치하는지는 확인하지 못했다. 따라서 모두 추측하지 않고 미검증으로 남긴다.
+
+### 다음 운영 행동
+
+operator가 승인된 절차로 actual execution을 확인하고 Notion Execute 입력/finalize를 수행한 뒤 Gate 1부터 순서대로 진행한다. 이 문서 작업에서는 Stage/Gate, wrapper, Notion write를 실행하지 않는다.
+
+## F. 공식 우선순위
+
+아래 표가 유일한 공식 실행 순서다. 같은 band 안에서는 위에서 아래 순서를 따른다.
+
+### P0
+
+현재 2026-08-24 lifecycle을 승인된 runbook으로 closeout한다.
+
+### P1
+
+기존 공식 P1인 `ACCT-01`, `REPLAY-01`, `NOTION-02`의 순서를 보존한다.
+
+### 후속 단계
+
+| 순서 | Band | Initiative | 다음 종료 조건 / 의존성 |
+|---:|---|---|---|
+| 1 | P0 운영 | 현재 2026-08-24 lifecycle | Actual input finalize부터 Gate 1, B-F, completion까지 승인된 runbook으로 끝내고 evidence를 보존한다. 코드 개발 완료와 별개인 당일 운영 작업이다. |
+| 2 | P1 신뢰성 | `ACCT-01` | 모든 writer/reader/export/replay가 명시적 account root를 검증하고 조용한 legacy `paper_test` fallback을 제거한다. 다계좌 확대 blocker다. |
+| 3 | P1 신뢰성 | `REPLAY-01` | stable action identity와 동일 symbol/action 중복을 포함한 non-empty replay corpus로 순서 독립 matching을 입증한다. replay 기반 자동화 blocker다. |
+| 4 | P1 신뢰성 | `NOTION-02` | read-only schema/options/mapping preflight와 문서화된 view-drift 점검·FAIL/WARNING 대응을 운영 주기에 고정한다. Notion 의존 확대 blocker다. |
+| 5 | P2 운영 품질 | `OPS-04` -> `OBS-01` | retention/run index와 SLO/관측성을 먼저 고정해 실패·복구 evidence를 검색 가능하게 한다. |
+| 6 | P2 회귀 방지 | `TEST-01` | side-effect 분류와 격리가 입증된 suite부터 안전한 CI에 올린다. |
+| 7 | P2 read-only 자동화 | `AUTO-03` -> `AUTO-01` | read-only scheduling과 deployment/run evidence만 자동화한다. write stage 승인은 유지한다. |
+| 8 | P3 사용자 비교 | `BENCH-02` | cash-flow, dividend, fee, fractional-share 정책 승인 후 월적립식 SPY 비교를 설계·구현한다. |
+| 9 | P4 연구 기반 | `RG-01` -> `BT-01` | executable Research Gate를 만들고 IS/OOS를 walk-forward, plateau, cost/slippage/delay stress까지 확장한다. |
+| 10 | P4 데이터/설명 | `DQ-01` -> `PA-01` | 전체 데이터 lineage 계약을 좁은 MFU로 확장한 뒤 attribution 합계와 총손익 reconciliation을 구현한다. |
+| 11 | P5 확장 모델 | `PF-01` -> `RS-01` | `strategy_id` 귀속과 strategy-account ledger를 먼저 고정한 뒤 strategy/account HWM·drawdown을 영속화한다. |
+| 12 | P6 소비 계층 | `EV-01` -> `UI-01` | 공통 event/read model을 먼저 정의하고 read-only 운영 화면을 확장한다. |
+| 13 | P7 선택/장기 | `RF-01` -> `DA-01` -> `FA-01` | 검증 가능한 source와 Research Gate가 생긴 뒤 독립 MFU로 재평가한다. 현재 운영 blocker가 아니다. |
+
+`VA-01`과 `MR-01`은 별도 신규 계층으로 실행 순서에 넣지 않는다. 각각 기존 validation owner와 market-regime core가 목적을 담당한다. 확인된 좁은 누락만 기존 owner에서 보완한다.
+
+### 확장 차단 조건
+
+- 다계좌/profile 확대 전 `ACCT-01`
+- replay 의존 write 자동화 전 `REPLAY-01`
+- Notion 의존 범위 확대 전 `NOTION-02`
+- write scheduler 또는 Telegram execution 검토 전 retention, observability, safe CI와 별도 threat model
+
+## G. 통합 Capability 카탈로그
+
+| 코드 | 기능 | 현재 판정 | 확인된 subset과 남은 경계 |
+|---|---|---|---|
+| `ACCT-01` | Multi-account vertical slice | PARTIAL | account profile/path/guard와 account-scoped Stage F는 있음. 기본 계좌의 legacy root fallback과 전 경로 closure가 남음. |
+| `REPLAY-01` | Stable action replay | PARTIAL | plan diff, fingerprint, account/date validation은 있음. `symbol\|action` 중복의 고유 identity와 non-empty corpus가 남음. |
+| `NOTION-02` | Schema/view drift guard | PARTIAL | 여러 data source의 property/type/select option validator는 있음. view drift는 API 검증이 아닌 수동 spec/checklist 범위. |
+| `RG-01` | Research Gate | DOCUMENTED_ONLY | MFU 계약/Result/Review 관행은 있으나 executable 판정기와 공통 KEEP/REFINE/OVERFIT/REJECT 증거가 없음. |
+| `BT-01` | 백테스트 강건성 | PARTIAL | IS/OOS와 OOS 재검증은 있음. walk-forward, plateau, 대체 universe, 비용/지연 stress 승격 계약이 없음. |
+| `DQ-01` | 데이터 품질·계층 계약 | PARTIAL | Stage A source cutoff/provenance는 완료. 전체 데이터의 canonical lineage metadata 강제는 없음. |
+| `VA-01` | 검증 범위/Preflight | DUPLICATE | Stage/Gate/preflight/recovery가 이미 담당. 별도 대형 validation layer는 만들지 않음. |
+| `PA-01` | 성과 귀속 | PARTIAL | 종목 P&L, equity/MDD, benchmark excess return은 있음. cash/hedge/cost/timing attribution 합계 계약이 없음. |
+| `PF-01` | 다계좌·다전략 모델 | PARTIAL | account-aware 기반은 있음. `strategy_id`, binding, 동일 종목의 전략별 내부 수량 원장이 없음. |
+| `RS-01` | HWM/drawdown 위험 상태 | PARTIAL | position HWM/MDD와 미래행 배제는 있음. strategy/account cycle 및 수동 변경 정책이 없음. |
+| `EV-01` | 실행 이벤트 표준 | PARTIAL | runbook result/history/alert는 있음. 공통 `event_id/run_id/type/version/severity/payload` 계약이 없음. |
+| `UI-01` | Notion + read-only dashboard | PARTIAL | Notion 운영 화면/upsert/reconciliation은 있음. 표준 DB Read Model 기반 GUI는 없음. |
+| `MR-01` | Market Regime 점수 | DUPLICATE | 기존 trend/breadth/drawdown/VIX 기반 결정론적 regime core가 목적을 충족. 두 번째 모델은 금지. |
+| `RF-01` | Risk Flag | MISSING_OPTIONAL | 개별 guard/alert는 있으나 source/expiry/severity를 갖는 canonical 투자 flag taxonomy는 없음. |
+| `DA-01` | 외부 데이터 adapter | DEFERRED | 현재 provider는 동작. provider capability/fallback/provenance adapter는 DQ 이후 재검토. |
+| `FA-01` | 기업가치 분석 | DEFERRED | 기본 financials 구조 외 point-in-time ETL, valuation, 독립 backtest가 없음. 별도 research track. |
+| `OPS-04` | Artifact retention/run index | PARTIAL | artifact와 evidence는 풍부하지만 공통 보존·검색 정책이 완결되지 않음. |
+| `OBS-01` | 운영 observability/SLO | PARTIAL | status/alert/operator summary는 있음. 공식 SLO와 run-level 추세 관측이 남음. |
+| `TEST-01` | 안전한 CI | PARTIAL | 광범위한 테스트는 있음. side-effect 격리와 안정적 CI 승격이 남음. |
+| `BENCH-02` | 월적립식 SPY benchmark | MISSING_NEEDED | 현재 initial-capital exploratory SPY/QQQ/CASH 비교와 구분. cash-flow 정책 승인부터 필요. |
+| `AUTO-03` | Read-only scheduling | PARTIAL | read-only command 기반은 있음. 운영 scheduler evidence와 실패 정책 closure가 남음. |
+| `AUTO-01` | Deployment/run evidence | PARTIAL | wrapper와 runbook은 있음. 재현 가능한 배포·실행 증거 표준화가 남음. |
+| `CFG-01` | Config SSOT 정합성 | PARTIAL | `make_config()` 조립 계약은 있음. legacy 직접 참조는 점진적으로 정리. |
+| `STRAT-04` | 전략 계약 정합성 | PARTIAL | 현재 전략은 운영 가능. 확장보다 기존 timing/contract 검증을 우선. |
+| `EXP-01` | profile 확장 | DEFERRED | P1 신뢰성 공백을 닫은 뒤 account/universe/strategy/risk profile을 공식화. |
+| `BT-02` | 차세대 simulator/WFO | DEFERRED | no-lookahead loader, hybrid simulator, rolling WFO는 장기 연구. |
+| `FUND-01` | Fundamental/quality data | DEFERRED | point-in-time 데이터 계약과 Research Gate가 선행. |
+| `UX-01` | Operator UX | DEFERRED | drift 검증과 read model 이후 Notion/operator UX 개선. |
+| `AUTO-02` | 승인 기반 Telegram execution | DEFERRED | read-only 운영과 승인 threat model 검증 전에는 활성화하지 않음. |
+
+## H. 증거 성숙도
+
+| 코드/범위 | 문서 | 구현 | 테스트 | 실제 운영 | 실패/복구 |
+|---|---|---|---|---|---|
+| MFU-EO2 | 있음 | 완료 | 있음 | v2 state 적용, actual finalize는 현재 run 미수행 | invalid-context fail-closed |
+| Stage A AS-OF | 있음 | 완료 | 있음 | 2026-08-24 plan `PASS` | cutoff/provenance fail-closed |
+| Recovery | 있음 | 완료 | 있음 | activation evidence 있음 | 승인·context·state guard |
+| `ACCT-01` | 있음 | 부분 | 있음 | account-scoped paper ops 사용 | path/context guard, legacy fallback 잔존 |
+| `REPLAY-01` | 있음 | 부분 | 있음 | empty/limited replay evidence | duplicate key WARNING 및 auto-match 제외, stable identity 미완료 |
+| `NOTION-02` | 있음 | 부분 | 있음 | Notion 흐름 사용 | schema fail/warning, view는 수동 |
+| `RG-01` | 있음 | 없음 | 없음 | 문서 관행만 있음 | 없음 |
+| `BT-01` | 있음 | IS/OOS 부분 | smoke 부분 | 최근 공식 연구 run 미확인 | 실행 예외 처리 |
+| `DQ-01` | 있음 | Stage A 부분 | 있음 | Stage A PASS | as-of fail-closed |
+| `PA-01`~`UI-01` | 있음 | 각 subset | 관련 테스트 있음 | 일부 report/ops 사용 | owner별 guard, 공통 계약 미완료 |
+| `RF-01`/`DA-01`/`FA-01` | 방향 있음 | canonical 구현 없음 | 없음 | 없음 | 없음 |
+
+## I. 기능별 상세 평가
+
+각 항목의 첫 문장은 **현재 판정과 우선순위**, 이어지는 문장은 **목적과 현재 증거**, **실제 gap과 완료 조건**, **선행조건 및 범위 아님**을 압축해 기록한다. 세부 코드·테스트 근거는 D와 H 및 MFU별 Result/Review Evidence에서 확인한다.
+
+### ACCT-01
+
+`PARTIAL`, P1. account profile/path/guard와 account-scoped evidence는 목적의 일부를 충족한다. 모든 plan/report/replay/alert/export/write가 같은 명시적 account context를 검증하고 조용한 legacy root fallback을 제거해야 완료다. 범위는 paper account 격리이며 무승인 DB migration은 포함하지 않는다.
+
+### REPLAY-01
+
+`PARTIAL`, P1. 현재 replay diff는 account/date/fingerprint와 row 차이를 검증하지만 `symbol|action` 중복은 고유하게 match하지 못한다. stable action identity, 순서 변경, 동일 symbol/date 복수 action과 non-empty corpus를 결정론적으로 검증해야 완료다. replay가 실제 execution을 대신하지 않는다.
+
+### NOTION-02
+
+`PARTIAL`, P1. property/type/select option validator와 운영 view spec은 존재한다. read-only 검증을 운영 주기에 고정하고 view-drift 수동 evidence와 FAIL/WARNING 대응을 닫아야 완료다. Notion을 원장으로 승격하지 않는다.
+
+### RG-01
+
+`DOCUMENTED_ONLY`, P4. MFU 계약과 Result/Review 관행은 있으나 executable gate가 없다. 가설, as-of 데이터, 비용, 실패조건, OOS 결과를 공통 입력으로 받아 KEEP/REFINE/OVERFIT/REJECT 같은 승인된 판정과 evidence를 재현해야 완료다. 성과 보장이나 자동 최적화는 범위가 아니다.
+
+### BT-01
+
+`PARTIAL`, P4. IS/OOS와 OOS 재검증은 구현됐다. 사전 고정 split, rolling WFO, 주변값 plateau, 하위기간/대체 universe, fee/slippage/1일 지연 stress를 하나의 승격 계약에서 판정해야 완료다. 최고 결과 재선택은 강건성 검증이 아니다.
+
+### DQ-01
+
+`PARTIAL`, P4. Stage A AS-OF provenance는 완료됐지만 전체 데이터 계약은 아니다. 핵심 데이터에 `source`, `as_of_date`, `fetched_at`, `timezone`, `currency`, `frequency`, `adjustment_basis`, `schema_version`, `run_id`를 필요한 범위에서 기계 추적해야 완료다. 특정 provider를 절대적 진실로 간주하지 않는다.
+
+### PA-01
+
+`PARTIAL`, P4. 종목 P&L, equity/MDD, benchmark excess return은 있다. 종목, cash, hedge, fee, timing/selection contribution 합계가 총손익과 허용오차 내 reconcile해야 완료다. 설명되지 않은 잔여를 자동으로 alpha라 부르지 않는다.
+
+### PF-01
+
+`PARTIAL`, P5. account identity는 있으나 strategy attribution이 없다. 모든 내부 position/trade가 account와 strategy에 귀속되고 외부 계좌와 내부 전략 원장을 각각 reconcile해야 완료다. broker 잔고에서 전략별 수량을 역추정하지 않는다.
+
+### RS-01
+
+`PARTIAL`, P5. position HWM/MDD와 미래행 배제는 있다. position cycle, 추가매수, 일부매도, 수동 변경, 재시작의 kept/reset/new/deleted 정책과 strategy/account HWM을 고정해야 완료다. `PF-01` identity가 선행한다.
+
+### EV-01
+
+`PARTIAL`, P6. runbook result/history/alert는 구조화됐지만 공통 event 계약은 없다. 소비자가 문자열을 재해석하지 않는 versioned schema와 `event_id/run_id/type/version/severity/payload` 및 중복 방지를 제공해야 완료다. 모든 debug log의 이벤트화는 범위가 아니다.
+
+### UI-01
+
+`PARTIAL`, P6. Notion 운영 화면/upsert/reconciliation은 실제 사용되지만 표준 DB Read Model GUI는 없다. 계좌·계획·실행·reconciliation·경고·성과를 표준 read model로 읽기 전용 조회해야 완료다. 주문 입력이나 Notion 대체 문서 기능은 범위가 아니다.
+
+### MR-01
+
+`DUPLICATE`. 기존 trend/breadth/drawdown/VIX 기반 결정론적 core가 현재 목적을 담당한다. 추가 분석은 원시 trigger와 성과 귀속으로 수행하며 별도의 두 번째 투자 판단 모델을 만들지 않는다.
+
+### RF-01
+
+`MISSING_OPTIONAL`, P7. 개별 guard/alert와 canonical investment flag는 다르다. 각 flag의 source, 유효기간, severity, 해제 조건과 오탐/미탐 평가가 있어야 완료이며, 검증 전 자동 매도·제외에 사용하지 않는다.
+
+### DA-01
+
+`DEFERRED`, P7. 기존 provider는 동작하지만 공통 adapter는 없다. provider 차이와 fallback을 숨기지 않고 raw provenance와 canonical schema를 보존해야 완료다. 현재 가격 계층을 근거 없이 교체하지 않는다.
+
+### FA-01
+
+`DEFERRED`, P7. 기본 financials 구조 외 point-in-time ETL과 valuation/research evidence가 없다. 독립 backtest와 Research Gate 통과 뒤에만 hybrid 후보가 된다. 현재 기술 신호에 검증 없이 혼합하지 않는다.
+
+### 필요한 기존 initiative
+
+`OPS-04`, `OBS-01`, `TEST-01`, `BENCH-02`, `AUTO-03`, `AUTO-01`, `CFG-01`, `STRAT-04`, `EXP-01`, `BT-02`, `FUND-01`, `UX-01`, `AUTO-02`의 판정·경계는 G 카탈로그와 F 공식 순서를 따른다. 신규 backlog로 중복 생성하지 않는다.
+
+## J. 제외·보류·독립 연구
+
+| 항목 | 결정 |
+|---|---|
+| 별도 대형 Validation layer (`VA-01`) | `DROP` as new layer. 확인된 누락만 기존 owner에 추가한다. |
+| 두 번째 Market Regime 모델 (`MR-01`) | `DROP` as duplicate. 기존 core의 원시값/귀속을 개선한다. |
+| CSV-only market database | Historical. SQLite 기반으로 대체됐다. |
+| n8n 내부 business/trading judgment | `DROP`. Python이 judgment engine이다. |
+| `paper_virtual_fill`을 공식 operator 경로로 사용 | Historical compatibility only. Manual Execution이 공식 경로다. |
+| Live broker integration | 현재 paper 목표에서는 `DEFER/DROP_CANDIDATE`. 별도 safety program 승인 없이는 재개하지 않는다. |
+| 성과 개선 목적의 무승인 전략 변경 | 금지. Research Gate와 별도 실험 계약이 필요하다. |
+| 복잡한 주문 접수·체결 상태 머신 | 현재 paper 목표에서 제외. 실제 필요와 별도 계약이 생길 때 재평가한다. |
+| 장중 가격 기반 투자 판단 | 현재 date/as-of 운영 경계 밖이다. |
+| ProgramGarden 전체 노드 DSL | 패턴 전체 복제는 하지 않는다. 필요한 owner contract만 좁게 채택한다. |
+| 주문 기능이 포함된 대형 GUI | read-only UI 검증 전에는 만들지 않는다. |
+| 검증되지 않은 Telegram write execution | 금지. allowlisted notification/read-only 역할만 유지한다. |
+
+## K. 단계별 공식 개발 순서
+
+F의 공식 우선순위 표를 단계 의존성으로 읽으면 다음과 같다.
+
+```text
+현재 run closeout
+-> ACCT-01 -> REPLAY-01 -> NOTION-02
+-> OPS-04/OBS-01 -> TEST-01 -> AUTO-03/AUTO-01
+-> BENCH-02
+-> RG-01/BT-01 -> DQ-01/PA-01
+-> PF-01/RS-01 -> EV-01/UI-01
+-> 선택·장기 연구
+```
+
+- 현재 run closeout은 개발 backlog를 재정렬하지 않지만 가장 먼저 끝내야 할 운영 작업이다.
+- P1 세 항목은 현재 검증 계좌 사용을 막지는 않지만 다계좌, replay 의존 자동화, Notion 의존 확대를 각각 차단한다.
+- retention/observability와 safe CI는 자동화 범위를 넓히기 전에 실패 evidence를 보존한다.
+- `BENCH-02`는 현재 exploratory benchmark를 대체하지 않고 별도 cash-flow contract로 추가한다.
+- Research Gate가 전략 성능을 보장하거나 최고 parameter를 자동 선택하지 않는다.
+- `PF-01`이 strategy attribution identity를 정하기 전에 `RS-01`을 다전략으로 확장하지 않는다.
+- 공통 event/read model 없이 consumer별 dashboard parsing을 늘리지 않는다.
+
+## L. 사용자 결정이 필요한 경계
+
+다음은 구현 전에 별도 선택 또는 승인이 필요하다.
+
+- legacy default account fallback 제거 시 호환성/전환 기간
+- 월적립식 benchmark의 납입 시점, 금액, dividend, fee, fractional-share, 휴장일 정책
+- Research Gate의 승격 판정 이름과 필수 threshold
+- DB schema 변경이나 대량 backfill이 필요한 `PF-01`, `DQ-01` 설계
+- risk flag의 신뢰 가능한 외부 source 및 자동 정책 반영 여부
+- Telegram write approval threat model과 운영 권한
+- live broker 연동을 별도 safety program으로 시작할지 여부
+
+## M. 유지관리와 근거
+
+1. 현재 상태와 우선순위는 이 파일 하나에서 관리한다.
+2. 새 아이디어만으로 official backlog에 추가하지 않는다.
+3. 상태 변경은 코드, 테스트, 계약, 필요한 실제 운영 evidence를 확인한 뒤 반영한다.
+4. `COMPLETE`인 좁은 MFU를 상위 capability 전체 완료로 확대하지 않는다.
+5. 상세 requirement/design은 initiative별 PRD/TRD에서 관리한다.
+6. 변경 시 갱신일, 검증 HEAD, 비교 기준선, 영향 initiative를 기록한다.
+7. 과거 상태는 Git history와 historical Result/Review Evidence로 보존한다.
+8. `ROADMAP_CURRENT_v2.md`, `ROADMAP_FINAL.md`, 날짜별 current roadmap을 만들지 않는다.
+9. 큰 phase 전환이나 저장소 전체 재평가에만 `SYSTEM-AUDIT-YYYYMMDD/`를 만든다.
+10. 실제 운영 파일을 수정하거나 실행하지 않고 읽기 전용 evidence로만 인용한다.
+
+현재 참고 근거:
 
 - Operator/runbook: `docs/operations/paper_daily_cycle_commands.md`
-- SYSTEM AUDIT summary: `docs_chatGPT_work/codex_results/SYSTEM-AUDIT-20260810/SYSTEM_AUDIT_SUMMARY.md`
-- Initiative matrix: `docs_chatGPT_work/codex_results/SYSTEM-AUDIT-20260810/03_initiative_matrix.md`
-- Gap priority: `docs_chatGPT_work/codex_results/SYSTEM-AUDIT-20260810/06_gap_priority.md`
-- Current system map: `docs_chatGPT_work/codex_results/SYSTEM-AUDIT-20260810/05_current_system_map.md`
-- Document/code conflicts: `docs_chatGPT_work/codex_results/SYSTEM-AUDIT-20260810/04_document_code_conflicts.md`
-
-Historical reference에는 System Architecture v5.x, Paper roadmap v1.x, OPER/MFU series, `docs_n8n/` roadmap/task series가 포함된다. 이들은 현재 로드맵의 authority가 아니라 historical/design lineage다.
-
-## K. 유지관리 규칙
-
-1. `docs/ROADMAP_CURRENT.md`는 유일한 current roadmap SSOT다.
-2. 새 아이디어가 제안됐다는 이유만으로 official backlog에 추가하지 않는다.
-3. 실제 개발이 승인된 initiative만 추가하거나 우선순위를 부여한다.
-4. 상세 requirement와 implementation design은 최신 initiative별 PRD/TRD에서 관리한다.
-5. Code, test, 관련 operating evidence를 확인한 뒤에만 구현 완료로 표시한다.
-6. 작은 작업이 끝날 때마다 새 roadmap 파일을 만들지 않는다.
-7. `ROADMAP_CURRENT_v2.md`, `ROADMAP_FINAL.md`, `ROADMAP_YYYYMMDD.md` 같은 이름을 일반적인 운영 방식으로 사용하지 않는다.
-8. 현재 상태나 우선순위가 바뀌면 같은 `ROADMAP_CURRENT.md`를 수정한다.
-9. 수정 시 최소한 `최종 갱신일`, `검증 기준 HEAD` 또는 관련 baseline과 영향받은 initiative 상태/우선순위를 갱신한다.
-10. 이 문서의 과거 상태는 Git history로 보존한다.
-11. 큰 phase 전환 또는 repository 전체 재평가에만 날짜별 `SYSTEM-AUDIT-YYYYMMDD/`를 생성한다.
-12. 새 SYSTEM AUDIT 결과는 이 로드맵에 다시 반영한다.
-13. 이전 결정을 지우기 위해 historical roadmap, PRD, TRD를 다시 작성하지 않는다.
-14. Superseded 또는 dropped initiative는 여기에 짧은 상태만 남기고 자세한 내용은 source 문서와 Git history에서 확인한다.
+- Notion view spec: `docs/operations/notion_view_spec_daily_plans_manual_executions_manual_reviews.md`
+- System Audit: `docs_chatGPT_work/codex_results/SYSTEM-AUDIT-20260810/`
+- MFU별 완료 증거: `docs/work_results/`
+- 현재 구현과 테스트: `core/`, `scripts/`, `tests/`
 
 문서 역할:
 
 ```text
-ROADMAP_CURRENT.md       = 현재 상태, 범위, 우선순위
-SYSTEM-AUDIT-YYYYMMDD/   = 특정 시점의 repository 전체 평가
+ROADMAP_CURRENT.md       = 현재 상태, 범위, 공식 우선순위
+SYSTEM-AUDIT-YYYYMMDD/   = 특정 시점의 저장소 전체 평가
 initiative PRD/TRD       = 상세 requirement 및 implementation contract
+Result/Review Evidence   = 완료 및 검증 증거
 Git history              = ROADMAP_CURRENT의 과거 상태
 ```
