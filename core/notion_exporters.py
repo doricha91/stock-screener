@@ -44,6 +44,7 @@ from core.notion_mapping import get_mapping_section, resolve_notion_property_nam
 from core.notion_settings import NotionSettings, get_notion_data_source_id
 from core.paper_account_paths import build_paper_account_paths
 from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+from core.paper_execution_intent import validate_daily_plan_execution_intent
 from core.paper_snapshot_identity import (
     PaperSnapshotIdentityError,
     validate_snapshot_account_identity,
@@ -1115,6 +1116,40 @@ def _parse_markdown_table_rows(section: str | None) -> list[dict[str, str]]:
     return parsed
 
 
+def _semantic_markdown_rows(
+    rows: list[dict[str, str]],
+    semantic_fields: tuple[str, ...],
+) -> list[dict[str, str]]:
+    empty_values = {"", "-", "[ ]"}
+    return [
+        row
+        for row in rows
+        if any(str(row.get(field) or "").strip() not in empty_values for field in semantic_fields)
+    ]
+
+
+def _load_daily_plan_execution_intent(
+    markdown_path: Path,
+    *,
+    plan_date: str,
+) -> dict[str, Any] | None:
+    daily_plan_path = markdown_path.with_suffix(".json")
+    if not daily_plan_path.exists():
+        return None
+    payload = _read_json(daily_plan_path)
+    if "execution_intent" not in payload:
+        return None
+    try:
+        return validate_daily_plan_execution_intent(
+            payload,
+            expected_trade_date=plan_date,
+        )
+    except ValueError as exc:
+        raise NotionExportError(
+            f"Invalid canonical Daily Plan sidecar: {daily_plan_path}: {exc}"
+        ) from exc
+
+
 def _format_confirmed_trade_items(rows: list[dict[str, str]]) -> list[str]:
     items: list[str] = []
     for row in rows:
@@ -1202,6 +1237,18 @@ def summarize_daily_plan_artifacts(
     confirmed_rows = _parse_markdown_table_rows(confirmed_section)
     review_rows = _parse_markdown_table_rows(review_section)
     warning_rows = _parse_markdown_table_rows(warning_section)
+    confirmed_rows = _semantic_markdown_rows(
+        confirmed_rows,
+        ("Type", "타입", "Symbol", "종목", "Shares", "수량", "Ref Price", "예상단가"),
+    )
+    warning_rows = _semantic_markdown_rows(
+        warning_rows,
+        ("Symbol", "Severity", "Reason"),
+    )
+    execution_intent = _load_daily_plan_execution_intent(
+        markdown_path,
+        plan_date=plan_date,
+    )
 
     parsing_warnings = [
         warning
@@ -1218,9 +1265,13 @@ def summarize_daily_plan_artifacts(
         "schema_version": f"paper_daily_plan.v{summary.get('schema_version', 1)}",
         "plan_date": plan_date,
         "regime": regime.upper(),
-        "confirmed_trade_count": _count_markdown_table_rows(confirmed_section or ""),
+        "confirmed_trade_count": (
+            execution_intent["candidate_execution_count"]
+            if execution_intent is not None
+            else len(confirmed_rows)
+        ),
         "review_item_count": _count_markdown_table_rows(review_section or ""),
-        "warning_count": _count_markdown_table_rows(warning_section or ""),
+        "warning_count": len(warning_rows),
         "market_summary_lines": market_summary_lines[:3],
         "confirmed_trade_body_items": _format_confirmed_trade_items(confirmed_rows),
         "review_item_body_items": _format_review_item_body_items(review_rows),
@@ -2054,7 +2105,6 @@ def export_selected_paper_reports_to_notion(
                 mapping_root=mapping_root,
                 account_id=account_id,
                 paper_root=paper_root,
-                plan_date=daily_plan_date,
                 dry_run=dry_run,
             )
         )
@@ -2090,6 +2140,7 @@ def export_selected_paper_reports_to_notion(
                 mapping_root=mapping_root,
                 account_id=account_id,
                 paper_root=paper_root,
+                plan_date=daily_plan_date,
                 dry_run=dry_run,
             )
         )

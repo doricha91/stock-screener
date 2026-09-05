@@ -13,6 +13,20 @@
 - Status and preview are read-only. Authorize is create-only and requires all four explicit confirmations.
 - A changed source hash, conflicting execution, malformed sidecar, invalid calendar identity, or target artifact without its exact state invalidates exclusion and restores the active blocker.
 
+## Restart date policy
+
+The ordinary multi-day recovery rule remains `restart_data_date > source_trade_date`.
+
+For a single missed operating day, `restart_data_date == source_trade_date` is allowed only when every existing recovery precondition still passes and all of the following are true:
+
+- the source remains `ACTIVE_INCOMPLETE`;
+- the source has neither an execution commit report reference nor a successful `execution_commit` idempotency record;
+- the execution ledger has zero rows for the source trade date;
+- `restart_trade_date` is exactly `next_trading_day(source_trade_date)`; and
+- the immutable sidecar, confirmations, source/calendar hashes, no-trade interval, and exact target remain valid.
+
+`restart_data_date < source_trade_date` is always blocked. Equality is therefore a narrowly guarded missed-day recovery case, not a general relaxation of chronological ordering. Preview and sidecar validation apply the same restart policy, and authorization remains create-only.
+
 ## Commands
 
 Inspect the source without writing:

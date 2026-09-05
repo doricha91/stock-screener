@@ -244,38 +244,44 @@ def preview_rollover(
     recoveries = [
         record for record, item in classified if item["classification"] == "RECOVERY_EXCLUDED"
     ]
-    if len(recoveries) > 1:
+    current_recoveries, recovery_blockers = (
+        runbook_recovery._current_recovery_authorizations(
+            workspace_path,
+            recoveries,
+            calendar,
+        )
+    )
+    if recovery_blockers:
+        return _blocked("recovery_authorization_invalid", recovery_blockers)
+    if len(current_recoveries) > 1:
         return _blocked(
             "multiple_recovery_authorizations",
-            [f"recovery_source:{record.state.runbook_day_id}" for record in recoveries],
+            [
+                f"recovery_source:{record.state.runbook_day_id}"
+                for record, _ in current_recoveries
+            ],
         )
-    if recoveries:
-        source = recoveries[0]
-        recovery = runbook_recovery.validate_recovery_evidence(
-            workspace_path, source.path, source.state, calendar
-        )
-        if not recovery["valid"]:
-            return _blocked("recovery_authorization_invalid", recovery["blockers"])
-        if not recovery["consumed"]:
-            restart = recovery["payload"]["restart"]
-            already_exists = _already_exists(workspace_path, restart["runbook_day_id"])
-            if already_exists:
-                return _blocked("recovery_target_already_exists")
-            return {
-                "runner_result": "PASS",
-                "mode": "PREVIEW",
-                "rollover_mode": "RECOVERY",
-                "account_id": account_id,
-                "previous_runbook_day_id": recovery["payload"]["latest_completed"]["runbook_day_id"],
-                "recovery_source_runbook_day_id": source.state.runbook_day_id,
-                "next_data_date": restart["data_date"],
-                "next_trade_date": restart["trade_date"],
-                "next_runbook_day_id": restart["runbook_day_id"],
-                "runbook_classifications": [item for _, item in classified],
-                "already_exists": False,
-                "safe_to_prepare": True,
-                "next_required_action": NEXT_ACTION,
-            }
+    if current_recoveries:
+        source, recovery = current_recoveries[0]
+        restart = recovery["payload"]["restart"]
+        already_exists = _already_exists(workspace_path, restart["runbook_day_id"])
+        if already_exists:
+            return _blocked("recovery_target_already_exists")
+        return {
+            "runner_result": "PASS",
+            "mode": "PREVIEW",
+            "rollover_mode": "RECOVERY",
+            "account_id": account_id,
+            "previous_runbook_day_id": recovery["payload"]["latest_completed"]["runbook_day_id"],
+            "recovery_source_runbook_day_id": source.state.runbook_day_id,
+            "next_data_date": restart["data_date"],
+            "next_trade_date": restart["trade_date"],
+            "next_runbook_day_id": restart["runbook_day_id"],
+            "runbook_classifications": [item for _, item in classified],
+            "already_exists": False,
+            "safe_to_prepare": True,
+            "next_required_action": NEXT_ACTION,
+        }
 
     completed = [
         record

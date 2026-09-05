@@ -23,6 +23,19 @@ SOURCE_ID = f"{ACCOUNT_ID}_{SOURCE_DATA_DATE}_{SOURCE_TRADE_DATE}"
 RESTART_DATA_DATE = "2026-08-21"
 RESTART_TRADE_DATE = "2026-08-24"
 TARGET_ID = f"{ACCOUNT_ID}_{RESTART_DATA_DATE}_{RESTART_TRADE_DATE}"
+MISSED_SOURCE_DATA_DATE = "2026-08-24"
+MISSED_SOURCE_TRADE_DATE = "2026-08-25"
+MISSED_SOURCE_ID = f"{ACCOUNT_ID}_{MISSED_SOURCE_DATA_DATE}_{MISSED_SOURCE_TRADE_DATE}"
+MISSED_RESTART_DATA_DATE = MISSED_SOURCE_TRADE_DATE
+MISSED_RESTART_TRADE_DATE = "2026-08-26"
+MISSED_TARGET_ID = (
+    f"{ACCOUNT_ID}_{MISSED_RESTART_DATA_DATE}_{MISSED_RESTART_TRADE_DATE}"
+)
+AUDIT_RESTART_DATA_DATE = "2026-08-27"
+AUDIT_RESTART_TRADE_DATE = "2026-08-28"
+AUDIT_TARGET_ID = (
+    f"{ACCOUNT_ID}_{AUDIT_RESTART_DATA_DATE}_{AUDIT_RESTART_TRADE_DATE}"
+)
 REASON = "Stage A look-ahead contaminated; no real trades; gap accepted"
 CONFIRMATIONS = {
     "confirm_paper_test": True,
@@ -78,6 +91,46 @@ def _seed_incident(tmp_path: Path) -> tuple[Path, Path, Path]:
     return workspace, state_path, artifact
 
 
+def _seed_missed_operating_day_incident(tmp_path: Path) -> tuple[Path, Path, Path]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _complete_state(workspace, "2026-08-21", "2026-08-24")
+    state = runbook_state.create_initial_state(
+        ACCOUNT_ID,
+        MISSED_SOURCE_DATA_DATE,
+        MISSED_SOURCE_TRADE_DATE,
+    )
+    statuses = dict(state.stage_status)
+    statuses["A"] = "PASS"
+    artifact = (
+        workspace
+        / "artifacts"
+        / MISSED_SOURCE_ID
+        / "stage_a"
+        / "daily_action_plan_20260825.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"contaminated": true}\n', encoding="utf-8")
+    state = replace(
+        state,
+        current_stage="A",
+        current_status="PASS",
+        last_completed_step=5,
+        last_completed_stage="A",
+        stage_status=statuses,
+        artifacts={"daily_plan_json": artifact.relative_to(workspace).as_posix()},
+        history=[{"event_type": "stage_completed", "stage_id": "A", "status": "PASS"}],
+    )
+    state_path = runbook_state.get_state_path_for_context(
+        workspace,
+        ACCOUNT_ID,
+        MISSED_SOURCE_DATA_DATE,
+        MISSED_SOURCE_TRADE_DATE,
+    )
+    runbook_state.save_state(state, state_path)
+    return workspace, state_path, artifact
+
+
 def _arguments(workspace: Path, **overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
         "workspace": workspace,
@@ -89,6 +142,17 @@ def _arguments(workspace: Path, **overrides: object) -> dict[str, object]:
         "calendar": load_market_calendar(),
         **CONFIRMATIONS,
     }
+    values.update(overrides)
+    return values
+
+
+def _missed_day_arguments(workspace: Path, **overrides: object) -> dict[str, object]:
+    values = _arguments(
+        workspace,
+        source_runbook_day_id=MISSED_SOURCE_ID,
+        restart_data_date=MISSED_RESTART_DATA_DATE,
+        restart_trade_date=MISSED_RESTART_TRADE_DATE,
+    )
     values.update(overrides)
     return values
 
@@ -118,12 +182,43 @@ def _mark_recovery_target_standard_completed(
     )
     runbook_state.save_state(completed, target_path)
     original = runbook_day_rollover._is_standard_completed
+    target_id = target.runbook_day_id
 
     def classify_standard(workspace_arg: Path, state: runbook_state.RunbookState) -> bool:
-        return state.runbook_day_id == TARGET_ID or original(workspace_arg, state)
+        return state.runbook_day_id == target_id or original(workspace_arg, state)
 
     monkeypatch.setattr(runbook_day_rollover, "_is_standard_completed", classify_standard)
     return completed
+
+
+def _mark_active_incident(
+    workspace: Path,
+    state_path: Path,
+    state: runbook_state.RunbookState,
+) -> runbook_state.RunbookState:
+    statuses = dict(state.stage_status)
+    statuses["A"] = "PASS"
+    artifact = (
+        workspace
+        / "artifacts"
+        / state.runbook_day_id
+        / "stage_a"
+        / f"daily_action_plan_{state.frozen_context.trade_date.replace('-', '')}.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"contaminated": true}\n', encoding="utf-8")
+    progressed = replace(
+        state,
+        current_stage="A",
+        current_status="PASS",
+        last_completed_step=5,
+        last_completed_stage="A",
+        stage_status=statuses,
+        artifacts={"daily_plan_json": artifact.relative_to(workspace).as_posix()},
+        history=[{"event_type": "stage_completed", "stage_id": "A", "status": "PASS"}],
+    )
+    runbook_state.save_state(progressed, state_path)
+    return progressed
 
 
 def test_current_incident_blocks_rollover_and_eligible_preview_is_read_only(tmp_path: Path) -> None:
@@ -181,6 +276,144 @@ def test_authorize_creates_immutable_sidecar_and_exact_recovery_rollover(tmp_pat
     assert rollover["next_trade_date"] == RESTART_TRADE_DATE
     assert rollover["previous_runbook_day_id"] == f"{ACCOUNT_ID}_2026-08-12_2026-08-13"
     assert _hash_tree(workspace, state_path, artifact) == before
+
+
+def test_missed_operating_day_equality_preview_authorize_and_exact_rollover(
+    tmp_path: Path,
+) -> None:
+    workspace, state_path, artifact = _seed_missed_operating_day_incident(tmp_path)
+    before_state = state_path.read_bytes()
+    before_artifact = artifact.read_bytes()
+
+    preview = runbook_recovery.preview_recovery(**_missed_day_arguments(workspace))
+    authorized = runbook_recovery.authorize_recovery(**_missed_day_arguments(workspace))
+    source = runbook_state.load_state(state_path)
+    validation = runbook_recovery.validate_recovery_evidence(
+        workspace,
+        state_path,
+        source,
+        load_market_calendar(),
+    )
+    rollover = runbook_day_rollover.preview_rollover(
+        workspace,
+        ACCOUNT_ID,
+        load_market_calendar(),
+        confirm_paper_test=True,
+    )
+
+    assert preview["runner_result"] == "PASS"
+    assert preview["no_trade_interval"]["trading_dates"] == [MISSED_SOURCE_TRADE_DATE]
+    assert preview["restart"] == {
+        "data_date": MISSED_RESTART_DATA_DATE,
+        "trade_date": MISSED_RESTART_TRADE_DATE,
+        "runbook_day_id": MISSED_TARGET_ID,
+    }
+    assert authorized["runner_result"] == "PASS"
+    assert authorized["authorized"] is True
+    assert validation["valid"] is True
+    assert rollover["runner_result"] == "PASS"
+    assert rollover["rollover_mode"] == "RECOVERY"
+    assert rollover["next_data_date"] == MISSED_RESTART_DATA_DATE
+    assert rollover["next_trade_date"] == MISSED_RESTART_TRADE_DATE
+    assert rollover["next_runbook_day_id"] == MISSED_TARGET_ID
+    assert state_path.read_bytes() == before_state
+    assert artifact.read_bytes() == before_artifact
+
+
+def test_missed_operating_day_equality_blocks_source_trade_execution(tmp_path: Path) -> None:
+    workspace, _, _ = _seed_missed_operating_day_incident(tmp_path)
+    ledger = (
+        workspace.parent
+        / "outputs"
+        / "paper_accounts"
+        / ACCOUNT_ID
+        / "paper_execution_log.csv"
+    )
+    with ledger.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PAPER_EXECUTION_LOG_COLUMNS)
+        writer.writerow(
+            {"date": MISSED_SOURCE_TRADE_DATE, "symbol": "AAPL", "status": "COMMITTED"}
+        )
+
+    result = runbook_recovery.preview_recovery(**_missed_day_arguments(workspace))
+
+    assert result["runner_result"] == "BLOCKED"
+    assert "source_trade_date_execution_present" in result["blockers"]
+    assert any(item.startswith("execution_gap_not_empty") for item in result["blockers"])
+
+
+def test_missed_operating_day_equality_blocks_execution_commit_evidence(tmp_path: Path) -> None:
+    workspace, state_path, _ = _seed_missed_operating_day_incident(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = replace(
+        state,
+        artifacts={
+            **state.artifacts,
+            "execution_commit_report_json": (
+                f"artifacts/{MISSED_SOURCE_ID}/stage_b/execution_commit.json"
+            ),
+        },
+    )
+    runbook_state.save_state(state, state_path)
+
+    result = runbook_recovery.preview_recovery(**_missed_day_arguments(workspace))
+
+    assert result["runner_result"] == "BLOCKED"
+    assert "source_execution_commit_evidence_present" in result["blockers"]
+
+
+def test_restart_data_date_before_source_trade_date_remains_blocked(tmp_path: Path) -> None:
+    workspace, _, _ = _seed_missed_operating_day_incident(tmp_path)
+
+    result = runbook_recovery.preview_recovery(
+        **_missed_day_arguments(
+            workspace,
+            restart_data_date="2026-08-24",
+            restart_trade_date="2026-08-25",
+        )
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert "restart_data_date_not_after_source_trade_date" in result["blockers"]
+
+
+def test_missed_operating_day_equality_requires_exact_next_trading_day(
+    tmp_path: Path,
+) -> None:
+    workspace, _, _ = _seed_missed_operating_day_incident(tmp_path)
+
+    result = runbook_recovery.preview_recovery(
+        **_missed_day_arguments(workspace, restart_trade_date="2026-08-27")
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    assert "restart_trade_date_not_next_trading_day" in result["blockers"]
+
+
+def test_recovery_evidence_revalidates_restart_date_relation(tmp_path: Path) -> None:
+    workspace, state_path, _ = _seed_missed_operating_day_incident(tmp_path)
+    assert runbook_recovery.authorize_recovery(
+        **_missed_day_arguments(workspace)
+    )["runner_result"] == "PASS"
+    evidence_path = runbook_recovery.recovery_path(workspace, MISSED_SOURCE_ID)
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    payload["restart"] = {
+        "data_date": "2026-08-24",
+        "trade_date": "2026-08-25",
+        "runbook_day_id": f"{ACCOUNT_ID}_2026-08-24_2026-08-25",
+    }
+    evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+    source = runbook_state.load_state(state_path)
+
+    validation = runbook_recovery.validate_recovery_evidence(
+        workspace,
+        state_path,
+        source,
+        load_market_calendar(),
+    )
+
+    assert validation["valid"] is False
+    assert "recovery_restart_data_date_precedes_source_trade_date" in validation["blockers"]
 
 
 @pytest.mark.parametrize("missing", list(CONFIRMATIONS))
@@ -282,6 +515,142 @@ def test_multiple_active_and_missing_completed_block(tmp_path: Path) -> None:
     assert "completed_runbook_day_not_found" in missing["blockers"]
 
 
+def test_previous_valid_recovery_is_excluded_from_new_recovery_active_count(
+    tmp_path: Path,
+) -> None:
+    workspace, old_source_path, _ = _seed_incident(tmp_path)
+    calendar = load_market_calendar()
+    assert runbook_recovery.authorize_recovery(
+        **_arguments(workspace, calendar=calendar)
+    )["runner_result"] == "PASS"
+    _, current_path, current = runbook_state.init_state_file_for_context(
+        workspace,
+        ACCOUNT_ID,
+        RESTART_DATA_DATE,
+        RESTART_TRADE_DATE,
+    )
+    statuses = dict(current.stage_status)
+    statuses["A"] = "PASS"
+    current_artifact = (
+        workspace
+        / "artifacts"
+        / TARGET_ID
+        / "stage_a"
+        / "daily_action_plan_20260824.json"
+    )
+    current_artifact.parent.mkdir(parents=True)
+    current_artifact.write_text('{"contaminated": true}\n', encoding="utf-8")
+    current = replace(
+        current,
+        current_stage="A",
+        current_status="PASS",
+        last_completed_step=5,
+        last_completed_stage="A",
+        stage_status=statuses,
+        artifacts={"daily_plan_json": current_artifact.relative_to(workspace).as_posix()},
+        history=[{"event_type": "stage_completed", "stage_id": "A", "status": "PASS"}],
+    )
+    runbook_state.save_state(current, current_path)
+
+    source, active, _, blockers = runbook_recovery._load_recovery_context(
+        workspace,
+        ACCOUNT_ID,
+        TARGET_ID,
+        calendar,
+    )
+    old_record = next(
+        record
+        for record in runbook_day_rollover._load_account_states(workspace, ACCOUNT_ID)[0]
+        if record.state.runbook_day_id == SOURCE_ID
+    )
+    rollover_item = runbook_day_rollover.classify_state(workspace, old_record, calendar)
+    preview = runbook_recovery.preview_recovery(
+        **_arguments(
+            workspace,
+            source_runbook_day_id=TARGET_ID,
+            restart_data_date="2026-08-24",
+            restart_trade_date="2026-08-25",
+            calendar=calendar,
+        )
+    )
+
+    assert blockers == []
+    assert source is not None and source.state.runbook_day_id == TARGET_ID
+    assert [record.state.runbook_day_id for record in active] == [TARGET_ID]
+    assert runbook_recovery._raw_classification(
+        workspace, old_record, calendar
+    ) == "RECOVERY_EXCLUDED"
+    assert rollover_item["classification"] == "RECOVERY_EXCLUDED"
+    assert preview["runner_result"] == "PASS"
+    assert "active_runbook_day_count_must_equal_one" not in preview["blockers"]
+    assert old_source_path.is_file()
+
+
+def test_previous_invalid_recovery_returns_to_new_recovery_active_count(
+    tmp_path: Path,
+) -> None:
+    workspace, _, _ = _seed_incident(tmp_path)
+    calendar = load_market_calendar()
+    assert runbook_recovery.authorize_recovery(
+        **_arguments(workspace, calendar=calendar)
+    )["runner_result"] == "PASS"
+    _, current_path, current = runbook_state.init_state_file_for_context(
+        workspace,
+        ACCOUNT_ID,
+        RESTART_DATA_DATE,
+        RESTART_TRADE_DATE,
+    )
+    statuses = dict(current.stage_status)
+    statuses["A"] = "PASS"
+    current = replace(
+        current,
+        current_stage="A",
+        current_status="PASS",
+        last_completed_step=5,
+        last_completed_stage="A",
+        stage_status=statuses,
+        artifacts={"daily_plan_json": f"artifacts/{TARGET_ID}/stage_a/daily_action_plan.json"},
+        history=[{"event_type": "stage_completed", "stage_id": "A", "status": "PASS"}],
+    )
+    runbook_state.save_state(current, current_path)
+    sidecar_path = runbook_recovery.recovery_path(workspace, SOURCE_ID)
+    payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    payload["calendar"]["calendar_sha256"] = "0" * 64
+    sidecar_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    records, state_blockers = runbook_day_rollover._load_account_states(
+        workspace, ACCOUNT_ID
+    )
+    old_record = next(
+        record for record in records if record.state.runbook_day_id == SOURCE_ID
+    )
+    _, active, _, blockers = runbook_recovery._load_recovery_context(
+        workspace,
+        ACCOUNT_ID,
+        TARGET_ID,
+        calendar,
+    )
+    rollover_item = runbook_day_rollover.classify_state(workspace, old_record, calendar)
+    preview = runbook_recovery.preview_recovery(
+        **_arguments(
+            workspace,
+            source_runbook_day_id=TARGET_ID,
+            restart_data_date="2026-08-24",
+            restart_trade_date="2026-08-25",
+            calendar=calendar,
+        )
+    )
+
+    assert state_blockers == [] and blockers == []
+    assert {record.state.runbook_day_id for record in active} == {SOURCE_ID, TARGET_ID}
+    assert runbook_recovery._raw_classification(
+        workspace, old_record, calendar
+    ) == "ACTIVE_INCOMPLETE"
+    assert rollover_item["classification"] == "ACTIVE_INCOMPLETE"
+    assert preview["runner_result"] == "BLOCKED"
+    assert "active_runbook_day_count_must_equal_one" in preview["blockers"]
+
+
 def test_context_account_mismatch_and_ambiguous_latest_completed_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -304,10 +673,14 @@ def test_context_account_mismatch_and_ambiguous_latest_completed_block(
     runbook_state.save_state(duplicate, duplicate_path)
     original = runbook_recovery._raw_classification
 
-    def classify(workspace_arg: Path, record: object) -> str:
+    def classify(
+        workspace_arg: Path,
+        record: object,
+        calendar: object | None = None,
+    ) -> str:
         if record.state.runbook_day_id == duplicate.runbook_day_id:
             return "STANDARD_COMPLETED"
-        return original(workspace_arg, record)
+        return original(workspace_arg, record, calendar)
 
     monkeypatch.setattr(runbook_recovery, "_raw_classification", classify)
     ambiguous = runbook_recovery.preview_recovery(**_arguments(workspace))
@@ -541,6 +914,190 @@ def test_consumed_recovery_full_lifecycle_returns_to_exact_normal_initialization
     with pytest.raises(ValueError, match="active_runbook_day_exists"):
         runbook_state.init_state_file_for_context(
             workspace, ACCOUNT_ID, "2026-08-25", "2026-08-26"
+        )
+
+
+def test_repeated_recovery_lifecycle_selects_only_current_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, first_source_path, _ = _seed_incident(tmp_path)
+    calendar = load_market_calendar()
+
+    first_authorized = runbook_recovery.authorize_recovery(
+        **_arguments(workspace, calendar=calendar)
+    )
+    assert first_authorized["runner_result"] == "PASS"
+    _, first_target_path, first_target = runbook_state.init_state_file_for_context(
+        workspace,
+        ACCOUNT_ID,
+        RESTART_DATA_DATE,
+        RESTART_TRADE_DATE,
+    )
+    _mark_recovery_target_standard_completed(
+        workspace,
+        first_target_path,
+        first_target,
+        monkeypatch,
+    )
+
+    after_first = runbook_day_rollover.preview_rollover(
+        workspace,
+        ACCOUNT_ID,
+        calendar,
+        confirm_paper_test=True,
+    )
+    assert after_first["runner_result"] == "PASS"
+    assert after_first.get("rollover_mode") != "RECOVERY"
+    assert after_first["next_runbook_day_id"] == MISSED_SOURCE_ID
+
+    _, second_source_path, second_source = runbook_state.init_state_file_for_context(
+        workspace,
+        ACCOUNT_ID,
+        MISSED_SOURCE_DATA_DATE,
+        MISSED_SOURCE_TRADE_DATE,
+    )
+    second_source = _mark_active_incident(
+        workspace,
+        second_source_path,
+        second_source,
+    )
+    second_arguments = _arguments(
+        workspace,
+        source_runbook_day_id=MISSED_SOURCE_ID,
+        restart_data_date=AUDIT_RESTART_DATA_DATE,
+        restart_trade_date=AUDIT_RESTART_TRADE_DATE,
+        calendar=calendar,
+    )
+    second_authorized = runbook_recovery.authorize_recovery(**second_arguments)
+    assert second_authorized["runner_result"] == "PASS"
+
+    first_validation = runbook_recovery.validate_recovery_evidence(
+        workspace,
+        first_source_path,
+        runbook_state.load_state(first_source_path),
+        calendar,
+    )
+    second_validation = runbook_recovery.validate_recovery_evidence(
+        workspace,
+        second_source_path,
+        second_source,
+        calendar,
+    )
+    assert first_validation["valid"] is True and first_validation["consumed"] is True
+    assert second_validation["valid"] is True and second_validation["consumed"] is False
+
+    current_rollover = runbook_day_rollover.preview_rollover(
+        workspace,
+        ACCOUNT_ID,
+        calendar,
+        confirm_paper_test=True,
+    )
+    assert current_rollover["runner_result"] == "PASS"
+    assert current_rollover["rollover_mode"] == "RECOVERY"
+    assert current_rollover["recovery_source_runbook_day_id"] == MISSED_SOURCE_ID
+    assert current_rollover["next_data_date"] == AUDIT_RESTART_DATA_DATE
+    assert current_rollover["next_trade_date"] == AUDIT_RESTART_TRADE_DATE
+    assert current_rollover["next_runbook_day_id"] == AUDIT_TARGET_ID
+    assert current_rollover["safe_to_prepare"] is True
+    assert "multiple_recovery_authorizations" not in current_rollover.get("blockers", [])
+
+    _, second_target_path, second_target = runbook_state.init_state_file_for_context(
+        workspace,
+        ACCOUNT_ID,
+        AUDIT_RESTART_DATA_DATE,
+        AUDIT_RESTART_TRADE_DATE,
+    )
+    consumed_second = runbook_recovery.validate_recovery_evidence(
+        workspace,
+        second_source_path,
+        second_source,
+        calendar,
+    )
+    assert consumed_second["valid"] is True and consumed_second["consumed"] is True
+    active_target = runbook_day_rollover.preview_rollover(
+        workspace,
+        ACCOUNT_ID,
+        calendar,
+        confirm_paper_test=True,
+    )
+    assert active_target["reason"] == "active_runbook_day_exists"
+
+    _mark_recovery_target_standard_completed(
+        workspace,
+        second_target_path,
+        second_target,
+        monkeypatch,
+    )
+    after_second = runbook_day_rollover.preview_rollover(
+        workspace,
+        ACCOUNT_ID,
+        calendar,
+        confirm_paper_test=True,
+    )
+    assert after_second["runner_result"] == "PASS"
+    assert after_second.get("rollover_mode") != "RECOVERY"
+    assert after_second["previous_runbook_day_id"] == AUDIT_TARGET_ID
+    assert after_second["next_data_date"] == "2026-08-28"
+    assert after_second["next_trade_date"] == "2026-08-31"
+
+    normal_created, _, normal_state = runbook_state.init_state_file_for_context(
+        workspace,
+        ACCOUNT_ID,
+        "2026-08-28",
+        "2026-08-31",
+    )
+    assert normal_created == "CREATED"
+    assert normal_state.runbook_day_id == f"{ACCOUNT_ID}_2026-08-28_2026-08-31"
+
+
+def test_multiple_unconsumed_recoveries_remain_fail_closed(tmp_path: Path) -> None:
+    workspace, _, _ = _seed_incident(tmp_path)
+    calendar = load_market_calendar()
+    assert runbook_recovery.authorize_recovery(
+        **_arguments(workspace, calendar=calendar)
+    )["runner_result"] == "PASS"
+
+    second_source = runbook_state.create_initial_state(
+        ACCOUNT_ID,
+        MISSED_SOURCE_DATA_DATE,
+        MISSED_SOURCE_TRADE_DATE,
+    )
+    second_source_path = runbook_state.get_state_path_for_context(
+        workspace,
+        ACCOUNT_ID,
+        MISSED_SOURCE_DATA_DATE,
+        MISSED_SOURCE_TRADE_DATE,
+    )
+    _mark_active_incident(workspace, second_source_path, second_source)
+    assert runbook_recovery.authorize_recovery(
+        **_arguments(
+            workspace,
+            source_runbook_day_id=MISSED_SOURCE_ID,
+            restart_data_date=AUDIT_RESTART_DATA_DATE,
+            restart_trade_date=AUDIT_RESTART_TRADE_DATE,
+            calendar=calendar,
+        )
+    )["runner_result"] == "PASS"
+
+    rollover = runbook_day_rollover.preview_rollover(
+        workspace,
+        ACCOUNT_ID,
+        calendar,
+        confirm_paper_test=True,
+    )
+    assert rollover["runner_result"] == "BLOCKED"
+    assert rollover["reason"] == "multiple_recovery_authorizations"
+    assert set(rollover["blockers"]) == {
+        f"recovery_source:{SOURCE_ID}",
+        f"recovery_source:{MISSED_SOURCE_ID}",
+    }
+    with pytest.raises(ValueError, match="multiple_recovery_authorizations"):
+        runbook_state.init_state_file_for_context(
+            workspace,
+            ACCOUNT_ID,
+            AUDIT_RESTART_DATA_DATE,
+            AUDIT_RESTART_TRADE_DATE,
         )
 
 

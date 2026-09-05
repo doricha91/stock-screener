@@ -217,50 +217,51 @@ Daily Runner Refresh 자동화의 현재 runner 계약, 날짜 자동 결정 정
 
 ## 1. Quick Start
 
-매일 먼저 운영 변수 3개를 정한다.
+정상 daily 운영에서는 아래 facade의 5개 wrapper만 순서대로 사용한다.
 
 ```cmd
 cd /d D:\python\StockScreener
 conda activate HANTU311_64
 
-set ACCOUNT_ID=paper_orch_smoke_202606
-set ACCOUNT_ID=paper_pilot_202606
-set DATA_DATE=2026-06-12
-set TRADE_DATE=2026-06-15
+ops\runbook_wrappers\daily\00_prepare_next_runbook_day.cmd
+ops\runbook_wrappers\daily\01_stage_a_plan_prep.cmd
+
+rem EXECUTION이면 Notion Manual Execution을 입력한 뒤 계속한다.
+rem NO_ACTION이면 불필요한 Manual Execution 입력 없이 계속한다.
+ops\runbook_wrappers\daily\02_execution_to_review_prep.cmd
+
+rem Primary 02의 STOP 안내를 따른다.
+rem Review scope가 있으면 Notion Manual Review를 입력하고, 없으면 바로 계속한다.
+ops\runbook_wrappers\daily\03_review_preview.cmd
+
+rem Primary 03의 STOP 안내를 따른다.
+rem preview artifact가 있으면 검토하고, NO_ACTION skip이면 바로 계속한다.
+ops\runbook_wrappers\daily\04_close_day.cmd
 ```
 
-변수 의미:
+각 wrapper의 정지 경계는 다음과 같다.
 
-- `ACCOUNT_ID`: 운영할 paper 계좌. 예: `paper_orch_smoke_202606`, `paper_pilot_202606`, `paper_sandbox`.
-- `DATA_DATE`: 매매 판단에 사용할 최신 완료 미국장 데이터 날짜.
-- `TRADE_DATE`: 실제 다음 paper 매매/운영 대상 날짜.
+- Primary 00: 다음 Runbook 날짜와 local environment를 준비하고 멈춘다. 표시된 `ACCOUNT_ID`, `DATA_DATE`, `TRADE_DATE`, `RUNBOOK_DAY_ID`를 확인한다.
+- Primary 01: Stage A를 완료하고 멈춘다. `EXECUTION`이면 Manual Execution 입력이 필요하며, `NO_ACTION`이면 필요하지 않다.
+- Primary 02: Gate1 → Stage B → Stage B Verify → Stage C를 PASS 순서로 실행한다. canonical scope가 있으면 Manual Review 입력을 안내하고, NO_ACTION 또는 verified zero-write로 scope가 비어 있으면 입력 없이 Primary 03 실행을 안내한다.
+- Primary 03: Gate2 → Stage D Preview를 실행하고 실제 append 앞에서 멈춘다. artifact가 생성되면 검토를 안내하고, canonical skip이면 검토 없이 Primary 04 실행을 안내한다.
+- Primary 04: Stage D Append → Stage E → Stage F를 PASS 순서로 실행해 그날을 닫는다.
 
-예:
+통합 wrapper는 각 단계가 PASS일 때만 다음 단계로 진행한다. `WAIT`, `BLOCKED`, `FAILED`가 나오면 출력의 `STOPPED_AT`, `Recovery`, `next_required_action`을 확인하고, 해결 후 같은 primary wrapper를 재실행한다. 이미 PASS인 비가역 단계는 state/evidence에 따라 건너뛰므로 Stage B execution commit, Stage D append, Stage E EOD commit을 무조건 반복하지 않는다.
 
-- 한국시간 토요일 아침에 금요일 미국장이 마감된 뒤 운영한다면 `DATA_DATE`는 금요일 미국장 날짜다.
-- `TRADE_DATE`는 다음 미국 거래일이다.
+`V2 EXECUTION`의 Finalize → Gate1, already-finalized safe no-op, `V1` legacy 의미와 `NO_ACTION` 계약은 기존 Gate1/Stage runner가 그대로 담당한다. Primary wrapper는 이 로직을 재구현하지 않는다.
 
-항상 Orchestrator 상태 확인으로 시작한다.
+통합 흐름 자체가 고장 났거나 특정 단계만 수동 복구해야 할 때만 기존 detailed wrapper를 사용한다.
 
-```cmd
-python scripts\paper_daily_ops.py status --account-id %ACCOUNT_ID% --data-date %DATA_DATE% --trade-date %TRADE_DATE% --json > outputs\orch_status.json
+- 위치: `ops\runbook_wrappers\`
+- Gate1 standalone: `02_gate1_execution_input.cmd`
+- Stage B / Verify / C: `03_stage_b_execution_commit_sync.cmd`, `04_stage_b_verify.cmd`, `05_stage_c_review_prep.cmd`
+- Gate2 / D Preview / D Append: `06_gate2_review_input.cmd`, `07_stage_d_preview.cmd`, `08_stage_d_append_sync.cmd`
+- E/F: `09_stage_e_eod_close.cmd`, `10_stage_f_benchmark_notion_sync.cmd`
 
-python -c "import json; p=json.load(open(r'outputs\orch_status.json',encoding='utf-8')); print(json.dumps(p.get('operator_summary'),ensure_ascii=False,indent=2))"
-```
+## 2. Advanced / Manual Recovery — 전체 상세 운영 흐름
 
-먼저 확인할 필드:
-
-- `current_step`
-- `recommended_operator_action`
-- `next_command`
-- `command_type`
-- `risk_level`
-- `requires_manual_approval`
-- `warnings`
-- `blockers`
-- `terminal`
-
-## 2. 전체 운영 흐름
+아래 표와 이후 canonical command sequence는 진단과 수동 복구를 위한 상세 참조다. 정상 daily path에서는 위의 primary 00~04만 사용한다.
 
 | Step | 단계 | 목적 | 명령 | 성격 | 자동화 | 승인 | 정상 기준 | 실패 시 확인 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -284,7 +285,7 @@ python -c "import json; p=json.load(open(r'outputs\orch_status.json',encoding='u
 | 17 | EOD commit | local state/snapshot 마감 | `python scripts\paper.py eod ... --commit` | local state/snapshot write | 금지 | 필요 | current state/snapshot write | guard/preflight 실패 확인 |
 | 18 | Final status | 완료 확인 | `paper.py status`, `paper_daily_ops.py status` | read-only | 가능 | 불필요 | `REVIEW_DONE`, terminal true | blocker/conflict 해결 |
 
-## 3. Canonical Command Sequence
+## 3. Advanced / Manual Recovery — Canonical Command Sequence
 
 ### 3.1 Orchestrator 초기 확인
 

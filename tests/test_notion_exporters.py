@@ -680,6 +680,136 @@ def test_daily_plan_summary_is_built_from_markdown_and_config_snapshot(tmp_path)
     assert summary["warning_count"] == 2
 
 
+def test_no_action_daily_plan_sentinel_rows_do_not_increment_notion_counts(tmp_path):
+    root = tmp_path / "paper_test"
+    date = "2026-09-01"
+    compact = date.replace("-", "")
+    _write(
+        root / f"daily_action_plan_{compact}.md",
+        "\n".join(
+            [
+                f"# Daily Action Plan [{date}]",
+                "",
+                "## 1. Market Summary",
+                "- Current Regime: `BULL`",
+                "",
+                "## 4. Confirmed Trades",
+                "| 타입 | 종목 | 수량 | 예상단가 | 매매 사유 |",
+                "| :--- | :--- | :--- | :--- | :--- |",
+                "| - | - | - | - | 오늘 실행할 확정 매매 없음 |",
+                "",
+                "## 4-0. Review Items",
+                "| Symbol | Shares | Ref Price | Reason | Note |",
+                "| :--- | ---: | ---: | :--- | :--- |",
+                "| **ABC** | 1 | $10.00 | REVIEW_EXIT | review contract remains unchanged |",
+                "",
+                "## 4-0-1. Warnings",
+                "| Symbol | Severity | Reason | Note |",
+                "| :--- | :--- | :--- | :--- |",
+                "| - | - | - | 경고 없음 |",
+                "",
+                "## 4-1. Candidate Diagnostics",
+            ]
+        ),
+    )
+    _write(
+        root / f"daily_action_plan_{compact}.json",
+        json.dumps(
+            {
+                "schema_version": "paper_daily_plan.v1",
+                "account_id": "paper_pilot_202606",
+                "data_date": "2026-08-31",
+                "trade_date": date,
+                "plan_date": date,
+                "run_mode": "official",
+                "official_run": True,
+                "generated_at": "2026-09-01T13:17:26Z",
+                "items": [],
+                "execution_intent": {
+                    "schema_version": "paper_execution_intent.v1",
+                    "action_mode": "NO_ACTION",
+                    "execution_required": False,
+                    "candidate_execution_count": 0,
+                    "no_action_reason": "no_executable_orders",
+                },
+                "fingerprints": {},
+            }
+        ),
+    )
+    _write(
+        root / "config_snapshots" / f"paper_config_snapshot_{compact}.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "plan_date": date,
+                "market_state": {"regime": "BULL"},
+            }
+        ),
+    )
+
+    summary = summarize_daily_plan_artifacts(
+        markdown_path=root / f"daily_action_plan_{compact}.md",
+        config_snapshot_path=root / "config_snapshots" / f"paper_config_snapshot_{compact}.json",
+    )
+
+    assert summary["confirmed_trade_count"] == 0
+    assert summary["warning_count"] == 0
+    assert summary["review_item_count"] == 1
+    assert summary["confirmed_trade_body_items"] == []
+    assert summary["warning_body_items"] == []
+
+
+def test_daily_plan_summary_rejects_invalid_canonical_sidecar(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    _write(
+        root / "daily_action_plan_20260520.json",
+        json.dumps(
+            {
+                "schema_version": "paper_daily_plan.v1",
+                "account_id": "paper_default",
+                "data_date": "2026-05-19",
+                "trade_date": "2026-05-20",
+                "plan_date": "2026-05-20",
+                "run_mode": "official",
+                "official_run": True,
+                "generated_at": "2026-05-20T00:00:00Z",
+                "items": [],
+                "execution_intent": {
+                    "schema_version": "paper_execution_intent.v1",
+                    "action_mode": "EXECUTION",
+                    "execution_required": True,
+                    "candidate_execution_count": 1,
+                    "no_action_reason": None,
+                },
+                "fingerprints": {},
+            }
+        ),
+    )
+
+    with pytest.raises(NotionExportError, match="Invalid canonical Daily Plan sidecar"):
+        summarize_daily_plan_artifacts(
+            markdown_path=root / "daily_action_plan_20260520.md",
+            config_snapshot_path=root / "config_snapshots" / "paper_config_snapshot_20260520.json",
+        )
+
+
+def test_daily_plan_summary_uses_semantic_fallback_for_legacy_sidecar(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_daily_plan(root)
+    _write(
+        root / "daily_action_plan_20260520.json",
+        json.dumps({"schema_version": 1, "plan_date": "2026-05-20", "items": []}),
+    )
+
+    summary = summarize_daily_plan_artifacts(
+        markdown_path=root / "daily_action_plan_20260520.md",
+        config_snapshot_path=root / "config_snapshots" / "paper_config_snapshot_20260520.json",
+    )
+
+    assert summary["confirmed_trade_count"] == 2
+
+
 def test_daily_plan_property_payload_is_built(tmp_path):
     root = tmp_path / "paper_test"
     _seed_daily_plan(root)
@@ -1180,6 +1310,27 @@ def test_export_selected_supports_daily_review_summary(tmp_path):
     assert len(results) == 1
     assert results[0].target == "daily_review_summaries"
     assert results[0].account_id == "paper_default"
+
+
+def test_export_selected_routes_requested_date_to_daily_plan_only(tmp_path):
+    root = tmp_path / "paper_test"
+    _seed_weekly(root)
+    _seed_daily_plan(root, date="2026-05-19", symbol="OLD")
+    _seed_daily_plan(root, date="2026-05-20", symbol="LATEST")
+
+    results = export_selected_paper_reports_to_notion(
+        client=None,
+        settings=_settings(),
+        mapping_root=_mapping(),
+        export_weekly=True,
+        export_daily_plan=True,
+        daily_plan_date="2026-05-19",
+        paper_root=root,
+        dry_run=True,
+    )
+
+    assert [result.target for result in results] == ["weekly_reports", "daily_plans"]
+    assert results[1].external_key == "daily_plan:paper_default:2026-05-19"
 
 
 def test_non_default_account_has_no_legacy_fallback(tmp_path):

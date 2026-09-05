@@ -5,6 +5,20 @@ ROOT = Path(__file__).resolve().parents[1]
 WRAPPERS = ROOT / "ops" / "runbook_wrappers"
 
 
+def test_gate1_execution_wrapper_uses_integrated_finalize_then_gate_entrypoint() -> None:
+    text = (WRAPPERS / "02_gate1_execution_input.cmd").read_text(encoding="utf-8")
+
+    assert "runbook_gate_checker.py gate1-execution-input" in text
+    assert "runbook_state.py finalize-execution-input" not in text
+    assert "03_stage_b_execution_sync.cmd" not in text
+    assert '--workspace "%WORKSPACE%"' in text
+    assert '--account-id "%ACCOUNT_ID%"' in text
+    assert '--data-date "%DATA_DATE%"' in text
+    assert '--trade-date "%TRADE_DATE%"' in text
+    assert 'set "EXIT_CODE=%ERRORLEVEL%"' in text
+    assert "exit /b %EXIT_CODE%" in text
+
+
 def test_official_stage_e_wrapper_calls_stage_f_only_after_zero_exit() -> None:
     text = (WRAPPERS / "09_stage_e_eod_close.cmd").read_text(encoding="utf-8")
 

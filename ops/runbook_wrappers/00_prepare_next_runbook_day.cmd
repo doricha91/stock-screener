@@ -27,6 +27,8 @@ if not "%LOCAL_EXIT_CODE%"=="0" (
   goto :finish
 )
 
+if /I "%RUNBOOK_CHAINED_MODE%"=="1" set "PAUSE_ON_EXIT=0"
+
 for %%V in (REPO_ROOT WORKSPACE CONDA_BAT CONDA_ENV_NAME PAUSE_ON_EXIT PYTHONUTF8 PYTHONIOENCODING ACCOUNT_ID ACCOUNT_MODE) do (
   if not defined %%V (
     echo Required variable %%V is not defined.

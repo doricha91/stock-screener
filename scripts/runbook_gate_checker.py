@@ -63,6 +63,8 @@ def check_gate1_readiness(
     timezone: str = "Asia/Seoul",
     row_fetcher: GateRowFetcher | None = None,
     next_poll_minutes: int = DEFAULT_NEXT_POLL_MINUTES,
+    *,
+    finalize_execution_input: bool = False,
 ) -> dict[str, Any]:
     workspace = Path(workspace)
     state_path = runbook_state.get_state_path_for_context(workspace, account_id, data_date, trade_date)
@@ -104,6 +106,60 @@ def check_gate1_readiness(
         result = create_gate_result(state, "BLOCKED", [], exc.detail)
         state, gate_json, gate_txt = _write_gate1_result_and_save(workspace, state_path, state, result)
         return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
+
+    if finalize_execution_input and execution_intent["action_mode"] == "EXECUTION":
+        execution_contract = runbook_state.get_execution_contract(state)
+        contract_version = execution_contract.get("version")
+        if contract_version == runbook_state.EXECUTION_CONTRACT_V2:
+            try:
+                finalized_state = runbook_state.finalize_execution_input(state)
+                if finalized_state is not state:
+                    runbook_state.save_state(finalized_state, state_path)
+                state = finalized_state
+            except Exception as exc:
+                state = runbook_state.block_stage(
+                    state,
+                    GATE1_ID,
+                    "execution_input_finalize_failed",
+                    {"error": str(exc)},
+                )
+                result = create_gate_result(
+                    state,
+                    "BLOCKED",
+                    [],
+                    f"Execution input Finalize failed: {exc}",
+                    execution_intent=execution_intent,
+                    daily_plan_sha256=daily_plan_sha256,
+                )
+                state, gate_json, gate_txt = _write_gate1_result_and_save(
+                    workspace,
+                    state_path,
+                    state,
+                    result,
+                )
+                return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
+        elif contract_version != runbook_state.EXECUTION_CONTRACT_V1:
+            state = runbook_state.block_stage(
+                state,
+                GATE1_ID,
+                "execution_contract_version_unsupported",
+                {"version": contract_version},
+            )
+            result = create_gate_result(
+                state,
+                "BLOCKED",
+                [],
+                f"Unsupported execution contract version: {contract_version}",
+                execution_intent=execution_intent,
+                daily_plan_sha256=daily_plan_sha256,
+            )
+            state, gate_json, gate_txt = _write_gate1_result_and_save(
+                workspace,
+                state_path,
+                state,
+                result,
+            )
+            return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
 
     try:
         raw_rows = row_fetcher(state) if row_fetcher else query_manual_execution_rows(state)
@@ -186,6 +242,28 @@ def check_gate1_readiness(
     )
     state, gate_json, gate_txt = _write_gate1_result_and_save(workspace, state_path, state, result)
     return _cli_payload(result, gate_json, gate_txt, state_path=state_path)
+
+
+def check_gate1_execution_input(
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    timezone: str = "Asia/Seoul",
+    row_fetcher: GateRowFetcher | None = None,
+    next_poll_minutes: int = DEFAULT_NEXT_POLL_MINUTES,
+) -> dict[str, Any]:
+    """Finalize eligible v2 execution input, then return the Gate 1 business result."""
+    return check_gate1_readiness(
+        workspace,
+        account_id,
+        data_date,
+        trade_date,
+        timezone=timezone,
+        row_fetcher=row_fetcher,
+        next_poll_minutes=next_poll_minutes,
+        finalize_execution_input=True,
+    )
 
 
 def check_gate2_readiness(
@@ -1132,6 +1210,20 @@ def _build_parser() -> argparse.ArgumentParser:
     gate1.add_argument("--trade-date", required=True)
     gate1.add_argument("--timezone", default="Asia/Seoul")
     gate1.add_argument("--next-poll-minutes", type=int, default=DEFAULT_NEXT_POLL_MINUTES)
+    gate1_execution_input = subparsers.add_parser(
+        "gate1-execution-input",
+        help="Finalize eligible v2 execution input, then check Gate 1 readiness",
+    )
+    gate1_execution_input.add_argument("--workspace", type=Path, required=True)
+    gate1_execution_input.add_argument("--account-id", required=True)
+    gate1_execution_input.add_argument("--data-date", required=True)
+    gate1_execution_input.add_argument("--trade-date", required=True)
+    gate1_execution_input.add_argument("--timezone", default="Asia/Seoul")
+    gate1_execution_input.add_argument(
+        "--next-poll-minutes",
+        type=int,
+        default=DEFAULT_NEXT_POLL_MINUTES,
+    )
     gate2 = subparsers.add_parser("gate2", help="Check Gate 2 manual review readiness")
     gate2.add_argument("--workspace", type=Path, required=True)
     gate2.add_argument("--account-id", required=True)
@@ -1147,6 +1239,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "gate1":
         result = check_gate1_readiness(
+            workspace=args.workspace,
+            account_id=args.account_id,
+            data_date=args.data_date,
+            trade_date=args.trade_date,
+            timezone=args.timezone,
+            next_poll_minutes=args.next_poll_minutes,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("runner_result") in {"PASS", "WAIT"} else 1
+    if args.command == "gate1-execution-input":
+        result = check_gate1_execution_input(
             workspace=args.workspace,
             account_id=args.account_id,
             data_date=args.data_date,

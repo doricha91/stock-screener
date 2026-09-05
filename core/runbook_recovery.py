@@ -34,6 +34,10 @@ TARGET_EVIDENCE_DIRS = (
     "completion_manifests",
     "no_action_runs",
 )
+EXECUTION_COMMIT_ARTIFACT_KEYS = (
+    "execution_commit_report_json",
+    "execution_commit_report",
+)
 
 
 def default_calendar() -> MarketCalendar:
@@ -144,7 +148,42 @@ def _execution_gap(
     return ledger_path, sha256_file(ledger_path), conflicts, blockers
 
 
-def _raw_classification(workspace: Path, record: Any) -> str:
+def _has_execution_commit_evidence(state: runbook_state.RunbookState) -> bool:
+    if any(state.artifacts.get(key) for key in EXECUTION_COMMIT_ARTIFACT_KEYS):
+        return True
+    return any(
+        isinstance(record, dict)
+        and record.get("command_key") == "execution_commit"
+        and record.get("status") == "PASS"
+        for record in state.idempotency_records.values()
+    )
+
+
+def _restart_policy_violations(
+    calendar: MarketCalendar,
+    source_trade_date: date | None,
+    restart_data_date: date,
+    restart_trade_date: date,
+    *,
+    source_has_execution_commit: bool,
+) -> list[str]:
+    violations: list[str] = []
+    if not calendar.is_trading_day(restart_data_date):
+        violations.append("restart_data_not_trading_day")
+    if not calendar.is_trading_day(restart_trade_date):
+        violations.append("restart_trade_not_trading_day")
+    if calendar.next_trading_day(restart_data_date) != restart_trade_date:
+        violations.append("restart_pair_not_next_trading_day")
+    if source_trade_date is None:
+        return violations
+    if restart_data_date < source_trade_date:
+        violations.append("restart_data_precedes_source_trade_date")
+    elif restart_data_date == source_trade_date and source_has_execution_commit:
+        violations.append("source_execution_commit_evidence_present")
+    return violations
+
+
+def _base_classification(workspace: Path, record: Any) -> str:
     from core import runbook_day_rollover
 
     if runbook_day_rollover._is_standard_completed(workspace, record.state):
@@ -157,10 +196,28 @@ def _raw_classification(workspace: Path, record: Any) -> str:
     return "RETIRED" if retirement["valid"] else "ACTIVE_INCOMPLETE"
 
 
+def _raw_classification(
+    workspace: Path,
+    record: Any,
+    calendar: MarketCalendar | None = None,
+) -> str:
+    classification = _base_classification(workspace, record)
+    if classification != "ACTIVE_INCOMPLETE":
+        return classification
+    recovery = validate_recovery_evidence(
+        workspace,
+        record.path,
+        record.state,
+        calendar or default_calendar(),
+    )
+    return DISPOSITION if recovery["valid"] else classification
+
+
 def _load_recovery_context(
     workspace: Path,
     account_id: str,
     source_runbook_day_id: str,
+    calendar: MarketCalendar | None = None,
 ) -> tuple[Any | None, list[Any], list[Any], list[str]]:
     from core import runbook_day_rollover
 
@@ -171,7 +228,10 @@ def _load_recovery_context(
         (record for record in records if record.state.runbook_day_id == source_runbook_day_id),
         None,
     )
-    raw = [(record, _raw_classification(workspace, record)) for record in records]
+    raw = [
+        (record, _raw_classification(workspace, record, calendar))
+        for record in records
+    ]
     active = [record for record, classification in raw if classification == "ACTIVE_INCOMPLETE"]
     completed = [
         record
@@ -239,7 +299,7 @@ def preview_recovery(
         return _blocked("recovery_authorization_already_exists", mode=mode)
 
     source, active, completed, state_blockers = _load_recovery_context(
-        workspace_path, account_id, source_runbook_day_id
+        workspace_path, account_id, source_runbook_day_id, calendar
     )
     blockers.extend(state_blockers)
     if source is None:
@@ -253,24 +313,42 @@ def preview_recovery(
     if source is not None:
         if source.state.frozen_context.account_id != account_id:
             blockers.append("source_account_mismatch")
-        if _raw_classification(workspace_path, source) != "ACTIVE_INCOMPLETE":
+        if _raw_classification(workspace_path, source, calendar) != "ACTIVE_INCOMPLETE":
             blockers.append("source_not_active_incomplete")
         zero_progress = runbook_retirement.assess_zero_progress(
             workspace_path, source.path, source.state
         )
         if zero_progress["eligible"]:
             blockers.append("source_is_zero_progress_retirement_candidate")
+    source_trade = (
+        date.fromisoformat(source.state.frozen_context.trade_date)
+        if source is not None
+        else None
+    )
     try:
-        if not calendar.is_trading_day(restart_data):
-            blockers.append("restart_data_date_not_trading_day")
-        if not calendar.is_trading_day(restart_trade):
-            blockers.append("restart_trade_date_not_trading_day")
-        if calendar.next_trading_day(restart_data) != restart_trade:
-            blockers.append("restart_trade_date_not_next_trading_day")
+        restart_violations = _restart_policy_violations(
+            calendar,
+            source_trade,
+            restart_data,
+            restart_trade,
+            source_has_execution_commit=(
+                _has_execution_commit_evidence(source.state) if source is not None else False
+            ),
+        )
+        preview_violation_reasons = {
+            "restart_data_not_trading_day": "restart_data_date_not_trading_day",
+            "restart_trade_not_trading_day": "restart_trade_date_not_trading_day",
+            "restart_pair_not_next_trading_day": "restart_trade_date_not_next_trading_day",
+            "restart_data_precedes_source_trade_date": (
+                "restart_data_date_not_after_source_trade_date"
+            ),
+            "source_execution_commit_evidence_present": (
+                "source_execution_commit_evidence_present"
+            ),
+        }
+        blockers.extend(preview_violation_reasons[item] for item in restart_violations)
     except CalendarCoverageError as exc:
         blockers.append(str(exc))
-    if source is not None and restart_data <= date.fromisoformat(source.state.frozen_context.trade_date):
-        blockers.append("restart_data_date_not_after_source_trade_date")
     if latest is not None and restart_data <= date.fromisoformat(latest.state.frozen_context.trade_date):
         blockers.append("restart_data_date_not_after_latest_completed_trade_date")
     try:
@@ -288,6 +366,8 @@ def preview_recovery(
         gap_dates = []
     ledger_path, ledger_sha256, conflicts, ledger_blockers = _execution_gap(account_id, gap_dates)
     blockers.extend(ledger_blockers)
+    if source_trade is not None and restart_data == source_trade and conflicts:
+        blockers.append("source_trade_date_execution_present")
     target_id = runbook_state.get_runbook_day_id(
         account_id, restart_data.isoformat(), restart_trade.isoformat()
     )
@@ -451,6 +531,17 @@ def validate_recovery_evidence(
             blockers.append(f"recovery_{field}_mismatch")
     if payload.get("source_state_sha256") != sha256_file(source_state_path):
         blockers.append("recovery_source_state_sha256_mismatch")
+    try:
+        source_raw = json.loads(source_state_path.read_text(encoding="utf-8"))
+        source_record = runbook_day_rollover.StateRecord(
+            source_state_path,
+            source_state,
+            dict(source_raw.get("stage_status") or {}),
+        )
+        if _base_classification(workspace_path, source_record) != "ACTIVE_INCOMPLETE":
+            blockers.append("recovery_source_not_active_incomplete")
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        blockers.append("recovery_source_state_invalid")
     if not isinstance(payload.get("reason"), str) or not payload["reason"].strip():
         blockers.append("recovery_reason_missing")
     confirmations = payload.get("operator_confirmations")
@@ -522,12 +613,25 @@ def validate_recovery_evidence(
         )
         if restart.get("runbook_day_id") != expected_target_id:
             blockers.append("recovery_restart_runbook_day_id_mismatch")
-        if not calendar.is_trading_day(restart_data):
-            blockers.append("recovery_restart_data_date_not_trading_day")
-        if not calendar.is_trading_day(restart_trade):
-            blockers.append("recovery_restart_trade_date_not_trading_day")
-        if calendar.next_trading_day(restart_data) != restart_trade:
-            blockers.append("recovery_restart_pair_invalid")
+        restart_violations = _restart_policy_violations(
+            calendar,
+            date.fromisoformat(source_state.frozen_context.trade_date),
+            restart_data,
+            restart_trade,
+            source_has_execution_commit=_has_execution_commit_evidence(source_state),
+        )
+        validation_violation_reasons = {
+            "restart_data_not_trading_day": "recovery_restart_data_date_not_trading_day",
+            "restart_trade_not_trading_day": "recovery_restart_trade_date_not_trading_day",
+            "restart_pair_not_next_trading_day": "recovery_restart_pair_invalid",
+            "restart_data_precedes_source_trade_date": (
+                "recovery_restart_data_date_precedes_source_trade_date"
+            ),
+            "source_execution_commit_evidence_present": (
+                "recovery_source_execution_commit_evidence_present"
+            ),
+        }
+        blockers.extend(validation_violation_reasons[item] for item in restart_violations)
     except (ValueError, CalendarCoverageError):
         blockers.append("recovery_restart_dates_invalid")
         restart_data = restart_trade = None
@@ -561,6 +665,11 @@ def validate_recovery_evidence(
     blockers.extend(f"recovery_{item}" for item in ledger_blockers)
     if conflicts:
         blockers.append("recovery_execution_contradiction")
+        if (
+            restart_data is not None
+            and restart_data.isoformat() == source_state.frozen_context.trade_date
+        ):
+            blockers.append("recovery_source_trade_date_execution_present")
     target_status, target_blockers = _target_state_status(
         workspace_path,
         source_state.frozen_context.account_id,
@@ -580,6 +689,32 @@ def validate_recovery_evidence(
     }
 
 
+def _current_recovery_authorizations(
+    workspace: Path,
+    records: list[Any],
+    calendar: MarketCalendar,
+) -> tuple[list[tuple[Any, dict[str, Any]]], list[str]]:
+    current: list[tuple[Any, dict[str, Any]]] = []
+    blockers: list[str] = []
+    for record in records:
+        validation = validate_recovery_evidence(
+            workspace,
+            record.path,
+            record.state,
+            calendar,
+        )
+        if not validation["valid"]:
+            blockers.extend(
+                [
+                    f"recovery_source:{record.state.runbook_day_id}",
+                    *validation["blockers"],
+                ]
+            )
+        elif not validation["consumed"]:
+            current.append((record, validation))
+    return current, blockers
+
+
 def recovery_status(
     workspace: str | Path,
     *,
@@ -589,14 +724,18 @@ def recovery_status(
 ) -> dict[str, Any]:
     workspace_path = Path(workspace).resolve(strict=False)
     source, _, _, blockers = _load_recovery_context(
-        workspace_path, account_id, source_runbook_day_id
+        workspace_path, account_id, source_runbook_day_id, calendar
     )
     if source is None:
         return _blocked("source_runbook_not_found", blockers or None, mode="RECOVERY_STATUS")
     validation = validate_recovery_evidence(
         workspace_path, source.path, source.state, calendar
     )
-    classification = DISPOSITION if validation["valid"] else _raw_classification(workspace_path, source)
+    classification = (
+        DISPOSITION
+        if validation["valid"]
+        else _raw_classification(workspace_path, source, calendar)
+    )
     payload = validation.get("payload") or {}
     return {
         "runner_result": "PASS" if not validation["exists"] or validation["valid"] else "BLOCKED",
@@ -647,52 +786,54 @@ def assert_initialization_allowed(
         for record in active
         if not runbook_retirement.assess_zero_progress(workspace_path, record.path, record.state)["eligible"]
     ]
-    recovery_items = [
-        (record, item)
+    recovery_records = [
+        record
         for record, item in classified
         if item["classification"] == DISPOSITION
     ]
     requested_id = runbook_state.get_runbook_day_id(account_id, data_date, trade_date)
     if progressed_active:
         raise ValueError("active_runbook_day_exists")
-    if not recovery_items:
+    if not recovery_records:
         return
-    if len(recovery_items) != 1:
-        raise ValueError("multiple_recovery_authorizations")
-    source = recovery_items[0][0]
-    validation = validate_recovery_evidence(
-        workspace_path, source.path, source.state, calendar
+    current_recoveries, recovery_blockers = _current_recovery_authorizations(
+        workspace_path,
+        recovery_records,
+        calendar,
     )
-    if not validation["valid"]:
+    if recovery_blockers:
         raise ValueError("recovery_authorization_invalid")
-    if validation["consumed"]:
-        if active:
-            raise ValueError("active_runbook_day_exists")
-        rollover = runbook_day_rollover.preview_rollover(
-            workspace_path,
-            account_id,
-            calendar,
-            confirm_paper_test=True,
-        )
-        if (
-            rollover.get("runner_result") != "PASS"
-            or rollover.get("rollover_mode") == "RECOVERY"
-        ):
-            raise ValueError("recovery_authorization_already_consumed")
-        requested_context = {
-            "account_id": account_id,
-            "data_date": data_date,
-            "trade_date": trade_date,
-            "runbook_day_id": requested_id,
-        }
-        normal_next_context = {
-            "account_id": rollover.get("account_id"),
-            "data_date": rollover.get("next_data_date"),
-            "trade_date": rollover.get("next_trade_date"),
-            "runbook_day_id": rollover.get("next_runbook_day_id"),
-        }
-        if requested_context != normal_next_context:
+    if len(current_recoveries) > 1:
+        raise ValueError("multiple_recovery_authorizations")
+    if current_recoveries:
+        validation = current_recoveries[0][1]
+        if validation["payload"]["restart"]["runbook_day_id"] != requested_id:
             raise ValueError("recovery_target_mismatch")
         return
-    if validation["payload"]["restart"]["runbook_day_id"] != requested_id:
+    if active:
+        raise ValueError("active_runbook_day_exists")
+    rollover = runbook_day_rollover.preview_rollover(
+        workspace_path,
+        account_id,
+        calendar,
+        confirm_paper_test=True,
+    )
+    if (
+        rollover.get("runner_result") != "PASS"
+        or rollover.get("rollover_mode") == "RECOVERY"
+    ):
+        raise ValueError("recovery_authorization_already_consumed")
+    requested_context = {
+        "account_id": account_id,
+        "data_date": data_date,
+        "trade_date": trade_date,
+        "runbook_day_id": requested_id,
+    }
+    normal_next_context = {
+        "account_id": rollover.get("account_id"),
+        "data_date": rollover.get("next_data_date"),
+        "trade_date": rollover.get("next_trade_date"),
+        "runbook_day_id": rollover.get("next_runbook_day_id"),
+    }
+    if requested_context != normal_next_context:
         raise ValueError("recovery_target_mismatch")

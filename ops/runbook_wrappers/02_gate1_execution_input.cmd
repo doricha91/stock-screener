@@ -30,7 +30,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-"%PYTHON_EXE%" scripts\runbook_gate_checker.py gate1 ^
+"%PYTHON_EXE%" scripts\runbook_gate_checker.py gate1-execution-input ^
   --workspace "%WORKSPACE%" ^
   --account-id "%ACCOUNT_ID%" ^
   --data-date "%DATA_DATE%" ^

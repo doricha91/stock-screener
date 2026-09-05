@@ -208,6 +208,265 @@ def test_new_v2_gate1_waits_until_execution_input_is_finalized(tmp_path: Path) -
     assert all("execution_input_not_finalized" in row["missing"] for row in payload["rows"])
 
 
+def test_integrated_gate1_finalizes_v2_execution_then_passes(tmp_path: Path) -> None:
+    state = runbook_state.complete_stage(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        "A",
+    )
+    state_path = _save_state(tmp_path, state)
+
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: _ready_rows(),
+    )
+
+    loaded = runbook_state.load_state(state_path)
+    assert result["runner_result"] == "PASS"
+    assert loaded.execution_contract["input_finalized"] is True
+    assert loaded.execution_contract["finalized_at"] is not None
+    finalized_events = [
+        event for event in loaded.history if event["event_type"] == "execution_input_finalized"
+    ]
+    assert len(finalized_events) == 1
+    assert finalized_events[0]["created_at"] == loaded.execution_contract["finalized_at"]
+
+
+def test_integrated_gate1_rerun_does_not_repeat_finalize(tmp_path: Path) -> None:
+    state = runbook_state.complete_stage(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        "A",
+    )
+    state_path = _save_state(tmp_path, state)
+
+    first = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: _ready_rows()
+    )
+    first_state = runbook_state.load_state(state_path)
+    finalized_at = first_state.execution_contract["finalized_at"]
+    finalized_event_count = sum(
+        event["event_type"] == "execution_input_finalized" for event in first_state.history
+    )
+    second = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: _ready_rows()
+    )
+    second_state = runbook_state.load_state(state_path)
+
+    assert first["runner_result"] == second["runner_result"] == "PASS"
+    assert second_state.execution_contract["finalized_at"] == finalized_at
+    assert sum(
+        event["event_type"] == "execution_input_finalized" for event in second_state.history
+    ) == finalized_event_count
+
+
+def test_integrated_gate1_preserves_finalize_across_wait_then_pass(tmp_path: Path) -> None:
+    state = runbook_state.complete_stage(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        "A",
+    )
+    state_path = _save_state(tmp_path, state)
+
+    waiting = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: []
+    )
+    waiting_state = runbook_state.load_state(state_path)
+    finalized_at = waiting_state.execution_contract["finalized_at"]
+    passed = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: _ready_rows()
+    )
+    passed_state = runbook_state.load_state(state_path)
+
+    assert waiting["runner_result"] == "WAIT"
+    assert passed["runner_result"] == "PASS"
+    assert passed_state.execution_contract["finalized_at"] == finalized_at
+    assert sum(
+        event["event_type"] == "execution_input_finalized" for event in passed_state.history
+    ) == 1
+
+
+def test_integrated_gate1_preconditions_do_not_finalize_or_query(tmp_path: Path) -> None:
+    state_path = _save_state(
+        tmp_path,
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+    )
+    query_called = False
+
+    def fetch_rows(state: runbook_state.RunbookState) -> list[dict[str, object]]:
+        nonlocal query_called
+        query_called = True
+        return _ready_rows()
+
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=fetch_rows
+    )
+    loaded = runbook_state.load_state(state_path)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert loaded.execution_contract["input_finalized"] is False
+    assert query_called is False
+
+
+def test_integrated_gate1_missing_or_mismatched_state_does_not_query(tmp_path: Path) -> None:
+    query_calls = 0
+
+    def fetch_rows(state: runbook_state.RunbookState) -> list[dict[str, object]]:
+        nonlocal query_calls
+        query_calls += 1
+        return _ready_rows()
+
+    missing = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=fetch_rows
+    )
+    mismatched_state = runbook_state.create_initial_state("other_account", DATA_DATE, TRADE_DATE)
+    state_path = runbook_state.get_state_path_for_context(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE
+    )
+    runbook_state.save_state(mismatched_state, state_path)
+    mismatched = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=fetch_rows
+    )
+    loaded = runbook_state.load_state(state_path)
+
+    assert missing["runner_result"] == "BLOCKED"
+    assert mismatched["runner_result"] == "BLOCKED"
+    assert loaded.execution_contract["input_finalized"] is False
+    assert query_calls == 0
+
+
+def test_integrated_gate1_no_action_skips_finalize_and_keeps_gate_contract(tmp_path: Path) -> None:
+    state_path = _save_no_action_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = replace(
+        state,
+        execution_contract={
+            "version": runbook_state.EXECUTION_CONTRACT_V2,
+            "input_finalized": False,
+            "finalized_at": None,
+        },
+    )
+    runbook_state.save_state(state, state_path)
+
+    passed = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: []
+    )
+    passed_state = runbook_state.load_state(state_path)
+
+    assert passed["runner_result"] == "PASS"
+    assert passed["action_mode"] == "NO_ACTION"
+    assert passed_state.execution_contract["input_finalized"] is False
+
+
+def test_integrated_gate1_no_action_blocks_unexpected_rows_without_finalize(tmp_path: Path) -> None:
+    state_path = _save_no_action_state(tmp_path)
+    state = runbook_state.load_state(state_path)
+    state = replace(
+        state,
+        execution_contract={
+            "version": runbook_state.EXECUTION_CONTRACT_V2,
+            "input_finalized": False,
+            "finalized_at": None,
+        },
+    )
+    runbook_state.save_state(state, state_path)
+
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: [_row("AAPL", "BUY", 1, 100.0)],
+    )
+    loaded = runbook_state.load_state(state_path)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert loaded.execution_contract["input_finalized"] is False
+
+
+def test_integrated_gate1_legacy_v1_skips_finalize_and_preserves_price_rule(
+    tmp_path: Path,
+) -> None:
+    state_path = _save_state(tmp_path, _stage_a_pass_state())
+
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: _ready_rows()
+    )
+    loaded = runbook_state.load_state(state_path)
+
+    assert result["runner_result"] == "PASS"
+    assert loaded.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V1
+    assert loaded.execution_contract["input_finalized"] is False
+
+    rows = _ready_rows()
+    rows[0]["actual_price"] = None
+    waiting = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: rows
+    )
+
+    assert waiting["runner_result"] == "WAIT"
+
+
+def test_integrated_gate1_finalize_failure_does_not_query(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state = runbook_state.complete_stage(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        "A",
+    )
+    state_path = _save_state(tmp_path, state)
+    query_called = False
+
+    def fail_finalize(state: runbook_state.RunbookState) -> runbook_state.RunbookState:
+        raise ValueError("finalize failed")
+
+    def fetch_rows(state: runbook_state.RunbookState) -> list[dict[str, object]]:
+        nonlocal query_called
+        query_called = True
+        return _ready_rows()
+
+    monkeypatch.setattr(runbook_state, "finalize_execution_input", fail_finalize)
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=fetch_rows
+    )
+    loaded = runbook_state.load_state(state_path)
+
+    assert result["runner_result"] == "BLOCKED"
+    assert "Finalize failed" in result["message"]
+    assert loaded.execution_contract["input_finalized"] is False
+    assert loaded.last_error["reason"] == "execution_input_finalize_failed"
+    assert query_called is False
+
+
+def test_integrated_gate1_query_failure_keeps_single_finalize_for_retry(tmp_path: Path) -> None:
+    state = runbook_state.complete_stage(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        "A",
+    )
+    state_path = _save_state(tmp_path, state)
+
+    def fail_query(state: runbook_state.RunbookState) -> list[dict[str, object]]:
+        raise RuntimeError("query unavailable")
+
+    blocked = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=fail_query
+    )
+    blocked_state = runbook_state.load_state(state_path)
+    finalized_at = blocked_state.execution_contract["finalized_at"]
+    passed = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, row_fetcher=lambda state: _ready_rows()
+    )
+    passed_state = runbook_state.load_state(state_path)
+
+    assert blocked["runner_result"] == "BLOCKED"
+    assert passed["runner_result"] == "PASS"
+    assert passed_state.execution_contract["finalized_at"] == finalized_at
+    assert sum(
+        event["event_type"] == "execution_input_finalized" for event in passed_state.history
+    ) == 1
+
+
 def test_gate1_waits_when_actual_price_missing(tmp_path: Path) -> None:
     state = _stage_a_pass_state()
     _save_state(tmp_path, state)
@@ -523,6 +782,40 @@ def test_gate1_cli_outputs_wait_json(tmp_path: Path, monkeypatch) -> None:
     )
 
     assert result["runner_result"] == "WAIT"
+
+
+def test_integrated_gate1_cli_prints_only_final_gate_result(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    expected = {
+        "runner_result": "WAIT",
+        "gate_id": "GATE1",
+        "message": "Fill Actual Price and set Status=READY in Notion.",
+    }
+    monkeypatch.setattr(
+        runbook_gate_checker,
+        "check_gate1_execution_input",
+        lambda **kwargs: expected,
+    )
+
+    exit_code = runbook_gate_checker.main(
+        [
+            "gate1-execution-input",
+            "--workspace",
+            str(tmp_path),
+            "--account-id",
+            ACCOUNT_ID,
+            "--data-date",
+            DATA_DATE,
+            "--trade-date",
+            TRADE_DATE,
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == expected
 
 
 def test_gate1_cli_smoke_with_missing_state_returns_blocked(tmp_path: Path) -> None:
