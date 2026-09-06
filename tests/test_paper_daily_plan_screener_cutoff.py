@@ -8,6 +8,7 @@ import pytest
 import core.daily_plan_generator as daily_plan_generator
 import scripts.run_paper_daily_plan as run_paper_daily_plan
 from core.target_portfolio_state import CurrentPortfolioState, RebalanceDecision, TargetPortfolioState
+from tests.paper_account_test_support import create_initialized_account_paths
 
 
 @pytest.fixture
@@ -40,7 +41,14 @@ def _empty_state() -> CurrentPortfolioState:
 def test_run_paper_daily_plan_passes_normalized_date_to_screener(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     captured: dict = {}
 
-    monkeypatch.setattr(run_paper_daily_plan, "load_official_paper_state_for_daily_plan", lambda date_str: _empty_state())
+    account_paths = create_initialized_account_paths(
+        tmp_path / "paper_growth", account_id="paper_growth"
+    )
+    monkeypatch.setattr(
+        run_paper_daily_plan,
+        "load_official_paper_state_for_daily_plan",
+        lambda date_str, **kwargs: _empty_state(),
+    )
 
     def _fake_generate_daily_plan(**kwargs):
         captured.update(kwargs)
@@ -48,7 +56,7 @@ def test_run_paper_daily_plan_passes_normalized_date_to_screener(monkeypatch: py
 
     monkeypatch.setattr(run_paper_daily_plan, "generate_daily_plan", _fake_generate_daily_plan)
 
-    run_paper_daily_plan.run_paper_daily_plan("20260512")
+    run_paper_daily_plan.run_paper_daily_plan("20260512", account_paths=account_paths)
 
     assert captured["date_str"] == "2026-05-12"
 

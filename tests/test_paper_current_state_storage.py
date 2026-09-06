@@ -9,6 +9,7 @@ from core.paper_account_state import build_paper_state_from_trades
 from core.paths import FRONT_TEST_DIR, PAPER_TEST_DIR
 from core.portfolio_state_manager import load_current_state
 from core.paper_current_state_storage import save_paper_current_state
+from tests.paper_account_test_support import create_initialized_account_paths
 
 
 def _unique_state_path() -> Path:
@@ -46,9 +47,10 @@ def _cleanup(path: Path, archive_dir: Path) -> None:
         archive_dir.rmdir()
 
 
-def test_save_paper_current_state_creates_json_with_required_fields():
-    output_path = _unique_state_path()
-    archive_dir = _unique_archive_dir()
+def test_save_paper_current_state_creates_json_with_required_fields(tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    output_path = account_paths.current_state_snapshot_path("20260509")
+    archive_dir = account_paths.root / "archive"
     try:
         state = build_paper_state_from_trades(
             [_make_trade("t1", "CPAY", "BUY", 29, 343.99)],
@@ -61,6 +63,7 @@ def test_save_paper_current_state_creates_json_with_required_fields():
             output_path,
             archive_dir,
             now=datetime(2026, 5, 10, 11, 0, 0),
+            account_paths=account_paths,
         )
         assert output_path.exists()
         assert result["backup_path"] is None
@@ -83,9 +86,10 @@ def test_save_paper_current_state_creates_json_with_required_fields():
         _cleanup(output_path, archive_dir)
 
 
-def test_paper_current_state_marks_configured_hedge_as_excluded_symbol():
-    output_path = _unique_state_path()
-    archive_dir = _unique_archive_dir()
+def test_paper_current_state_marks_configured_hedge_as_excluded_symbol(tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    output_path = account_paths.current_state_snapshot_path("20260509")
+    archive_dir = account_paths.root / "archive"
     try:
         state = build_paper_state_from_trades(
             [
@@ -95,16 +99,23 @@ def test_paper_current_state_marks_configured_hedge_as_excluded_symbol():
             initial_cash=100000.0,
             currency="USD",
         )
-        payload = save_paper_current_state(state, "20260509", output_path, archive_dir)["payload"]
+        payload = save_paper_current_state(
+            state,
+            "20260509",
+            output_path,
+            archive_dir,
+            account_paths=account_paths,
+        )["payload"]
         assert payload["hedge_symbols"] == ["SQQQ"]
         assert payload["current_hedge_ratio"] > 0
     finally:
         _cleanup(output_path, archive_dir)
 
 
-def test_save_paper_current_state_backs_up_existing_file_before_overwrite():
-    output_path = _unique_state_path()
-    archive_dir = _unique_archive_dir()
+def test_save_paper_current_state_backs_up_existing_file_before_overwrite(tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    output_path = account_paths.current_state_snapshot_path("20260509")
+    archive_dir = account_paths.root / "archive"
     try:
         output_path.write_text('{"old": true}', encoding="utf-8")
         state = build_paper_state_from_trades(
@@ -118,6 +129,7 @@ def test_save_paper_current_state_backs_up_existing_file_before_overwrite():
             output_path,
             archive_dir,
             now=datetime(2026, 5, 10, 11, 0, 0),
+            account_paths=account_paths,
         )
         assert result["backup_path"] is not None
         assert result["backup_path"].exists()
@@ -128,7 +140,8 @@ def test_save_paper_current_state_backs_up_existing_file_before_overwrite():
         _cleanup(output_path, archive_dir)
 
 
-def test_save_paper_current_state_rejects_non_paper_path():
+def test_save_paper_current_state_rejects_non_paper_path(tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
     output_path = FRONT_TEST_DIR / f"paper_current_state_test_{uuid4().hex}.json"
     archive_dir = _unique_archive_dir()
     try:
@@ -138,7 +151,13 @@ def test_save_paper_current_state_rejects_non_paper_path():
             currency="USD",
         )
         with pytest.raises(ValueError):
-            save_paper_current_state(state, "20260509", output_path, archive_dir)
+            save_paper_current_state(
+                state,
+                "20260509",
+                output_path,
+                archive_dir,
+                account_paths=account_paths,
+            )
     finally:
         if archive_dir.exists():
             for child in archive_dir.iterdir():
@@ -146,9 +165,10 @@ def test_save_paper_current_state_rejects_non_paper_path():
             archive_dir.rmdir()
 
 
-def test_saved_json_round_trips_through_existing_loader(monkeypatch):
-    output_path = _unique_state_path()
-    archive_dir = _unique_archive_dir()
+def test_saved_json_round_trips_through_existing_loader(monkeypatch, tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    output_path = account_paths.current_state_snapshot_path("20260509")
+    archive_dir = account_paths.root / "archive"
     try:
         state = build_paper_state_from_trades(
             [
@@ -164,6 +184,7 @@ def test_saved_json_round_trips_through_existing_loader(monkeypatch):
             output_path,
             archive_dir,
             now=datetime(2026, 5, 10, 11, 0, 0),
+            account_paths=account_paths,
         )
         payload = result["payload"]
         assert payload["applied_trade_ids"] == ["t1", "t2"]

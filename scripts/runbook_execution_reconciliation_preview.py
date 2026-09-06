@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.execution_outcome_flow import derive_execution_preview
+from core.paper_account_guard import require_initialized_writer_account_paths
 from core.paper_account_paths import build_paper_account_paths
 from scripts import runbook_state
 from scripts.runbook_gate_checker import query_manual_execution_rows
@@ -102,7 +103,10 @@ def write_account_preview(
     *,
     account_root: Path | None = None,
 ) -> dict[str, Path]:
-    account_paths = build_paper_account_paths(account_id, account_root=account_root, create=True)
+    account_paths = build_paper_account_paths(account_id, account_root=account_root, create=False)
+    require_initialized_writer_account_paths(
+        account_paths, command_name="runbook_execution_reconciliation_preview"
+    )
     output_dir = account_paths.root / "reconciliation"
     output_dir.mkdir(parents=True, exist_ok=True)
     compact_date = trade_date.replace("-", "")

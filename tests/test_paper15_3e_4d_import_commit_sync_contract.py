@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,6 +21,8 @@ import core.paper_manual_review_log_validator as paper_manual_review_log_validat
 import core.paper_manual_review_append_commit as review_commit_module
 import core.paper_position_snapshot as paper_position_snapshot_module
 from core.paper_account_paths import build_paper_account_paths
+from tests.paper_account_test_support import ensure_initialized_account_paths
+from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
 from core.notion_manual_execution_importer import build_manual_execution_preview
 from core.notion_manual_execution_status_sync import (
     build_manual_execution_status_properties,
@@ -41,6 +44,7 @@ from core.paper_manual_review_append_commit import (
     commit_manual_review_preview,
 )
 from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
+from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
 from core.paths import OUTPUTS, PAPER_TEST_DIR
 
 
@@ -225,14 +229,25 @@ def _seed_execution_ledgers(root: Path) -> None:
     account_path = root / "paper_account_snapshot.csv"
     position_path = root / "paper_position_snapshot.csv"
     execution_path = root / "paper_execution_log.csv"
-    _write_csv(
-        account_path,
-        ["snapshot_date", "currency", "initial_cash", "cash"],
-        [{"snapshot_date": "2026-05-24", "currency": "USD", "initial_cash": "1000.00", "cash": "1000.00"}],
+    account_columns = [column for column in PAPER_ACCOUNT_SNAPSHOT_COLUMNS if column != "account_id"]
+    account_row = {column: "" for column in account_columns}
+    account_row.update(
+        snapshot_date="2026-05-24",
+        currency="USD",
+        initial_cash="1000.00",
+        cash="1000.00",
+        positions_cost_value="0.00",
+        total_equity_cost_basis="1000.00",
+        cash_ratio_cost_basis="1.0000000",
+        position_count="0",
+        applied_trade_count="0",
+        valuation_method="cost_basis",
+        realized_pnl="0.00",
     )
+    _write_csv(account_path, account_columns, [account_row])
     _write_csv(
         position_path,
-        ["snapshot_date", "symbol", "shares"],
+        [column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "account_id"],
         [],
     )
     _write_csv(execution_path, PAPER_EXECUTION_LOG_COLUMNS, [])
@@ -365,23 +380,22 @@ def execution_contract_env(monkeypatch, tmp_path: Path):
     reports_dir.mkdir(parents=True, exist_ok=True)
     backups_dir.mkdir(parents=True, exist_ok=True)
     _seed_execution_ledgers(root)
+    ensure_initialized_account_paths(root, account_id="paper_default", date_str="2026-05-24")
 
     monkeypatch.setattr(execution_importer, "paper_account_snapshot_path", lambda: root / "paper_account_snapshot.csv")
     monkeypatch.setattr(execution_importer, "paper_position_snapshot_path", lambda: root / "paper_position_snapshot.csv")
     monkeypatch.setattr(execution_importer, "paper_reports_dir", lambda: reports_dir)
 
-    monkeypatch.setattr(execution_commit_module, "paper_execution_log_path", lambda: root / "paper_execution_log.csv")
-    monkeypatch.setattr(execution_commit_module, "paper_account_snapshot_path", lambda: root / "paper_account_snapshot.csv")
-    monkeypatch.setattr(execution_commit_module, "paper_position_snapshot_path", lambda: root / "paper_position_snapshot.csv")
-    monkeypatch.setattr(execution_commit_module, "paper_current_state_snapshot_path", lambda date: current_state_path)
-    monkeypatch.setattr(execution_commit_module, "paper_reports_dir", lambda: reports_dir)
-    monkeypatch.setattr(execution_commit_module, "dev_backups_dir", lambda: backups_dir)
     monkeypatch.setattr(execution_commit_module, "market_db_path", lambda: str(root / "unused_market.db"))
     monkeypatch.setattr(execution_commit_module, "value_paper_account_state", _fake_valuation)
-    monkeypatch.setattr(paper_execution_log_module, "assert_paper_path", lambda path, paper_root: None)
-    monkeypatch.setattr(paper_current_state_storage_module, "assert_paper_path", lambda path, paper_root: None)
-    monkeypatch.setattr(paper_account_snapshot_module, "assert_paper_path", lambda path, paper_root: None)
-    monkeypatch.setattr(paper_position_snapshot_module, "assert_paper_path", lambda path, paper_root: None)
+    account_paths = build_paper_account_paths("paper_default", account_root=root, create=False)
+    real_commit = commit_manual_execution_preview
+
+    def _commit_with_account_context(**kwargs):
+        kwargs.setdefault("account_paths", account_paths)
+        return real_commit(**kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "commit_manual_execution_preview", _commit_with_account_context)
     yield root
     if root.exists():
         shutil.rmtree(root, ignore_errors=True)
@@ -396,15 +410,24 @@ def review_contract_env(monkeypatch, tmp_path: Path):
     reports_dir.mkdir(parents=True, exist_ok=True)
     backups_dir.mkdir(parents=True, exist_ok=True)
     _seed_review_files(root)
+    ensure_initialized_account_paths(root, account_id="paper_default", date_str="2026-05-24")
 
     monkeypatch.setattr(review_importer, "paper_reviews_dir", lambda: root)
     monkeypatch.setattr(review_importer, "paper_reports_dir", lambda: reports_dir)
-    monkeypatch.setattr(review_commit_module, "paper_reviews_dir", lambda: root)
-    monkeypatch.setattr(review_commit_module, "paper_reports_dir", lambda: reports_dir)
-    monkeypatch.setattr(review_commit_module, "dev_backups_dir", lambda: backups_dir)
     monkeypatch.setattr(paper_manual_review_log_append_module, "assert_paper_path", lambda path, paper_root: None)
     monkeypatch.setattr(paper_manual_review_log_template_module, "assert_paper_path", lambda path, paper_root: None)
     monkeypatch.setattr(paper_manual_review_log_validator_module, "assert_paper_path", lambda path, paper_root: None)
+    account_paths = build_paper_account_paths("paper_default", account_root=root, create=False)
+    real_commit = commit_manual_review_preview
+
+    def _commit_with_account_context(**kwargs):
+        kwargs.setdefault("account_paths", account_paths)
+        kwargs.setdefault("review_log_path", root / "paper_manual_review_log.csv")
+        kwargs.setdefault("template_path", root / "paper_manual_review_log_template.csv")
+        kwargs.setdefault("reports_dir", reports_dir)
+        return real_commit(**kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "commit_manual_review_preview", _commit_with_account_context)
     yield root
     if root.exists():
         shutil.rmtree(root, ignore_errors=True)
@@ -534,6 +557,11 @@ def test_non_default_execution_contract_keeps_account_namespace_and_syncs_from_a
         allow_legacy_default=False,
         create=True,
     )
+    ensure_initialized_account_paths(
+        execution_contract_env,
+        account_id="paper_growth",
+        date_str="2026-05-24",
+    )
     commit_result = commit_manual_execution_preview(
         execution_date="2026-05-25",
         preview_json_path=Path(preview.json_path),
@@ -614,6 +642,11 @@ def test_non_default_review_contract_keeps_account_namespace_and_syncs_from_acco
         account_root=review_contract_env,
         allow_legacy_default=False,
         create=True,
+    )
+    ensure_initialized_account_paths(
+        review_contract_env,
+        account_id="paper_growth",
+        date_str="2026-05-24",
     )
     append_result = commit_manual_review_preview(
         review_date="2026-05-25",

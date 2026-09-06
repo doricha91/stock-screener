@@ -10,12 +10,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
-from core.paper_safety import assert_paper_path
-from core.paths import PAPER_TEST_DIR, paper_execution_log_path
+from core.paper_account_guard import assert_account_writer_target, require_initialized_writer_account_paths
+from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
 
 
-def build_paper_archive_dir() -> Path:
-    return PAPER_TEST_DIR / "archive"
+def build_paper_archive_dir(account_paths: PaperAccountPaths) -> Path:
+    return account_paths.root / "archive"
 
 
 def build_backup_target(log_path: Path, archive_dir: Path, now: datetime | None = None) -> Path:
@@ -34,15 +34,26 @@ def reset_paper_execution_log(
     archive_dir: Path | None = None,
     commit: bool = False,
     now: datetime | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, object]:
-    target_log_path = log_path or paper_execution_log_path()
-    target_archive_dir = archive_dir or build_paper_archive_dir()
+    require_initialized_writer_account_paths(
+        account_paths,
+        command_name="reset_paper_execution_log",
+    )
+    target_log_path = log_path or account_paths.execution_log_path
+    target_archive_dir = archive_dir or build_paper_archive_dir(account_paths)
 
-    assert_paper_path(target_log_path, PAPER_TEST_DIR)
-    assert_paper_path(target_archive_dir, PAPER_TEST_DIR)
+    assert_account_writer_target(
+        target_log_path, account_paths=account_paths, command_name="reset_paper_execution_log"
+    )
+    assert_account_writer_target(
+        target_archive_dir, account_paths=account_paths, command_name="reset_paper_execution_log"
+    )
 
     backup_target = build_backup_target(target_log_path, target_archive_dir, now=now)
-    assert_paper_path(backup_target, PAPER_TEST_DIR)
+    assert_account_writer_target(
+        backup_target, account_paths=account_paths, command_name="reset_paper_execution_log"
+    )
 
     log_exists = target_log_path.exists()
     backup_created = False
@@ -66,6 +77,7 @@ def reset_paper_execution_log(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reset paper execution log with backup")
+    parser.add_argument("--account-id", required=True, help="Initialized paper account id")
     parser.add_argument(
         "--commit",
         action="store_true",
@@ -73,7 +85,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    result = reset_paper_execution_log(commit=args.commit)
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        result = reset_paper_execution_log(commit=args.commit, account_paths=account_paths)
+    except ValueError as exc:
+        print(f"Paper execution log reset aborted: {exc}")
+        return 1
 
     print(f"{'COMMIT' if args.commit else 'DRY-RUN'}: paper_execution_log reset preview")
     print(f"current log: {result['log_path']}")

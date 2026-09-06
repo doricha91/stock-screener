@@ -3,10 +3,9 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 
-from core.paper_account_guard import assert_path_under_account_root
-from core.paper_safety import assert_paper_path
+from core.paper_account_guard import assert_account_writer_target
+from core.paper_account_paths import PaperAccountPaths
 from core.paper_trade_preview import PaperTradePreview
-from core.paths import PAPER_TEST_DIR
 
 
 PAPER_EXECUTION_LOG_COLUMNS = [
@@ -69,12 +68,11 @@ def append_paper_execution_log(
     previews: list[PaperTradePreview],
     log_path: Path,
     commit: bool = False,
-    allowed_root: Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> tuple[list[dict], list[str]]:
-    if allowed_root is None:
-        assert_paper_path(log_path, PAPER_TEST_DIR)
-    else:
-        assert_path_under_account_root(log_path, allowed_root)
+    assert_account_writer_target(
+        log_path, account_paths=account_paths, command_name="append_paper_execution_log"
+    )
 
     warnings: list[str] = []
     rows_to_append: list[dict] = []

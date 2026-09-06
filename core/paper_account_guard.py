@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from core.paper_account_paths import build_paper_account_paths
+from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
 from core.paper_account_profile import validate_account_id
 from core.paths import PAPER_TEST_DIR
 
@@ -76,6 +76,93 @@ def assert_path_under_account_root(path: str | Path, account_root: str | Path) -
     except ValueError as exc:
         raise ValueError(f"Path must stay under account root: {candidate} not under {root}") from exc
     return candidate
+
+
+def require_initialized_writer_account_paths(
+    account_paths: PaperAccountPaths | None,
+    *,
+    command_name: str,
+) -> PaperAccountPaths:
+    """Require an explicit, initialized, non-legacy account write context."""
+    if account_paths is None:
+        raise ValueError(
+            f"{command_name} requires explicit account_paths; pass an account_id or "
+            "use the frozen runbook account context."
+        )
+    validate_account_id(account_paths.account_id)
+    root = account_paths.root.resolve(strict=False)
+    if bool(getattr(account_paths, "legacy_default_used", False)) or root == PAPER_TEST_DIR.resolve(strict=False):
+        raise ValueError(
+            f"{command_name} cannot write to legacy outputs/paper_test; "
+            "initialize and use outputs/paper_accounts/<account_id>."
+        )
+    if not root.is_dir():
+        if account_paths.account_id == "paper_default":
+            raise ValueError(
+                f"{command_name} requires an initialized canonical paper_default root: {root}. "
+                "init-account does not support paper_default; migration or separately approved "
+                "initialization is required."
+            )
+        raise ValueError(
+            f"{command_name} requires an initialized account root: {root}. "
+            "Run `python scripts/paper.py init-account --account-id "
+            f"{account_paths.account_id} --confirm-create` first."
+        )
+    missing_artifacts = _missing_bootstrap_core_artifacts(account_paths)
+    if missing_artifacts:
+        missing = ", ".join(missing_artifacts)
+        if account_paths.account_id == "paper_default":
+            raise ValueError(
+                f"{command_name} requires an initialized canonical paper_default root: {root}; "
+                f"missing bootstrap core artifacts: {missing}. init-account does not support "
+                "paper_default; migration or separately approved initialization is required."
+            )
+        raise ValueError(
+            f"{command_name} requires an initialized account root: {root}; "
+            f"missing bootstrap core artifacts: {missing}. Run `python scripts/paper.py "
+            f"init-account --account-id {account_paths.account_id} --confirm-create` first."
+        )
+    return account_paths
+
+
+def _missing_bootstrap_core_artifacts(account_paths: PaperAccountPaths) -> list[str]:
+    missing = [
+        path.name
+        for path in (
+            account_paths.account_snapshot_path,
+            account_paths.position_snapshot_path,
+            account_paths.execution_log_path,
+        )
+        if not path.is_file()
+    ]
+    current_states = [
+        path
+        for path in account_paths.root.glob("paper_current_state_*.json")
+        if path.is_file()
+        and len(path.stem.removeprefix("paper_current_state_")) == 8
+        and path.stem.removeprefix("paper_current_state_").isdigit()
+    ]
+    if not current_states:
+        missing.append("paper_current_state_<date>.json")
+    return missing
+
+
+def assert_account_writer_target(
+    path: str | Path,
+    *,
+    account_paths: PaperAccountPaths | None,
+    command_name: str,
+) -> Path:
+    context = require_initialized_writer_account_paths(
+        account_paths,
+        command_name=command_name,
+    )
+    candidate = assert_path_under_account_root(path, context.root)
+    try:
+        candidate.relative_to(PAPER_TEST_DIR.resolve(strict=False))
+    except ValueError:
+        return candidate
+    raise ValueError(f"{command_name} cannot write to legacy outputs/paper_test: {candidate}")
 
 
 def assert_non_default_writer_target(

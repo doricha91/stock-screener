@@ -14,6 +14,7 @@ from core.notion_manual_execution_status_sync import (
     summarize_validation_issues,
     sync_manual_execution_status,
 )
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _mapping_root() -> dict[str, dict[str, str]]:
@@ -290,10 +291,16 @@ def test_cli_account_id_mismatch_fails(monkeypatch, tmp_path, capsys):
 
 
 def test_status_sync_report_writer_creates_json_and_markdown(monkeypatch, tmp_path):
-    class FakeAccountPaths:
-        reports_dir = tmp_path / "reports"
-
-    monkeypatch.setattr(execution_sync_script, "build_paper_account_paths", lambda account_id, create=True: FakeAccountPaths())
+    account_paths = ensure_initialized_account_paths(
+        tmp_path,
+        account_id="paper_growth",
+        date_str="2026-05-24",
+    )
+    monkeypatch.setattr(
+        execution_sync_script,
+        "build_paper_account_paths",
+        lambda account_id, create=False: account_paths,
+    )
     payload = {
         "account_id": "paper_growth",
         "execution_date": "2026-05-25",

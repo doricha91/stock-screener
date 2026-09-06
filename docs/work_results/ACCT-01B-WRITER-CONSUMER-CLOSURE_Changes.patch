@@ -1,0 +1,4194 @@
+diff --git a/core/notion_manual_execution_importer.py b/core/notion_manual_execution_importer.py
+index 95647dc2d2540f5087bcafaad767dda1ae8a4867..6c3d06f5e84701977ad1ab7a39d56bdf0bf539c6 100644
+--- a/core/notion_manual_execution_importer.py
++++ b/core/notion_manual_execution_importer.py
+@@ -552,7 +552,7 @@ def _resolve_preview_reports_dir(
+     account_paths: PaperAccountPaths | None = None,
+     reports_dir: Path | None = None,
+ ) -> Path:
+-    if account_paths is not None and account_paths.account_id != "paper_default":
++    if account_paths is not None:
+         return account_paths.reports_dir
+     return reports_dir if reports_dir is not None else paper_reports_dir()
+ 
+@@ -560,7 +560,7 @@ def _resolve_preview_reports_dir(
+ def _load_existing_trade_ids(*, account_paths: PaperAccountPaths | None = None) -> set[str]:
+     path = (
+         account_paths.execution_log_path
+-        if account_paths is not None and account_paths.account_id != "paper_default"
++        if account_paths is not None
+         else paper_account_snapshot_path().parent / "paper_execution_log.csv"
+     )
+     if not path.exists():
+@@ -576,7 +576,7 @@ def _load_existing_trade_ids(*, account_paths: PaperAccountPaths | None = None)
+ def _load_latest_cash_balance(*, account_paths: PaperAccountPaths | None = None) -> float:
+     path = (
+         account_paths.account_snapshot_path
+-        if account_paths is not None and account_paths.account_id != "paper_default"
++        if account_paths is not None
+         else paper_account_snapshot_path()
+     )
+     rows = _read_csv_rows(path)
+@@ -589,7 +589,7 @@ def _load_latest_cash_balance(*, account_paths: PaperAccountPaths | None = None)
+ def _load_latest_position_shares(*, account_paths: PaperAccountPaths | None = None) -> dict[str, int]:
+     path = (
+         account_paths.position_snapshot_path
+-        if account_paths is not None and account_paths.account_id != "paper_default"
++        if account_paths is not None
+         else paper_position_snapshot_path()
+     )
+     if not path.exists():
+diff --git a/core/paper_account_guard.py b/core/paper_account_guard.py
+index 5b3d9fddcd1e412a67c76ca1917d996d6f48fe3b..4c283ff6790578188928a53bc857096c59dc9581 100644
+--- a/core/paper_account_guard.py
++++ b/core/paper_account_guard.py
+@@ -3,7 +3,7 @@ from __future__ import annotations
+ from pathlib import Path
+ from typing import Any
+ 
+-from core.paper_account_paths import build_paper_account_paths
++from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
+ from core.paper_account_profile import validate_account_id
+ from core.paths import PAPER_TEST_DIR
+ 
+@@ -78,6 +78,93 @@ def assert_path_under_account_root(path: str | Path, account_root: str | Path) -
+     return candidate
+ 
+ 
++def require_initialized_writer_account_paths(
++    account_paths: PaperAccountPaths | None,
++    *,
++    command_name: str,
++) -> PaperAccountPaths:
++    """Require an explicit, initialized, non-legacy account write context."""
++    if account_paths is None:
++        raise ValueError(
++            f"{command_name} requires explicit account_paths; pass an account_id or "
++            "use the frozen runbook account context."
++        )
++    validate_account_id(account_paths.account_id)
++    root = account_paths.root.resolve(strict=False)
++    if bool(getattr(account_paths, "legacy_default_used", False)) or root == PAPER_TEST_DIR.resolve(strict=False):
++        raise ValueError(
++            f"{command_name} cannot write to legacy outputs/paper_test; "
++            "initialize and use outputs/paper_accounts/<account_id>."
++        )
++    if not root.is_dir():
++        if account_paths.account_id == "paper_default":
++            raise ValueError(
++                f"{command_name} requires an initialized canonical paper_default root: {root}. "
++                "init-account does not support paper_default; migration or separately approved "
++                "initialization is required."
++            )
++        raise ValueError(
++            f"{command_name} requires an initialized account root: {root}. "
++            "Run `python scripts/paper.py init-account --account-id "
++            f"{account_paths.account_id} --confirm-create` first."
++        )
++    missing_artifacts = _missing_bootstrap_core_artifacts(account_paths)
++    if missing_artifacts:
++        missing = ", ".join(missing_artifacts)
++        if account_paths.account_id == "paper_default":
++            raise ValueError(
++                f"{command_name} requires an initialized canonical paper_default root: {root}; "
++                f"missing bootstrap core artifacts: {missing}. init-account does not support "
++                "paper_default; migration or separately approved initialization is required."
++            )
++        raise ValueError(
++            f"{command_name} requires an initialized account root: {root}; "
++            f"missing bootstrap core artifacts: {missing}. Run `python scripts/paper.py "
++            f"init-account --account-id {account_paths.account_id} --confirm-create` first."
++        )
++    return account_paths
++
++
++def _missing_bootstrap_core_artifacts(account_paths: PaperAccountPaths) -> list[str]:
++    missing = [
++        path.name
++        for path in (
++            account_paths.account_snapshot_path,
++            account_paths.position_snapshot_path,
++            account_paths.execution_log_path,
++        )
++        if not path.is_file()
++    ]
++    current_states = [
++        path
++        for path in account_paths.root.glob("paper_current_state_*.json")
++        if path.is_file()
++        and len(path.stem.removeprefix("paper_current_state_")) == 8
++        and path.stem.removeprefix("paper_current_state_").isdigit()
++    ]
++    if not current_states:
++        missing.append("paper_current_state_<date>.json")
++    return missing
++
++
++def assert_account_writer_target(
++    path: str | Path,
++    *,
++    account_paths: PaperAccountPaths | None,
++    command_name: str,
++) -> Path:
++    context = require_initialized_writer_account_paths(
++        account_paths,
++        command_name=command_name,
++    )
++    candidate = assert_path_under_account_root(path, context.root)
++    try:
++        candidate.relative_to(PAPER_TEST_DIR.resolve(strict=False))
++    except ValueError:
++        return candidate
++    raise ValueError(f"{command_name} cannot write to legacy outputs/paper_test: {candidate}")
++
++
+ def assert_non_default_writer_target(
+     path: str | Path,
+     *,
+diff --git a/core/paper_account_snapshot.py b/core/paper_account_snapshot.py
+index 0dcb6fe767d4c51fc2d0c7564e143098a46b32ee..b57ac449a03d024c198ea9472a7428842c1e0940 100644
+--- a/core/paper_account_snapshot.py
++++ b/core/paper_account_snapshot.py
+@@ -7,13 +7,11 @@ from datetime import datetime
+ from pathlib import Path
+ from typing import Any
+ 
+-from core.paper_account_guard import assert_non_default_writer_target
++from core.paper_account_guard import assert_account_writer_target
+ from core.paper_account_profile import validate_account_id
+ from core.paper_account_state import PaperAccountState
+ from core.paper_market_valuation import PaperAccountValuation
+-from core.paper_safety import assert_paper_path
+ from core.paper_snapshot_identity import validate_snapshot_account_identity
+-from core.paths import PAPER_TEST_DIR
+ 
+ 
+ PAPER_ACCOUNT_SNAPSHOT_COLUMNS = [
+@@ -186,30 +184,19 @@ def save_paper_account_snapshot(
+     now: datetime | None = None,
+     account_paths=None,
+ ) -> dict[str, Any]:
+-    if account_paths is None:
+-        assert_paper_path(snapshot_path, PAPER_TEST_DIR)
+-        assert_paper_path(archive_dir, PAPER_TEST_DIR)
+-    elif account_paths.account_id != "paper_default":
+-        assert_non_default_writer_target(
+-            snapshot_path,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
+-        )
+-        assert_non_default_writer_target(
+-            archive_dir,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
+-        )
+-    else:
+-        assert_paper_path(snapshot_path, PAPER_TEST_DIR)
+-        assert_paper_path(archive_dir, PAPER_TEST_DIR)
++    assert_account_writer_target(
++        snapshot_path, account_paths=account_paths, command_name="save_paper_account_snapshot"
++    )
++    assert_account_writer_target(
++        archive_dir, account_paths=account_paths, command_name="save_paper_account_snapshot"
++    )
+ 
+     snapshot_date = str(snapshot_row.get("snapshot_date", "")).strip()
+     if not snapshot_date:
+         raise ValueError("snapshot_row must include snapshot_date")
+ 
+-    expected_account_id = account_paths.account_id if account_paths is not None else "paper_default"
+-    account_root = account_paths.root if account_paths is not None else PAPER_TEST_DIR
++    expected_account_id = account_paths.account_id
++    account_root = account_paths.root
+     validate_snapshot_account_identity(
+         [snapshot_row],
+         fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS,
+@@ -239,14 +226,11 @@ def save_paper_account_snapshot(
+         if legacy_backfilled or any(str(row.get("snapshot_date", "")).strip() == snapshot_date for row in existing_rows):
+             archive_dir.mkdir(parents=True, exist_ok=True)
+             backup_path = build_paper_account_snapshot_backup_path(snapshot_path, archive_dir, now=now)
+-            if account_paths is None or account_paths.account_id == "paper_default":
+-                assert_paper_path(backup_path, PAPER_TEST_DIR)
+-            else:
+-                assert_non_default_writer_target(
+-                    backup_path,
+-                    account_id=account_paths.account_id,
+-                    account_root=account_paths.root,
+-                )
++            assert_account_writer_target(
++                backup_path,
++                account_paths=account_paths,
++                command_name="save_paper_account_snapshot",
++            )
+             shutil.copy2(snapshot_path, backup_path)
+             replaced = any(
+                 str(row.get("snapshot_date", "")).strip() == snapshot_date
+diff --git a/core/paper_current_state_storage.py b/core/paper_current_state_storage.py
+index 83589399d3edfe17897cae97b090d6de7378d4bc..efd8c9a88f00c5548b14063425c2f2dfb2c7627b 100644
+--- a/core/paper_current_state_storage.py
++++ b/core/paper_current_state_storage.py
+@@ -6,10 +6,8 @@ from datetime import datetime
+ from pathlib import Path
+ from typing import Any
+ 
+-from core.paper_account_guard import assert_non_default_writer_target
++from core.paper_account_guard import assert_account_writer_target
+ from core.paper_current_state_serializer import paper_account_state_to_current_state_dict
+-from core.paper_safety import assert_paper_path
+-from core.paths import PAPER_TEST_DIR
+ 
+ 
+ REQUIRED_CURRENT_STATE_FIELDS = [
+@@ -48,23 +46,12 @@ def save_paper_current_state(
+     now: datetime | None = None,
+     account_paths=None,
+ ) -> dict[str, Any]:
+-    if account_paths is None:
+-        assert_paper_path(output_path, PAPER_TEST_DIR)
+-        assert_paper_path(archive_dir, PAPER_TEST_DIR)
+-    elif account_paths.account_id != "paper_default":
+-        assert_non_default_writer_target(
+-            output_path,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
+-        )
+-        assert_non_default_writer_target(
+-            archive_dir,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
+-        )
+-    else:
+-        assert_paper_path(output_path, PAPER_TEST_DIR)
+-        assert_paper_path(archive_dir, PAPER_TEST_DIR)
++    assert_account_writer_target(
++        output_path, account_paths=account_paths, command_name="save_paper_current_state"
++    )
++    assert_account_writer_target(
++        archive_dir, account_paths=account_paths, command_name="save_paper_current_state"
++    )
+ 
+     payload = paper_account_state_to_current_state_dict(state, date_str)
+     _validate_saved_current_state_payload(payload)
+@@ -73,14 +60,11 @@ def save_paper_current_state(
+     if output_path.exists():
+         archive_dir.mkdir(parents=True, exist_ok=True)
+         backup_path = build_paper_current_state_backup_path(output_path, archive_dir, now=now)
+-        if account_paths is None or account_paths.account_id == "paper_default":
+-            assert_paper_path(backup_path, PAPER_TEST_DIR)
+-        else:
+-            assert_non_default_writer_target(
+-                backup_path,
+-                account_id=account_paths.account_id,
+-                account_root=account_paths.root,
+-            )
++        assert_account_writer_target(
++            backup_path,
++            account_paths=account_paths,
++            command_name="save_paper_current_state",
++        )
+         shutil.copy2(output_path, backup_path)
+ 
+     output_path.parent.mkdir(parents=True, exist_ok=True)
+diff --git a/core/paper_execution_log.py b/core/paper_execution_log.py
+index a1bafd861678053518807fce30c53ebd40611156..2880b6ad61cf5a174ff6e57691b866fdeb1a1e3a 100644
+--- a/core/paper_execution_log.py
++++ b/core/paper_execution_log.py
+@@ -3,10 +3,9 @@ import hashlib
+ from datetime import datetime
+ from pathlib import Path
+ 
+-from core.paper_account_guard import assert_path_under_account_root
+-from core.paper_safety import assert_paper_path
++from core.paper_account_guard import assert_account_writer_target
++from core.paper_account_paths import PaperAccountPaths
+ from core.paper_trade_preview import PaperTradePreview
+-from core.paths import PAPER_TEST_DIR
+ 
+ 
+ PAPER_EXECUTION_LOG_COLUMNS = [
+@@ -69,12 +68,11 @@ def append_paper_execution_log(
+     previews: list[PaperTradePreview],
+     log_path: Path,
+     commit: bool = False,
+-    allowed_root: Path | None = None,
++    account_paths: PaperAccountPaths | None = None,
+ ) -> tuple[list[dict], list[str]]:
+-    if allowed_root is None:
+-        assert_paper_path(log_path, PAPER_TEST_DIR)
+-    else:
+-        assert_path_under_account_root(log_path, allowed_root)
++    assert_account_writer_target(
++        log_path, account_paths=account_paths, command_name="append_paper_execution_log"
++    )
+ 
+     warnings: list[str] = []
+     rows_to_append: list[dict] = []
+diff --git a/core/paper_manual_execution_commit.py b/core/paper_manual_execution_commit.py
+index b679529fac5eb4f7c9753f275025df2130697688..ff46b2b4e9535a9262e3b51210934f53401c5370 100644
+--- a/core/paper_manual_execution_commit.py
++++ b/core/paper_manual_execution_commit.py
+@@ -25,7 +25,10 @@ from core.execution_outcome_flow import (
+     RECONCILIATION_CONTRACT_V2,
+     build_execution_commit_plan,
+ )
+-from core.paper_account_guard import assert_non_default_writer_target
++from core.paper_account_guard import (
++    assert_account_writer_target,
++    require_initialized_writer_account_paths,
++)
+ from core.paper_account_snapshot import (
+     build_paper_account_snapshot_row,
+     save_paper_account_snapshot,
+@@ -47,16 +50,7 @@ from core.paper_position_snapshot import (
+     save_paper_position_snapshot,
+ )
+ from core.paper_trade_preview import PaperTradePreview
+-from core.paths import (
+-    PAPER_TEST_DIR,
+-    dev_backups_dir,
+-    market_db_path,
+-    paper_account_snapshot_path,
+-    paper_current_state_snapshot_path,
+-    paper_execution_log_path,
+-    paper_position_snapshot_path,
+-    paper_reports_dir,
+-)
++from core.paths import market_db_path
+ 
+ 
+ MANUAL_EXECUTION_REGIME = "MANUAL"
+@@ -99,8 +93,15 @@ def commit_manual_execution_preview(
+     resolved_account_id = _resolve_preview_account_id(
+         preview_payload,
+         account_paths=account_paths,
+-        require_writer_paths=not (allow_zero_write and eligible_candidate_keys == set()),
++        require_writer_paths=True,
+     )
++    try:
++        require_initialized_writer_account_paths(
++            account_paths,
++            command_name="commit_manual_execution_preview",
++        )
++    except ValueError as exc:
++        raise ManualExecutionCommitError(str(exc)) from exc
+     v2_evidence: dict[str, Any] | None = None
+     if eligible_candidate_keys is not None:
+         v2_evidence = _validate_v2_reconciliation_evidence(
+@@ -135,6 +136,7 @@ def commit_manual_execution_preview(
+                 execution_date=execution_date,
+                 preview_json_path=preview_json_path,
+                 v2_evidence=v2_evidence,
++                reports_dir=account_paths.reports_dir,
+             )
+             return ManualExecutionCommitResult(
+                 account_id=resolved_account_id,
+@@ -151,8 +153,6 @@ def commit_manual_execution_preview(
+             )
+         raise ManualExecutionCommitError("Preview JSON contains no committable candidates.")
+     _normalize_commit_candidate_payloads(candidate_payloads, account_id=resolved_account_id)
+-    allowed_root = account_paths.root if account_paths is not None and account_paths.account_id != "paper_default" else None
+-
+     previews = [_candidate_to_trade_preview(candidate) for candidate in candidate_payloads]
+     writer_paths = _resolve_execution_writer_paths(execution_date=execution_date, account_paths=account_paths)
+     log_path = writer_paths["paper_execution_log"]
+@@ -185,7 +185,7 @@ def commit_manual_execution_preview(
+         previews,
+         log_path,
+         commit=False,
+-        allowed_root=allowed_root,
++        account_paths=account_paths,
+     )
+     duplicate_warnings = [
+         warning for warning in append_warnings
+@@ -218,7 +218,7 @@ def commit_manual_execution_preview(
+             previews,
+             log_path,
+             commit=True,
+-            allowed_root=allowed_root,
++            account_paths=account_paths,
+         )
+         if committed_warnings:
+             raise ManualExecutionCommitError(
+@@ -528,9 +528,9 @@ def _resolve_preview_account_id(
+         resolved_account_id = candidate_account_id
+     if account_paths is not None and account_paths.account_id != resolved_account_id:
+         raise ManualExecutionCommitError("Provided account_paths.account_id does not match preview account_id.")
+-    if require_writer_paths and resolved_account_id != "paper_default" and account_paths is None:
++    if require_writer_paths and account_paths is None:
+         raise ManualExecutionCommitError(
+-            "Non-default manual execution commit requires account-aware writer paths."
++            "Manual execution commit requires explicit account-aware writer paths."
+         )
+     return resolved_account_id
+ 
+@@ -764,12 +764,14 @@ def _write_zero_commit_sidecar(
+     execution_date: str,
+     preview_json_path: Path,
+     v2_evidence: dict[str, Any] | None,
++    reports_dir: Path,
+ ) -> dict[str, Path]:
+     if v2_evidence is None:
+         raise ManualExecutionCommitError("v2 zero-write commit requires pinned reconciliation evidence.")
+     compact_date = execution_date.replace("-", "")
+-    json_path = preview_json_path.parent / f"manual_execution_import_commit_{compact_date}.json"
+-    markdown_path = preview_json_path.parent / f"manual_execution_import_commit_{compact_date}.md"
++    json_path = reports_dir / f"manual_execution_import_commit_{compact_date}.json"
++    markdown_path = reports_dir / f"manual_execution_import_commit_{compact_date}.md"
++    reports_dir.mkdir(parents=True, exist_ok=True)
+     payload = {
+         "schema_version": "execution_commit.v2",
+         "execution_contract_version": "execution_reconciliation_preview.v2",
+@@ -800,17 +802,10 @@ def _resolve_execution_writer_paths(
+     execution_date: str,
+     account_paths: PaperAccountPaths | None,
+ ) -> dict[str, Path]:
+-    if account_paths is None or account_paths.account_id == "paper_default":
+-        return {
+-            "paper_execution_log": paper_execution_log_path(),
+-            "paper_account_snapshot": paper_account_snapshot_path(),
+-            "paper_position_snapshot": paper_position_snapshot_path(),
+-            "paper_state": paper_current_state_snapshot_path(execution_date),
+-            "reports_dir": paper_reports_dir(),
+-            "archive_dir": PAPER_TEST_DIR / "archive",
+-            "backup_dir": dev_backups_dir(),
+-        }
+-
++    require_initialized_writer_account_paths(
++        account_paths,
++        command_name="commit_manual_execution_preview",
++    )
+     targets = {
+         "paper_execution_log": account_paths.execution_log_path,
+         "paper_account_snapshot": account_paths.account_snapshot_path,
+@@ -821,9 +816,9 @@ def _resolve_execution_writer_paths(
+         "backup_dir": account_paths.root / "archive" / "dev_backups",
+     }
+     for path in targets.values():
+-        assert_non_default_writer_target(
++        assert_account_writer_target(
+             path,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
++            account_paths=account_paths,
++            command_name="commit_manual_execution_preview",
+         )
+     return targets
+diff --git a/core/paper_manual_review_append_commit.py b/core/paper_manual_review_append_commit.py
+index ae15488260f11fc912fc3cd886fb2ce5511e5415..968e9b345b167ad827995a0ec227ca562249376c 100644
+--- a/core/paper_manual_review_append_commit.py
++++ b/core/paper_manual_review_append_commit.py
+@@ -13,7 +13,10 @@ from core.notion_account_keys import (
+     build_manual_review_canonical_key,
+     normalize_notion_account_id,
+ )
+-from core.paper_account_guard import assert_non_default_writer_target
++from core.paper_account_guard import (
++    assert_account_writer_target,
++    require_initialized_writer_account_paths,
++)
+ from core.paper_account_paths import PaperAccountPaths
+ from core.paper_manual_review_log_append import (
+     append_paper_manual_review_log,
+@@ -24,7 +27,6 @@ from core.paper_manual_review_log_template import (
+     PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS,
+     load_csv_rows,
+ )
+-from core.paths import dev_backups_dir, paper_reports_dir, paper_reviews_dir
+ 
+ 
+ class ManualReviewAppendCommitError(RuntimeError):
+@@ -56,6 +58,13 @@ def commit_manual_review_preview(
+ ) -> ManualReviewAppendCommitResult:
+     payload = _load_preview_payload(preview_json_path)
+     resolved_account_id = _resolve_preview_account_id(payload, account_paths=account_paths)
++    try:
++        require_initialized_writer_account_paths(
++            account_paths,
++            command_name="commit_manual_review_preview",
++        )
++    except ValueError as exc:
++        raise ManualReviewAppendCommitError(str(exc)) from exc
+     _validate_preview_payload(payload, review_date=review_date, allow_warnings=allow_warnings)
+ 
+     writer_paths = _resolve_review_writer_paths(account_paths=account_paths)
+@@ -97,7 +106,7 @@ def commit_manual_review_preview(
+             backups={},
+         )
+ 
+-    allowed_root = account_paths.root if account_paths is not None and account_paths.account_id != "paper_default" else None
++    allowed_root = account_paths.root
+     existing_rows = load_existing_paper_manual_review_log_rows(target_log_path, allowed_root=allowed_root)
+     template_by_key = _load_template_index(template_csv_path, allowed_root=allowed_root)
+     _normalize_append_candidate_payloads(candidate_payloads, account_id=resolved_account_id)
+@@ -131,7 +140,7 @@ def commit_manual_review_preview(
+     output_reports_dir.mkdir(parents=True, exist_ok=True)
+ 
+     try:
+-        write_paper_manual_review_log(final_rows, target_log_path, allowed_root=allowed_root)
++        write_paper_manual_review_log(final_rows, target_log_path, account_paths=account_paths)
+         if _count_data_rows(target_log_path) != len(final_rows):
+             raise ManualReviewAppendCommitError("Review log row count mismatch after append write.")
+         _write_commit_sidecar(
+@@ -267,9 +276,9 @@ def _resolve_preview_account_id(
+         resolved_account_id = candidate_account_id
+     if account_paths is not None and account_paths.account_id != resolved_account_id:
+         raise ManualReviewAppendCommitError("Provided account_paths.account_id does not match preview account_id.")
+-    if resolved_account_id != "paper_default" and account_paths is None:
++    if account_paths is None:
+         raise ManualReviewAppendCommitError(
+-            "Non-default manual review append requires account-aware writer paths."
++            "Manual review append requires explicit account-aware writer paths."
+         )
+     return resolved_account_id
+ 
+@@ -520,15 +529,10 @@ def _resolve_review_writer_paths(
+     *,
+     account_paths: PaperAccountPaths | None,
+ ) -> dict[str, Path]:
+-    if account_paths is None or account_paths.account_id == "paper_default":
+-        reviews_dir = paper_reviews_dir()
+-        return {
+-            "review_log_path": reviews_dir / "paper_manual_review_log.csv",
+-            "template_path": reviews_dir / "paper_manual_review_log_template.csv",
+-            "reports_dir": paper_reports_dir(),
+-            "backup_dir": dev_backups_dir(),
+-        }
+-
++    require_initialized_writer_account_paths(
++        account_paths,
++        command_name="commit_manual_review_preview",
++    )
+     targets = {
+         "review_log_path": account_paths.reviews_dir / "paper_manual_review_log.csv",
+         "template_path": account_paths.reviews_dir / "paper_manual_review_log_template.csv",
+@@ -536,9 +540,9 @@ def _resolve_review_writer_paths(
+         "backup_dir": account_paths.root / "archive" / "dev_backups",
+     }
+     for path in targets.values():
+-        assert_non_default_writer_target(
++        assert_account_writer_target(
+             path,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
++            account_paths=account_paths,
++            command_name="commit_manual_review_preview",
+         )
+     return targets
+diff --git a/core/paper_manual_review_log_append.py b/core/paper_manual_review_log_append.py
+index 464701c07b25f70693d87a16975502ed8bbc65cd..1b3cba483b6e75a3d6628cc42b603d68bf3fd159 100644
+--- a/core/paper_manual_review_log_append.py
++++ b/core/paper_manual_review_log_append.py
+@@ -6,7 +6,8 @@ from datetime import datetime
+ from pathlib import Path
+ from typing import Any
+ 
+-from core.paper_account_guard import assert_path_under_account_root
++from core.paper_account_guard import assert_account_writer_target, assert_path_under_account_root
++from core.paper_account_paths import PaperAccountPaths
+ from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
+ from core.paper_manual_review_log_validator import (
+     load_paper_manual_review_log_rows,
+@@ -190,12 +191,11 @@ def append_paper_manual_review_log(
+ def write_paper_manual_review_log(
+     rows: list[dict[str, str]],
+     output_path: Path,
+-    allowed_root: Path | None = None,
++    account_paths: PaperAccountPaths | None = None,
+ ) -> None:
+-    if allowed_root is None:
+-        assert_paper_path(output_path, PAPER_TEST_DIR)
+-    else:
+-        assert_path_under_account_root(output_path, allowed_root)
++    assert_account_writer_target(
++        output_path, account_paths=account_paths, command_name="write_paper_manual_review_log"
++    )
+     output_path.parent.mkdir(parents=True, exist_ok=True)
+     with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
+         writer = csv.DictWriter(handle, fieldnames=PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS)
+@@ -206,12 +206,11 @@ def write_paper_manual_review_log(
+ def write_append_issues_csv(
+     issues: list[dict[str, str]],
+     output_path: Path,
+-    allowed_root: Path | None = None,
++    account_paths: PaperAccountPaths | None = None,
+ ) -> None:
+-    if allowed_root is None:
+-        assert_paper_path(output_path, PAPER_TEST_DIR)
+-    else:
+-        assert_path_under_account_root(output_path, allowed_root)
++    assert_account_writer_target(
++        output_path, account_paths=account_paths, command_name="write_append_issues_csv"
++    )
+     output_path.parent.mkdir(parents=True, exist_ok=True)
+     with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
+         writer = csv.DictWriter(handle, fieldnames=APPEND_ISSUE_COLUMNS)
+@@ -274,10 +273,13 @@ def render_paper_manual_review_log_append_report(summary: dict[str, Any]) -> str
+     return "\n".join(lines) + "\n"
+ 
+ 
+-def write_markdown(path: Path, markdown: str, allowed_root: Path | None = None) -> None:
+-    if allowed_root is None:
+-        assert_paper_path(path, PAPER_TEST_DIR)
+-    else:
+-        assert_path_under_account_root(path, allowed_root)
++def write_markdown(
++    path: Path,
++    markdown: str,
++    account_paths: PaperAccountPaths | None = None,
++) -> None:
++    assert_account_writer_target(
++        path, account_paths=account_paths, command_name="write_paper_manual_review_markdown"
++    )
+     path.parent.mkdir(parents=True, exist_ok=True)
+     path.write_text(markdown, encoding="utf-8")
+diff --git a/core/paper_position_snapshot.py b/core/paper_position_snapshot.py
+index db9515a5d57f114f05af9a55b56812ae878c20ae..a23ed73e273a1e6824fb3412cea8c5d4c8d67908 100644
+--- a/core/paper_position_snapshot.py
++++ b/core/paper_position_snapshot.py
+@@ -6,13 +6,11 @@ from datetime import datetime
+ from pathlib import Path
+ from typing import Any
+ 
+-from core.paper_account_guard import assert_non_default_writer_target
++from core.paper_account_guard import assert_account_writer_target
+ from core.paper_account_profile import validate_account_id
+ from core.paper_account_state import PaperAccountState
+ from core.paper_market_valuation import PaperAccountValuation
+-from core.paper_safety import assert_paper_path
+ from core.paper_snapshot_identity import validate_snapshot_account_identity
+-from core.paths import PAPER_TEST_DIR
+ 
+ 
+ PAPER_POSITION_SNAPSHOT_COLUMNS = [
+@@ -112,27 +110,16 @@ def save_paper_position_snapshot(
+     now: datetime | None = None,
+     account_paths=None,
+ ) -> dict[str, Any]:
+-    if account_paths is None:
+-        assert_paper_path(snapshot_path, PAPER_TEST_DIR)
+-        assert_paper_path(archive_dir, PAPER_TEST_DIR)
+-    elif account_paths.account_id != "paper_default":
+-        assert_non_default_writer_target(
+-            snapshot_path,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
+-        )
+-        assert_non_default_writer_target(
+-            archive_dir,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
+-        )
+-    else:
+-        assert_paper_path(snapshot_path, PAPER_TEST_DIR)
+-        assert_paper_path(archive_dir, PAPER_TEST_DIR)
++    assert_account_writer_target(
++        snapshot_path, account_paths=account_paths, command_name="save_paper_position_snapshot"
++    )
++    assert_account_writer_target(
++        archive_dir, account_paths=account_paths, command_name="save_paper_position_snapshot"
++    )
+ 
+     normalized_date = _normalize_snapshot_date(snapshot_date)
+-    expected_account_id = account_paths.account_id if account_paths is not None else "paper_default"
+-    account_root = account_paths.root if account_paths is not None else PAPER_TEST_DIR
++    expected_account_id = account_paths.account_id
++    account_root = account_paths.root
+     validate_snapshot_account_identity(
+         rows,
+         fieldnames=PAPER_POSITION_SNAPSHOT_COLUMNS,
+@@ -162,14 +149,11 @@ def save_paper_position_snapshot(
+         if legacy_backfilled or any(str(row.get("snapshot_date", "")).strip() == normalized_date for row in existing_rows):
+             archive_dir.mkdir(parents=True, exist_ok=True)
+             backup_path = build_paper_position_snapshot_backup_path(snapshot_path, archive_dir, now=now)
+-            if account_paths is None or account_paths.account_id == "paper_default":
+-                assert_paper_path(backup_path, PAPER_TEST_DIR)
+-            else:
+-                assert_non_default_writer_target(
+-                    backup_path,
+-                    account_id=account_paths.account_id,
+-                    account_root=account_paths.root,
+-                )
++            assert_account_writer_target(
++                backup_path,
++                account_paths=account_paths,
++                command_name="save_paper_position_snapshot",
++            )
+             shutil.copy2(snapshot_path, backup_path)
+             replaced = any(
+                 str(row.get("snapshot_date", "")).strip() == normalized_date
+diff --git a/scripts/append_paper_manual_review_log.py b/scripts/append_paper_manual_review_log.py
+index b1b19fc90c62f04b6fbb764eb0e987cb9b23272c..db40bc04fccaf0c66ddbd2cfea60377b6f614f21 100644
+--- a/scripts/append_paper_manual_review_log.py
++++ b/scripts/append_paper_manual_review_log.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import argparse
+ from pathlib import Path
+ import sys
+ 
+@@ -17,23 +18,19 @@ from core.paper_manual_review_log_append import (  # noqa: E402
+     write_paper_manual_review_log,
+ )
+ from core.paper_manual_review_log_validator import load_paper_manual_review_log_rows  # noqa: E402
+-from core.paper_account_paths import PaperAccountPaths  # noqa: E402
+-from core.paths import paper_reviews_dir  # noqa: E402
++from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths  # noqa: E402
++from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
+ 
+ 
+ def append_paper_manual_review_log_from_template(
+     account_paths: PaperAccountPaths | None = None,
+ ) -> dict:
+-    reviews_dir = (
+-        account_paths.reviews_dir
+-        if account_paths is not None and account_paths.account_id != "paper_default"
+-        else paper_reviews_dir()
+-    )
+-    allowed_root = (
+-        account_paths.root
+-        if account_paths is not None and account_paths.account_id != "paper_default"
+-        else None
++    require_initialized_writer_account_paths(
++        account_paths,
++        command_name="append_paper_manual_review_log_from_template",
+     )
++    reviews_dir = account_paths.reviews_dir
++    allowed_root = account_paths.root
+     template_path = reviews_dir / "paper_manual_review_log_template.csv"
+     target_log_path = reviews_dir / "paper_manual_review_log.csv"
+     append_report_path = reviews_dir / "paper_manual_review_log_append_report.md"
+@@ -46,8 +43,8 @@ def append_paper_manual_review_log_from_template(
+         existing_log_rows,
+     )
+     if summary_data["append_executed"]:
+-        write_paper_manual_review_log(final_rows, target_log_path, allowed_root=allowed_root)
+-    write_append_issues_csv(append_issues, append_issues_path, allowed_root=allowed_root)
++        write_paper_manual_review_log(final_rows, target_log_path, account_paths=account_paths)
++    write_append_issues_csv(append_issues, append_issues_path, account_paths=account_paths)
+     summary = summarize_paper_manual_review_log_append(
+         template_path=template_path,
+         target_log_path=target_log_path,
+@@ -58,7 +55,7 @@ def append_paper_manual_review_log_from_template(
+     write_markdown(
+         append_report_path,
+         render_paper_manual_review_log_append_report(summary),
+-        allowed_root=allowed_root,
++        account_paths=account_paths,
+     )
+     return {
+         "template_path": template_path,
+@@ -70,7 +67,15 @@ def append_paper_manual_review_log_from_template(
+ 
+ 
+ def main() -> int:
+-    result = append_paper_manual_review_log_from_template()
++    parser = argparse.ArgumentParser(description="Append a manual review log for one paper account")
++    parser.add_argument("--account-id", required=True, help="Initialized paper account id")
++    args = parser.parse_args()
++    try:
++        account_paths = build_paper_account_paths(args.account_id, create=False)
++        result = append_paper_manual_review_log_from_template(account_paths=account_paths)
++    except ValueError as exc:
++        print(f"Paper manual review append aborted: {exc}")
++        return 1
+     summary = result["summary"]
+     print("Paper manual review log append completed")
+     print(f"  template_path: {result['template_path']}")
+diff --git a/scripts/import_notion_executions.py b/scripts/import_notion_executions.py
+index 497b4a555ed26ec768cbcc5e75a495a684bb9d92..763d62572966277a79ef28dd5f35fcf54607b938 100644
+--- a/scripts/import_notion_executions.py
++++ b/scripts/import_notion_executions.py
+@@ -31,6 +31,7 @@ from core.paper_manual_execution_commit import (  # noqa: E402
+ from core.notion_mapping import load_notion_property_mapping  # noqa: E402
+ from core.notion_account_keys import normalize_notion_account_id  # noqa: E402
+ from core.paper_account_paths import build_paper_account_paths  # noqa: E402
++from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
+ from core.notion_settings import (  # noqa: E402
+     NotionSettingsError,
+     get_notion_token,
+@@ -52,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
+     parser.add_argument("--date", required=True, help="Execution date in YYYY-MM-DD format")
+     parser.add_argument("--data-date", help="Daily Plan data date in YYYY-MM-DD format; required for --commit gate")
+     parser.add_argument("--workspace", help="Runbook workspace path for future/latest artifact resolution")
+-    parser.add_argument("--account-id", help="Paper account id for preview account filtering")
++    parser.add_argument("--account-id", required=True, help="Paper account id for preview account filtering")
+     parser.add_argument("--preview", action="store_true", help="Generate preview only")
+     parser.add_argument("--commit", action="store_true", help="Commit validated preview JSON rows to paper ledger")
+     parser.add_argument("--preview-json", help="Preview JSON path required for --commit")
+@@ -72,15 +73,14 @@ def main(argv: list[str] | None = None) -> int:
+         parser.error("Select one mode: --preview or --commit.")
+ 
+     if args.preview:
+-        account_paths = (
+-            None
+-            if resolved_account_id == "paper_default"
+-            else build_paper_account_paths(resolved_account_id, create=True)
+-        )
+-        settings = load_notion_settings(allow_missing=True)
+-        mapping = load_notion_property_mapping()
+-        client = NotionClient(get_notion_token(settings))
+         try:
++            account_paths = build_paper_account_paths(resolved_account_id, create=False)
++            require_initialized_writer_account_paths(
++                account_paths, command_name="import_notion_executions preview"
++            )
++            settings = load_notion_settings(allow_missing=True)
++            mapping = load_notion_property_mapping()
++            client = NotionClient(get_notion_token(settings))
+             preview = build_manual_execution_preview(
+                 client=client,
+                 settings=settings,
+@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
+                 account_id=resolved_account_id,
+                 account_paths=account_paths,
+             )
+-        except (ManualExecutionImportError, NotionAPIError, NotionSettingsError) as exc:
++        except (ManualExecutionImportError, NotionAPIError, NotionSettingsError, ValueError) as exc:
+             if args.json:
+                 print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
+             else:
+@@ -180,10 +180,9 @@ def main(argv: list[str] | None = None) -> int:
+     if not gate_result["ok"]:
+         return _print_commit_blocked(args, gate_result)
+     try:
+-        account_paths = (
+-            None
+-            if resolved_account_id == "paper_default"
+-            else build_paper_account_paths(resolved_account_id, create=True)
++        account_paths = build_paper_account_paths(resolved_account_id, create=False)
++        require_initialized_writer_account_paths(
++            account_paths, command_name="import_notion_executions commit"
+         )
+         result = commit_manual_execution_preview(
+             execution_date=args.date,
+@@ -209,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
+                 reconciliation_preview_sha256 if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
+             ),
+         )
+-    except ManualExecutionCommitError as exc:
++    except (ManualExecutionCommitError, ValueError) as exc:
+         if args.json:
+             print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
+         else:
+diff --git a/scripts/import_notion_reviews.py b/scripts/import_notion_reviews.py
+index 18925fb61a7274c77353d92e7c1c35941187207f..b179f6541dc37cb08a5fcfa9109900732d668e5e 100644
+--- a/scripts/import_notion_reviews.py
++++ b/scripts/import_notion_reviews.py
+@@ -23,6 +23,7 @@ from core.paper_manual_review_append_commit import (  # noqa: E402
+ from core.notion_mapping import load_notion_property_mapping  # noqa: E402
+ from core.notion_account_keys import normalize_notion_account_id  # noqa: E402
+ from core.paper_account_paths import build_paper_account_paths  # noqa: E402
++from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
+ from core.notion_settings import (  # noqa: E402
+     NotionSettingsError,
+     get_notion_token,
+@@ -40,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
+         )
+     )
+     parser.add_argument("--date", required=True, help="Review date in YYYY-MM-DD format")
+-    parser.add_argument("--account-id", help="Paper account id for preview account filtering")
++    parser.add_argument("--account-id", required=True, help="Paper account id for preview account filtering")
+     parser.add_argument("--preview", action="store_true", help="Generate preview only")
+     parser.add_argument("--commit", action="store_true", help="Append validated preview JSON rows to paper_manual_review_log.csv")
+     parser.add_argument("--preview-json", help="Preview JSON path required for --commit")
+@@ -62,10 +63,9 @@ def main(argv: list[str] | None = None) -> int:
+         if not args.preview_json:
+             parser.error("--preview-json is required for --commit.")
+         try:
+-            account_paths = (
+-                None
+-                if resolved_account_id == "paper_default"
+-                else build_paper_account_paths(resolved_account_id, create=True)
++            account_paths = build_paper_account_paths(resolved_account_id, create=False)
++            require_initialized_writer_account_paths(
++                account_paths, command_name="import_notion_reviews commit"
+             )
+             result = commit_manual_review_preview(
+                 review_date=args.date,
+@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
+                 allow_warnings=args.allow_warnings,
+                 account_paths=account_paths,
+             )
+-        except ManualReviewAppendCommitError as exc:
++        except (ManualReviewAppendCommitError, ValueError) as exc:
+             if args.json:
+                 print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
+             else:
+@@ -105,10 +105,9 @@ def main(argv: list[str] | None = None) -> int:
+     mapping = load_notion_property_mapping()
+     client = NotionClient(get_notion_token(settings))
+     try:
+-        account_paths = (
+-            None
+-            if resolved_account_id == "paper_default"
+-            else build_paper_account_paths(resolved_account_id, create=True)
++        account_paths = build_paper_account_paths(resolved_account_id, create=False)
++        require_initialized_writer_account_paths(
++            account_paths, command_name="import_notion_reviews preview"
+         )
+         preview = build_manual_review_preview(
+             client=client,
+@@ -118,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
+             account_id=resolved_account_id,
+             account_paths=account_paths,
+         )
+-    except (ManualReviewImportError, NotionAPIError, NotionSettingsError) as exc:
++    except (ManualReviewImportError, NotionAPIError, NotionSettingsError, ValueError) as exc:
+         if args.json:
+             print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
+         else:
+diff --git a/scripts/paper.py b/scripts/paper.py
+index e76166529f65eb240ddaf3c7516015dafd8ecf01..3dee67c861243537e0737146cea78e4e131e2930 100644
+--- a/scripts/paper.py
++++ b/scripts/paper.py
+@@ -23,7 +23,7 @@ from core.paper_data_freshness import (  # noqa: E402
+     run_paper_data_freshness_check,
+     write_paper_data_freshness_report,
+ )
+-from core.paper_commit_guard import check_same_date_commit_guard  # noqa: E402
++from core.paper_commit_guard import PaperCommitGuardPaths, check_same_date_commit_guard  # noqa: E402
+ from core.paper_status import format_paper_status, paper_status_to_json, run_paper_status  # noqa: E402
+ from core.paper_weekly_status import generate_paper_weekly_status  # noqa: E402
+ from core.paper_benchmark_comparison import generate_paper_benchmark_comparison  # noqa: E402
+@@ -31,6 +31,7 @@ from core.paper_account_paths import build_paper_account_paths  # noqa: E402
+ from core.paper_account_guard import (  # noqa: E402
+     format_writer_account_guard_message,
+     guard_paper_writer_account,
++    require_initialized_writer_account_paths,
+ )
+ from core.paper_account_bootstrap import (  # noqa: E402
+     PaperAccountBootstrapError,
+@@ -134,11 +135,15 @@ def _guard_writer_account(
+     *,
+     allow_non_default: bool = False,
+ ) -> int:
+-    context = guard_paper_writer_account(
+-        account_id=account_id,
+-        command_name=command_name,
+-        allow_non_default=allow_non_default,
+-    )
++    try:
++        context = guard_paper_writer_account(
++            account_id=account_id,
++            command_name=command_name,
++            allow_non_default=allow_non_default,
++        )
++    except ValueError as exc:
++        print(f"Writer account guard blocked {command_name}: {exc}")
++        return 1
+     print(format_writer_account_guard_message(context))
+     return 0 if context["write_allowed"] else 1
+ 
+@@ -316,7 +321,20 @@ def run_preview_shortcut(date_str: str, allow_warnings: bool) -> int:
+ 
+ 
+ def run_commit_shortcut(date_str: str, replace: bool, account_id: str | None = None) -> int:
+-    guard = check_same_date_commit_guard(date_str)
++    try:
++        account_paths = build_paper_account_paths(account_id, create=False)
++        require_initialized_writer_account_paths(account_paths, command_name="paper.py commit")
++    except ValueError as exc:
++        print(f"Paper commit aborted: {exc}")
++        return 1
++    guard = check_same_date_commit_guard(
++        date_str,
++        paths=PaperCommitGuardPaths(
++            account_snapshot=account_paths.account_snapshot_path,
++            position_snapshot=account_paths.position_snapshot_path,
++            current_state_snapshot=account_paths.current_state_snapshot_path(date_str),
++        ),
++    )
+     if guard["error"]:
+         print(f"Commit guard failed: {guard['error']}")
+         return 1
+@@ -619,9 +637,12 @@ def handle_plan(args: argparse.Namespace) -> int:
+             "Use --data-date and --trade-date for official EOD operation."
+         )
+ 
+-    account_paths = None
+-    if args.account_id and args.account_id != "paper_default":
+-        account_paths = build_paper_account_paths(args.account_id, create=True)
++    try:
++        account_paths = build_paper_account_paths(args.account_id, create=False)
++        require_initialized_writer_account_paths(account_paths, command_name="paper.py plan")
++    except ValueError as exc:
++        print(f"Paper plan aborted: {exc}")
++        return 1
+     summary = _call_preflight(
+         stage="plan",
+         date_str=preflight_date,
+@@ -671,9 +692,12 @@ def handle_eod(args: argparse.Namespace) -> int:
+             return 1
+ 
+     commit = bool(args.commit)
+-    account_paths = None
+-    if args.account_id and args.account_id != "paper_default":
+-        account_paths = build_paper_account_paths(args.account_id, create=commit)
++    try:
++        account_paths = build_paper_account_paths(args.account_id, create=False)
++        require_initialized_writer_account_paths(account_paths, command_name="paper.py eod")
++    except ValueError as exc:
++        print(f"Paper EOD aborted: {exc}")
++        return 1
+ 
+     summary = _call_preflight(
+         stage="eod",
+@@ -864,18 +888,22 @@ def handle_review_validate(args: argparse.Namespace) -> int:
+ def handle_review_append(args: argparse.Namespace) -> int:
+     if _guard_writer_account(args.account_id, "paper.py review-append", allow_non_default=True) != 0:
+         return 1
++    try:
++        account_paths = build_paper_account_paths(args.account_id, create=False)
++        require_initialized_writer_account_paths(account_paths, command_name="paper.py review-append")
++    except ValueError as exc:
++        print(f"Paper review-append aborted: {exc}")
++        return 1
+     summary = run_preflight(
+         stage="review-append",
+         date_str=None,
+         strict=False,
+         write_report=False,
++        account_paths=account_paths,
+     )
+     if summary["result"] == "FAIL":
+         print("Paper review-append aborted because preflight failed.")
+         return 1
+-    account_paths = None
+-    if args.account_id and args.account_id != "paper_default":
+-        account_paths = build_paper_account_paths(args.account_id, create=True)
+     result = _call_with_optional_account_paths(
+         append_paper_manual_review_log_from_template,
+         account_paths=account_paths,
+@@ -988,7 +1016,7 @@ def build_parser() -> argparse.ArgumentParser:
+     )
+     commit_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+     commit_parser.add_argument("--replace", action="store_true", help="Allow same-date snapshot replacement intentionally")
+-    commit_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
++    commit_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
+     commit_parser.set_defaults(handler=handle_commit)
+ 
+     preflight_parser = subparsers.add_parser(
+@@ -1013,7 +1041,7 @@ def build_parser() -> argparse.ArgumentParser:
+     plan_parser.add_argument("--date", help="Legacy target date (YYYYMMDD or YYYY-MM-DD)")
+     plan_parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
+     plan_parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
+-    plan_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
++    plan_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
+     plan_parser.add_argument("--enforce-asof-contract", action="store_true", help=argparse.SUPPRESS)
+     plan_parser.set_defaults(handler=handle_plan)
+ 
+@@ -1025,7 +1053,7 @@ def build_parser() -> argparse.ArgumentParser:
+         ),
+     )
+     eod_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+-    eod_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
++    eod_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
+     eod_mode_group = eod_parser.add_mutually_exclusive_group(required=True)
+     eod_mode_group.add_argument("--dry-run", action="store_true", help="Run read-only EOD preview wrapper")
+     eod_mode_group.add_argument(
+@@ -1076,7 +1104,7 @@ def build_parser() -> argparse.ArgumentParser:
+         "review-append",
+         help="Run manual review log append workflow after automatic paper preflight",
+     )
+-    review_append_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
++    review_append_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
+     review_append_parser.set_defaults(handler=handle_review_append)
+ 
+     return parser
+diff --git a/scripts/reset_paper_execution_log.py b/scripts/reset_paper_execution_log.py
+index 252361d1771f424f243a79488a260b933c55c0e8..22cfbe17e24d4f9568ec59df0af1c92b53146acb 100644
+--- a/scripts/reset_paper_execution_log.py
++++ b/scripts/reset_paper_execution_log.py
+@@ -10,12 +10,12 @@ if str(ROOT) not in sys.path:
+     sys.path.insert(0, str(ROOT))
+ 
+ from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
+-from core.paper_safety import assert_paper_path
+-from core.paths import PAPER_TEST_DIR, paper_execution_log_path
++from core.paper_account_guard import assert_account_writer_target, require_initialized_writer_account_paths
++from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
+ 
+ 
+-def build_paper_archive_dir() -> Path:
+-    return PAPER_TEST_DIR / "archive"
++def build_paper_archive_dir(account_paths: PaperAccountPaths) -> Path:
++    return account_paths.root / "archive"
+ 
+ 
+ def build_backup_target(log_path: Path, archive_dir: Path, now: datetime | None = None) -> Path:
+@@ -34,15 +34,26 @@ def reset_paper_execution_log(
+     archive_dir: Path | None = None,
+     commit: bool = False,
+     now: datetime | None = None,
++    account_paths: PaperAccountPaths | None = None,
+ ) -> dict[str, object]:
+-    target_log_path = log_path or paper_execution_log_path()
+-    target_archive_dir = archive_dir or build_paper_archive_dir()
++    require_initialized_writer_account_paths(
++        account_paths,
++        command_name="reset_paper_execution_log",
++    )
++    target_log_path = log_path or account_paths.execution_log_path
++    target_archive_dir = archive_dir or build_paper_archive_dir(account_paths)
+ 
+-    assert_paper_path(target_log_path, PAPER_TEST_DIR)
+-    assert_paper_path(target_archive_dir, PAPER_TEST_DIR)
++    assert_account_writer_target(
++        target_log_path, account_paths=account_paths, command_name="reset_paper_execution_log"
++    )
++    assert_account_writer_target(
++        target_archive_dir, account_paths=account_paths, command_name="reset_paper_execution_log"
++    )
+ 
+     backup_target = build_backup_target(target_log_path, target_archive_dir, now=now)
+-    assert_paper_path(backup_target, PAPER_TEST_DIR)
++    assert_account_writer_target(
++        backup_target, account_paths=account_paths, command_name="reset_paper_execution_log"
++    )
+ 
+     log_exists = target_log_path.exists()
+     backup_created = False
+@@ -66,6 +77,7 @@ def reset_paper_execution_log(
+ 
+ def main() -> int:
+     parser = argparse.ArgumentParser(description="Reset paper execution log with backup")
++    parser.add_argument("--account-id", required=True, help="Initialized paper account id")
+     parser.add_argument(
+         "--commit",
+         action="store_true",
+@@ -73,7 +85,12 @@ def main() -> int:
+     )
+     args = parser.parse_args()
+ 
+-    result = reset_paper_execution_log(commit=args.commit)
++    try:
++        account_paths = build_paper_account_paths(args.account_id, create=False)
++        result = reset_paper_execution_log(commit=args.commit, account_paths=account_paths)
++    except ValueError as exc:
++        print(f"Paper execution log reset aborted: {exc}")
++        return 1
+ 
+     print(f"{'COMMIT' if args.commit else 'DRY-RUN'}: paper_execution_log reset preview")
+     print(f"current log: {result['log_path']}")
+diff --git a/scripts/run_paper_daily_plan.py b/scripts/run_paper_daily_plan.py
+index 7d959085e11bdc92e06c7214899683f80559555b..e56b1709415aac880f72ee7eadd9cffe4551a903 100644
+--- a/scripts/run_paper_daily_plan.py
++++ b/scripts/run_paper_daily_plan.py
+@@ -11,7 +11,8 @@ if str(ROOT) not in sys.path:
+     sys.path.insert(0, str(ROOT))
+ 
+ from core.daily_plan_generator import generate_daily_plan
+-from core.paper_account_paths import PaperAccountPaths, latest_current_state_snapshot_path
++from core.paper_account_guard import require_initialized_writer_account_paths
++from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths, latest_current_state_snapshot_path
+ from core.paper_state_provider import load_official_paper_state_for_daily_plan
+ from core.stage_a_asof_contract import (
+     StageAAsOfContext,
+@@ -20,13 +21,7 @@ from core.stage_a_asof_contract import (
+     sha256_payload,
+     validate_config_snapshot,
+ )
+-from core.paths import (
+-    paper_config_snapshot_archive_dir,
+-    paper_config_snapshot_path,
+-    paper_current_state_snapshot_path,
+-    paper_daily_action_plan_path,
+-    market_db_path,
+-)
++from core.paths import market_db_path
+ 
+ 
+ def _normalize_date_for_db(date_str: str) -> str:
+@@ -145,6 +140,10 @@ def run_paper_daily_plan(
+         normalized_data_date = None
+         normalized_db_date = _normalize_date_for_db(date_str)
+         artifact_date = normalized_db_date
++    require_initialized_writer_account_paths(
++        account_paths,
++        command_name="run_paper_daily_plan",
++    )
+     asof_context = None
+     if enforce_asof_contract:
+         if normalized_data_date is None:
+@@ -153,7 +152,7 @@ def run_paper_daily_plan(
+                 "official Stage A AS-OF contract requires explicit data_date and trade_date",
+             )
+         asof_context = StageAAsOfContext.build(
+-            account_id=account_paths.account_id if account_paths is not None else "paper_default",
++            account_id=account_paths.account_id,
+             data_date=normalized_data_date,
+             trade_date=normalized_db_date,
+             observed_at=observed_at,
+@@ -161,52 +160,32 @@ def run_paper_daily_plan(
+     state_log_path = None
+     initial_cash = 100000.0
+     currency = "USD"
+-    if account_paths is not None and account_paths.account_id != "paper_default":
+-        inception_date = _account_inception_date(account_paths)
+-        if inception_date is None:
+-            raise ValueError(
+-                f"Cannot determine account inception date for account_id={account_paths.account_id}"
+-            )
+-        plan_compact_date = normalized_db_date.replace("-", "")
+-        if plan_compact_date < inception_date:
+-            raise ValueError(
+-                f"plan_date {normalized_db_date} is before account inception date "
+-                f"{datetime.strptime(inception_date, '%Y%m%d').strftime('%Y-%m-%d')} "
+-                f"for account_id={account_paths.account_id}"
+-            )
+-        state_log_path = account_paths.execution_log_path
+-        initial_cash, currency = _read_account_initial_snapshot(account_paths)
++    inception_date = _account_inception_date(account_paths)
++    if inception_date is None:
++        raise ValueError(
++            f"Cannot determine account inception date for account_id={account_paths.account_id}"
++        )
++    plan_compact_date = normalized_db_date.replace("-", "")
++    if plan_compact_date < inception_date:
++        raise ValueError(
++            f"plan_date {normalized_db_date} is before account inception date "
++            f"{datetime.strptime(inception_date, '%Y%m%d').strftime('%Y-%m-%d')} "
++            f"for account_id={account_paths.account_id}"
++        )
++    state_log_path = account_paths.execution_log_path
++    initial_cash, currency = _read_account_initial_snapshot(account_paths)
+ 
+     state_cutoff_date = normalized_data_date or normalized_db_date
+-    if state_log_path is None:
+-        paper_state = load_official_paper_state_for_daily_plan(state_cutoff_date)
+-    else:
+-        paper_state = load_official_paper_state_for_daily_plan(
+-            state_cutoff_date,
+-            log_path=state_log_path,
+-            initial_cash=initial_cash,
+-            currency=currency,
+-        )
+-    output_path = (
+-        account_paths.daily_action_plan_path(artifact_date)
+-        if account_paths is not None and account_paths.account_id != "paper_default"
+-        else paper_daily_action_plan_path(artifact_date)
+-    )
+-    config_snapshot_output_path = (
+-        account_paths.config_snapshot_path(artifact_date)
+-        if account_paths is not None and account_paths.account_id != "paper_default"
+-        else paper_config_snapshot_path(artifact_date)
++    paper_state = load_official_paper_state_for_daily_plan(
++        state_cutoff_date,
++        log_path=state_log_path,
++        initial_cash=initial_cash,
++        currency=currency,
+     )
+-    config_snapshot_archive_path = (
+-        account_paths.config_snapshot_archive_dir
+-        if account_paths is not None and account_paths.account_id != "paper_default"
+-        else paper_config_snapshot_archive_dir()
+-    )
+-    if account_paths is not None and account_paths.account_id != "paper_default":
+-        state_snapshot_path = latest_current_state_snapshot_path(account_paths, state_cutoff_date)
+-    else:
+-        default_state_snapshot_path = paper_current_state_snapshot_path(state_cutoff_date)
+-        state_snapshot_path = default_state_snapshot_path if default_state_snapshot_path.exists() else None
++    output_path = account_paths.daily_action_plan_path(artifact_date)
++    config_snapshot_output_path = account_paths.config_snapshot_path(artifact_date)
++    config_snapshot_archive_path = account_paths.config_snapshot_archive_dir
++    state_snapshot_path = latest_current_state_snapshot_path(account_paths, state_cutoff_date)
+     pinned_config_snapshot = None
+     if asof_context is not None and Path(config_snapshot_output_path).exists():
+         try:
+@@ -261,7 +240,7 @@ def run_paper_daily_plan(
+         config_snapshot_path=config_snapshot_output_path,
+         config_snapshot_archive_dir=config_snapshot_archive_path,
+         config_snapshot_source="run_paper_daily_plan",
+-        account_id=account_paths.account_id if account_paths is not None else "paper_default",
++        account_id=account_paths.account_id,
+         run_mode="official",
+         official_run=True,
+         state_snapshot_path=state_snapshot_path,
+@@ -276,13 +255,20 @@ def main() -> int:
+     parser.add_argument("--date", help="Legacy target date (YYYYMMDD or YYYY-MM-DD)")
+     parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
+     parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
++    parser.add_argument("--account-id", required=True, help="Initialized paper account id")
+     args = parser.parse_args()
+ 
+-    report_path = run_paper_daily_plan(
+-        args.date,
+-        data_date=args.data_date,
+-        trade_date=args.trade_date,
+-    )
++    try:
++        account_paths = build_paper_account_paths(args.account_id, create=False)
++        report_path = run_paper_daily_plan(
++            args.date,
++            account_paths=account_paths,
++            data_date=args.data_date,
++            trade_date=args.trade_date,
++        )
++    except (ValueError, StageAAsOfContractError) as exc:
++        print(f"Paper daily plan aborted: {exc}")
++        return 1
+     if not report_path:
+         print("Failed to generate official paper daily plan.")
+         return 1
+diff --git a/scripts/run_paper_eod_update.py b/scripts/run_paper_eod_update.py
+index becd12b4c7912250c3fe95a724a9a030e89b09d1..58344858bb35d78b80cdb28320bc8ebe953d4ca1 100644
+--- a/scripts/run_paper_eod_update.py
++++ b/scripts/run_paper_eod_update.py
+@@ -10,8 +10,8 @@ if str(ROOT) not in sys.path:
+     sys.path.insert(0, str(ROOT))
+ 
+ from core.execution_logger import parse_journal_from_markdown, map_journal_to_trades
+-from core.paper_account_guard import assert_non_default_writer_target
+-from core.paper_account_paths import PaperAccountPaths
++from core.paper_account_guard import assert_account_writer_target, require_initialized_writer_account_paths
++from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
+ from core.paper_account_snapshot import (
+     build_paper_account_snapshot_row,
+     save_paper_account_snapshot,
+@@ -28,16 +28,9 @@ from core.paper_high_watermark import (
+     filter_execution_rows_on_or_before,
+ )
+ from core.paper_daily_plan_candidates import count_daily_plan_execution_candidates
+-from core.paper_safety import assert_paper_path
+ from core.paper_trade_preview import build_paper_trade_previews, can_resolve_paper_actual_fill
+ from core.paths import (
+-    PAPER_TEST_DIR,
+     market_db_path,
+-    paper_account_snapshot_path,
+-    paper_current_state_snapshot_path,
+-    paper_daily_action_plan_path,
+-    paper_execution_log_path,
+-    paper_position_snapshot_path,
+ )
+ 
+ 
+@@ -54,18 +47,9 @@ def _normalize_date(date_str: str) -> str:
+ 
+ 
+ def build_paper_eod_paths(date_str: str, plan_path: str | Path | None = None) -> dict[str, Path]:
+-    clean_date = _normalize_date(date_str)
+-    input_report = Path(plan_path) if plan_path is not None else paper_daily_action_plan_path(clean_date)
+-    outputs = {
+-        "input_report": input_report,
+-        "paper_state": paper_current_state_snapshot_path(clean_date),
+-        "paper_execution_log": paper_execution_log_path(),
+-        "paper_account_snapshot": paper_account_snapshot_path(),
+-        "paper_position_snapshot": paper_position_snapshot_path(),
+-    }
+-    for key in ("paper_state", "paper_execution_log", "paper_account_snapshot", "paper_position_snapshot"):
+-        assert_paper_path(outputs[key], PAPER_TEST_DIR)
+-    return outputs
++    raise ValueError(
++        "EOD paths require explicit account context; use build_account_aware_paper_eod_paths."
++    )
+ 
+ 
+ def build_account_aware_paper_eod_paths(
+@@ -86,10 +70,10 @@ def build_account_aware_paper_eod_paths(
+     for key, path in outputs.items():
+         if key == "input_report":
+             continue
+-        assert_non_default_writer_target(
++        assert_account_writer_target(
+             path,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
++            account_paths=account_paths,
++            command_name="run_paper_eod_update",
+         )
+     return outputs
+ 
+@@ -166,14 +150,11 @@ def load_paper_execution_rows(
+     log_path: Path,
+     account_paths: PaperAccountPaths | None = None,
+ ) -> list[dict[str, Any]]:
+-    if account_paths is not None and account_paths.account_id != "paper_default":
+-        assert_non_default_writer_target(
+-            log_path,
+-            account_id=account_paths.account_id,
+-            account_root=account_paths.root,
+-        )
+-    else:
+-        assert_paper_path(log_path, PAPER_TEST_DIR)
++    assert_account_writer_target(
++        log_path,
++        account_paths=account_paths,
++        command_name="run_paper_eod_update",
++    )
+     if not log_path.exists():
+         return []
+ 
+@@ -305,11 +286,11 @@ def run_paper_eod_dry_run(
+     json_output: bool = False,
+ ) -> int:
+     clean_date = _normalize_date(date_str)
+-    if account_paths is not None and account_paths.account_id != "paper_default":
+-        paths = build_account_aware_paper_eod_paths(date_str, account_paths, plan_path=plan_path)
+-    else:
+-        paths = build_paper_eod_paths(date_str, plan_path=plan_path)
+-        paths["archive_dir"] = PAPER_TEST_DIR / "archive"
++    require_initialized_writer_account_paths(
++        account_paths,
++        command_name="run_paper_eod_update",
++    )
++    paths = build_account_aware_paper_eod_paths(date_str, account_paths, plan_path=plan_path)
+     report_exists = paths["input_report"].exists()
+     parser_mode = "not_run"
+     journal_rows: list[dict[str, Any]] = []
+@@ -449,7 +430,7 @@ def run_paper_eod_dry_run(
+                 source_current_state=str(paths["paper_state"]),
+                 market_valuation=market_valuation,
+                 market_valuation_error=market_valuation_error,
+-                account_id=account_paths.account_id if account_paths is not None else "paper_default",
++                account_id=account_paths.account_id,
+             )
+         except Exception as exc:
+             snapshot_save_error = str(exc)
+@@ -460,7 +441,7 @@ def run_paper_eod_dry_run(
+                 paper_account_state,
+                 market_valuation,
+                 date_str,
+-                account_id=account_paths.account_id if account_paths is not None else "paper_default",
++                account_id=account_paths.account_id,
+             )
+         except Exception as exc:
+             position_snapshot_save_error = str(exc)
+@@ -529,7 +510,7 @@ def run_paper_eod_dry_run(
+     )
+     print("EOD roll-forward intent:")
+     print("  eod_mode: accounting_close")
+-    print(f"  account_id: {account_paths.account_id if account_paths is not None else 'paper_default'}")
++    print(f"  account_id: {account_paths.account_id}")
+     print(f"  date: {target_snapshot_date}")
+     print(f"  execution_candidate_count: {execution_candidate_count}")
+     print(f"  candidate_count_source: {candidate_count_source}")
+@@ -815,7 +796,7 @@ def run_paper_eod_dry_run(
+         print("  WARNING: market valuation failed, but cost-basis snapshot was preserved")
+         print("  WARNING: paper_position_snapshot was skipped")
+     if json_output:
+-        account_id = account_paths.account_id if account_paths is not None else "paper_default"
++        account_id = account_paths.account_id
+         payload = {
+             "schema_version": "paper_eod_update.v1",
+             "runner_result": "PASS",
+@@ -850,6 +831,7 @@ def run_paper_eod_dry_run(
+ def main() -> int:
+     parser = argparse.ArgumentParser(description="Paper EOD update dry-run")
+     parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
++    parser.add_argument("--account-id", required=True, help="Initialized paper account id")
+     parser.add_argument(
+         "--plan-path",
+         help="Optional override path to the paper daily action plan markdown.",
+@@ -865,12 +847,18 @@ def main() -> int:
+         help="Close paper accounting snapshots from the committed execution log without appending execution rows.",
+     )
+     args = parser.parse_args()
+-    return run_paper_eod_dry_run(
+-        args.date,
+-        allow_empty_journal=args.allow_empty_journal,
+-        commit=args.commit,
+-        plan_path=args.plan_path,
+-    )
++    try:
++        account_paths = build_paper_account_paths(args.account_id, create=False)
++        return run_paper_eod_dry_run(
++            args.date,
++            allow_empty_journal=args.allow_empty_journal,
++            commit=args.commit,
++            plan_path=args.plan_path,
++            account_paths=account_paths,
++        )
++    except ValueError as exc:
++        print(f"Paper EOD aborted: {exc}")
++        return 1
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/scripts/runbook_execution_reconciliation_preview.py b/scripts/runbook_execution_reconciliation_preview.py
+index e1f3e0a118fc6f5439551324e22474fddb23e782..3184c84d2ff2f587a17f148932aee8567fe900b5 100644
+--- a/scripts/runbook_execution_reconciliation_preview.py
++++ b/scripts/runbook_execution_reconciliation_preview.py
+@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
+     sys.path.insert(0, str(PROJECT_ROOT))
+ 
+ from core.execution_outcome_flow import derive_execution_preview
++from core.paper_account_guard import require_initialized_writer_account_paths
+ from core.paper_account_paths import build_paper_account_paths
+ from scripts import runbook_state
+ from scripts.runbook_gate_checker import query_manual_execution_rows
+@@ -102,7 +103,10 @@ def write_account_preview(
+     *,
+     account_root: Path | None = None,
+ ) -> dict[str, Path]:
+-    account_paths = build_paper_account_paths(account_id, account_root=account_root, create=True)
++    account_paths = build_paper_account_paths(account_id, account_root=account_root, create=False)
++    require_initialized_writer_account_paths(
++        account_paths, command_name="runbook_execution_reconciliation_preview"
++    )
+     output_dir = account_paths.root / "reconciliation"
+     output_dir.mkdir(parents=True, exist_ok=True)
+     compact_date = trade_date.replace("-", "")
+diff --git a/scripts/sync_notion_execution_status.py b/scripts/sync_notion_execution_status.py
+index 81ab59c199375499526285d6097fe4cf2301bb48..6c2611976b86f9bd28941e973814744d64efb568 100644
+--- a/scripts/sync_notion_execution_status.py
++++ b/scripts/sync_notion_execution_status.py
+@@ -26,6 +26,7 @@ from core.notion_settings import (  # noqa: E402
+     load_notion_settings,
+ )
+ from core.paper_account_paths import build_paper_account_paths  # noqa: E402
++from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
+ 
+ load_dotenv()
+ 
+@@ -55,14 +56,17 @@ def build_parser() -> argparse.ArgumentParser:
+     )
+     parser.add_argument("--date", required=True, help="Execution date in YYYY-MM-DD format")
+     parser.add_argument("--commit-report", required=True, help="Path to manual execution commit report JSON")
+-    parser.add_argument("--account-id", help="Paper account id for status sync namespace")
++    parser.add_argument("--account-id", required=True, help="Paper account id for status sync namespace")
+     parser.add_argument("--dry-run", action="store_true", help="Build sync payload without updating Notion pages")
+     parser.add_argument("--json", action="store_true", help="Print machine-readable result JSON")
+     return parser
+ 
+ 
+ def write_status_sync_report(payload: dict, account_id: str, execution_date: str) -> tuple[Path, Path]:
+-    account_paths = build_paper_account_paths(account_id, create=True)
++    account_paths = build_paper_account_paths(account_id, create=False)
++    require_initialized_writer_account_paths(
++        account_paths, command_name="sync_notion_execution_status"
++    )
+     compact_date = str(execution_date).replace("-", "")
+     json_path = account_paths.reports_dir / f"manual_execution_status_sync_{compact_date}.json"
+     markdown_path = account_paths.reports_dir / f"manual_execution_status_sync_{compact_date}.md"
+@@ -150,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
+     payload = result.to_dict()
+     try:
+         write_status_sync_report(payload, resolved_account_id, args.date)
+-    except OSError as exc:
++    except (OSError, ValueError) as exc:
+         if args.json:
+             print(json.dumps({"overall_status": "FAILED", "error": str(exc)}, ensure_ascii=False, indent=2))
+         else:
+diff --git a/scripts/sync_notion_review_status.py b/scripts/sync_notion_review_status.py
+index 8724030b6d20c14efd398daa50ce9e81e860d6cd..d5c2b355f5367d76543a86271ecc5c6b6c5eea04 100644
+--- a/scripts/sync_notion_review_status.py
++++ b/scripts/sync_notion_review_status.py
+@@ -26,6 +26,7 @@ from core.notion_settings import (  # noqa: E402
+     load_notion_settings,
+ )
+ from core.paper_account_paths import build_paper_account_paths  # noqa: E402
++from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
+ 
+ load_dotenv()
+ 
+@@ -55,14 +56,17 @@ def build_parser() -> argparse.ArgumentParser:
+     )
+     parser.add_argument("--date", required=True, help="Review date in YYYY-MM-DD format")
+     parser.add_argument("--commit-report", required=True, help="Path to manual review commit report JSON")
+-    parser.add_argument("--account-id", help="Paper account id for status sync namespace")
++    parser.add_argument("--account-id", required=True, help="Paper account id for status sync namespace")
+     parser.add_argument("--dry-run", action="store_true", help="Build sync payload without updating Notion pages")
+     parser.add_argument("--json", action="store_true", help="Print machine-readable result JSON")
+     return parser
+ 
+ 
+ def write_status_sync_report(payload: dict, account_id: str, review_date: str) -> tuple[Path, Path]:
+-    account_paths = build_paper_account_paths(account_id, create=True)
++    account_paths = build_paper_account_paths(account_id, create=False)
++    require_initialized_writer_account_paths(
++        account_paths, command_name="sync_notion_review_status"
++    )
+     compact_date = str(review_date).replace("-", "")
+     json_path = account_paths.reports_dir / f"manual_review_status_sync_{compact_date}.json"
+     markdown_path = account_paths.reports_dir / f"manual_review_status_sync_{compact_date}.md"
+@@ -152,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
+     payload = result.to_dict()
+     try:
+         write_status_sync_report(payload, resolved_account_id, args.date)
+-    except OSError as exc:
++    except (OSError, ValueError) as exc:
+         if args.json:
+             print(json.dumps({"overall_status": "FAILED", "error": str(exc)}, ensure_ascii=False, indent=2))
+         else:
+diff --git a/tests/paper_account_test_support.py b/tests/paper_account_test_support.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..06d7bd169ab51602aa6c6530037ca27c0df9329d
+--- /dev/null
++++ b/tests/paper_account_test_support.py
+@@ -0,0 +1,110 @@
++from __future__ import annotations
++
++import csv
++import json
++from pathlib import Path
++
++from core.paper_account_bootstrap import (
++    BOOTSTRAP_CURRENT_STATE_SCHEMA_VERSION,
++    BOOTSTRAP_SOURCE,
++    initialize_paper_account,
++)
++from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
++from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
++from core.paper_account_state import create_initial_paper_state
++from core.paper_current_state_serializer import paper_account_state_to_current_state_dict
++from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
++from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
++
++
++def create_initialized_account_paths(
++    root: Path,
++    *,
++    account_id: str = "paper_test_account",
++    date_str: str = "2026-05-01",
++    initial_cash: float = 100000.0,
++    currency: str = "USD",
++) -> PaperAccountPaths:
++    if account_id != "paper_default":
++        initialize_paper_account(
++            account_id=account_id,
++            initial_cash=initial_cash,
++            currency=currency,
++            date_str=date_str,
++            confirm_create=True,
++            account_root=root,
++        )
++        return build_paper_account_paths(account_id, account_root=root, create=False)
++
++    return ensure_initialized_account_paths(
++        root,
++        account_id=account_id,
++        date_str=date_str,
++        initial_cash=initial_cash,
++        currency=currency,
++    )
++
++
++def ensure_initialized_account_paths(
++    root: Path,
++    *,
++    account_id: str,
++    date_str: str = "2026-05-01",
++    initial_cash: float = 100000.0,
++    currency: str = "USD",
++) -> PaperAccountPaths:
++    """Fill only absent bootstrap artifacts, preserving a test's target artifact."""
++    paths = build_paper_account_paths(account_id, account_root=root, create=False)
++    root.mkdir(parents=True, exist_ok=True)
++    for directory in (
++        paths.reports_dir,
++        paths.reviews_dir,
++        root / "archive",
++        paths.config_snapshots_dir,
++        paths.replay_diff_dir,
++    ):
++        directory.mkdir(parents=True, exist_ok=True)
++
++    account_row = {column: "" for column in PAPER_ACCOUNT_SNAPSHOT_COLUMNS}
++    account_row.update(
++        account_id=account_id,
++        snapshot_date=date_str,
++        currency=currency,
++        initial_cash=f"{initial_cash:.2f}",
++        cash=f"{initial_cash:.2f}",
++        positions_cost_value="0.00",
++        total_equity_cost_basis=f"{initial_cash:.2f}",
++        cash_ratio_cost_basis="1.0000000",
++        position_count="0",
++        applied_trade_count="0",
++        valuation_method="init",
++        realized_pnl="0.00",
++    )
++    if not paths.account_snapshot_path.exists():
++        _write_csv(paths.account_snapshot_path, PAPER_ACCOUNT_SNAPSHOT_COLUMNS, [account_row])
++    if not paths.position_snapshot_path.exists():
++        _write_csv(paths.position_snapshot_path, PAPER_POSITION_SNAPSHOT_COLUMNS, [])
++    if not paths.execution_log_path.exists():
++        _write_csv(paths.execution_log_path, PAPER_EXECUTION_LOG_COLUMNS, [])
++
++    state = create_initial_paper_state(initial_cash=initial_cash, currency=currency)
++    payload = paper_account_state_to_current_state_dict(state, date_str)
++    payload.update(
++        account_id=account_id,
++        snapshot_date=date_str,
++        source=BOOTSTRAP_SOURCE,
++        schema_version=BOOTSTRAP_CURRENT_STATE_SCHEMA_VERSION,
++    )
++    if not any(paths.root.glob("paper_current_state_*.json")):
++        paths.current_state_snapshot_path(date_str).write_text(
++            json.dumps(payload, ensure_ascii=False, indent=2),
++            encoding="utf-8",
++        )
++    return paths
++
++
++def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
++    with path.open("w", encoding="utf-8-sig", newline="") as handle:
++        writer = csv.DictWriter(handle, fieldnames=fieldnames)
++        writer.writeheader()
++        writer.writerows(rows)
+diff --git a/tests/test_acct01b_writer_consumer_closure.py b/tests/test_acct01b_writer_consumer_closure.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6cf8930b4b1befee419c54e4c3bd2513fefff687
+--- /dev/null
++++ b/tests/test_acct01b_writer_consumer_closure.py
+@@ -0,0 +1,234 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++import core.paper_account_paths as account_paths_module
++from core.paper_account_bootstrap import initialize_paper_account
++from core.paper_account_guard import (
++    assert_account_writer_target,
++    require_initialized_writer_account_paths,
++)
++from core.paper_account_paths import build_paper_account_paths
++from core.paper_account_state import create_initial_paper_state
++from core.paper_current_state_storage import save_paper_current_state
++from core.paths import PAPER_TEST_DIR
++from scripts import (
++    import_notion_executions,
++    import_notion_reviews,
++    paper,
++    sync_notion_execution_status,
++)
++from scripts.reset_paper_execution_log import reset_paper_execution_log
++from scripts.runbook_execution_reconciliation_preview import write_account_preview
++
++
++def _initialized_paths(root: Path, account_id: str):
++    root.mkdir(parents=True)
++    account_paths = build_paper_account_paths(account_id, account_root=root, create=False)
++    account_paths.account_snapshot_path.write_text("snapshot_date\n", encoding="utf-8")
++    account_paths.position_snapshot_path.write_text("snapshot_date\n", encoding="utf-8")
++    account_paths.execution_log_path.write_text("trade_id\n", encoding="utf-8")
++    account_paths.current_state_snapshot_path("2026-09-05").write_text("{}", encoding="utf-8")
++    return account_paths
++
++
++@pytest.mark.parametrize("account_id", ["paper_default", "paper_growth"])
++def test_explicit_initialized_account_writes_under_its_root(
++    tmp_path: Path,
++    monkeypatch,
++    account_id: str,
++):
++    accounts_root = tmp_path / "paper_accounts"
++    monkeypatch.setattr(account_paths_module, "PAPER_ACCOUNTS_ROOT", accounts_root)
++    account_paths = _initialized_paths(accounts_root / account_id, account_id)
++    assert account_paths.root == accounts_root / account_id
++    output_path = account_paths.current_state_snapshot_path("2026-09-06")
++
++    result = save_paper_current_state(
++        create_initial_paper_state(),
++        "2026-09-06",
++        output_path,
++        account_paths.root / "archive",
++        account_paths=account_paths,
++    )
++
++    assert result["path"] == output_path
++    assert output_path.is_file()
++    assert output_path.resolve().is_relative_to(account_paths.root.resolve())
++
++
++def test_direct_writer_without_account_context_fails_closed(tmp_path: Path):
++    with pytest.raises(ValueError, match="requires explicit account_paths"):
++        save_paper_current_state(
++            create_initial_paper_state(),
++            "2026-09-06",
++            tmp_path / "paper_current_state_20260906.json",
++            tmp_path / "archive",
++        )
++
++
++def test_legacy_default_root_is_read_only_for_writers():
++    account_paths = build_paper_account_paths(
++        "paper_default",
++        account_root=PAPER_TEST_DIR,
++        allow_legacy_default=True,
++        create=False,
++    )
++    with pytest.raises(ValueError, match="cannot write to legacy"):
++        require_initialized_writer_account_paths(
++            account_paths,
++            command_name="test writer",
++        )
++
++
++def test_cross_account_target_is_rejected(tmp_path: Path):
++    account_a = _initialized_paths(tmp_path / "paper_a", "paper_a")
++    account_b = _initialized_paths(tmp_path / "paper_b", "paper_b")
++    with pytest.raises(ValueError, match="not under"):
++        assert_account_writer_target(
++            account_b.execution_log_path,
++            account_paths=account_a,
++            command_name="test writer",
++        )
++
++
++def test_uninitialized_writer_fails_without_creating_root(tmp_path: Path):
++    root = tmp_path / "paper_missing"
++    account_paths = build_paper_account_paths(
++        "paper_missing",
++        account_root=root,
++        create=False,
++    )
++    with pytest.raises(ValueError, match="requires an initialized account root"):
++        reset_paper_execution_log(account_paths=account_paths, commit=True)
++    assert not root.exists()
++
++
++def test_missing_non_default_root_points_to_init_account_without_creation(tmp_path: Path):
++    root = tmp_path / "paper_missing"
++    account_paths = build_paper_account_paths("paper_missing", account_root=root, create=False)
++
++    with pytest.raises(ValueError) as exc_info:
++        require_initialized_writer_account_paths(account_paths, command_name="test writer")
++
++    message = str(exc_info.value)
++    assert "init-account --account-id paper_missing --confirm-create" in message
++    assert not root.exists()
++
++
++def test_missing_paper_default_root_points_to_migration_without_dead_end(tmp_path: Path):
++    root = tmp_path / "paper_default"
++    account_paths = build_paper_account_paths("paper_default", account_root=root, create=False)
++
++    with pytest.raises(ValueError) as exc_info:
++        require_initialized_writer_account_paths(account_paths, command_name="test writer")
++
++    message = str(exc_info.value)
++    assert "migration or separately approved initialization is required" in message
++    assert "init-account --account-id paper_default" not in message
++    assert not root.exists()
++
++
++def test_empty_account_directory_is_not_initialized(tmp_path: Path):
++    root = tmp_path / "paper_empty"
++    root.mkdir()
++    account_paths = build_paper_account_paths("paper_empty", account_root=root, create=False)
++
++    with pytest.raises(ValueError, match="missing bootstrap core artifacts"):
++        require_initialized_writer_account_paths(account_paths, command_name="test writer")
++
++    assert list(root.iterdir()) == []
++
++
++def test_partial_bootstrap_artifacts_are_not_initialized_or_repaired(tmp_path: Path):
++    root = tmp_path / "paper_partial"
++    root.mkdir()
++    account_paths = build_paper_account_paths("paper_partial", account_root=root, create=False)
++    account_paths.account_snapshot_path.write_text("snapshot_date\n", encoding="utf-8")
++    before = sorted(path.name for path in root.iterdir())
++
++    with pytest.raises(ValueError, match="paper_position_snapshot.csv"):
++        require_initialized_writer_account_paths(account_paths, command_name="test writer")
++
++    assert sorted(path.name for path in root.iterdir()) == before
++
++
++def test_frozen_account_context_can_drive_writer_preview(tmp_path: Path):
++    account_paths = _initialized_paths(tmp_path / "paper_frozen", "paper_frozen")
++    before = account_paths.execution_log_path.read_text(encoding="utf-8-sig")
++    result = reset_paper_execution_log(account_paths=account_paths, commit=False)
++    assert result["write_performed"] is False
++    assert result["log_path"] == account_paths.execution_log_path
++    assert account_paths.execution_log_path.read_text(encoding="utf-8-sig") == before
++
++
++def test_runbook_writer_uses_frozen_account_root(tmp_path: Path):
++    root = tmp_path / "paper_frozen"
++    _initialized_paths(root, "paper_frozen")
++    result = write_account_preview(
++        "paper_frozen",
++        "2026-09-08",
++        {
++            "schema_version": "execution_reconciliation_preview.v2",
++            "runner_result": "PASS",
++            "account_id": "paper_frozen",
++            "rows": [],
++        },
++        account_root=root,
++    )
++    assert result["json"].resolve().is_relative_to(root.resolve())
++    assert result["md"].resolve().is_relative_to(root.resolve())
++
++
++def test_sync_report_stays_in_selected_account_namespace(tmp_path: Path, monkeypatch):
++    account_paths = _initialized_paths(tmp_path / "paper_sync", "paper_sync")
++    monkeypatch.setattr(
++        sync_notion_execution_status,
++        "build_paper_account_paths",
++        lambda account_id, create=False: account_paths,
++    )
++    payload = {"account_id": "paper_sync", "execution_date": "2026-09-08"}
++    json_path, markdown_path = sync_notion_execution_status.write_status_sync_report(
++        payload,
++        "paper_sync",
++        "2026-09-08",
++    )
++    assert json_path.parent == account_paths.reports_dir
++    assert markdown_path.parent == account_paths.reports_dir
++    assert json_path.is_file() and markdown_path.is_file()
++
++
++def test_init_account_remains_the_root_creation_owner(tmp_path: Path):
++    root = tmp_path / "paper_bootstrap"
++    result = initialize_paper_account(
++        account_id="paper_bootstrap",
++        initial_cash=100000,
++        currency="USD",
++        date_str="2026-09-06",
++        confirm_create=True,
++        account_root=root,
++    )
++    assert result["created"] is True
++    assert root.is_dir()
++    assert (root / "paper_execution_log.csv").is_file()
++    account_paths = build_paper_account_paths("paper_bootstrap", account_root=root, create=False)
++    assert require_initialized_writer_account_paths(
++        account_paths,
++        command_name="test writer",
++    ) is account_paths
++
++
++@pytest.mark.parametrize(
++    "builder,argv",
++    [
++        (paper.build_parser, ["eod", "--date", "2026-09-06", "--dry-run"]),
++        (import_notion_executions.build_parser, ["--date", "2026-09-06", "--preview"]),
++        (import_notion_reviews.build_parser, ["--date", "2026-09-06", "--preview"]),
++    ],
++)
++def test_writer_cli_requires_account_id(builder, argv):
++    with pytest.raises(SystemExit) as exc_info:
++        builder().parse_args(argv)
++    assert exc_info.value.code == 2
+diff --git a/tests/test_notion_manual_execution_importer.py b/tests/test_notion_manual_execution_importer.py
+index 6b332a1dccb24007c94d819712c0e82288fae16b..a43ee6290e3cd9d881f6807a2c87857ed47dbb9e 100644
+--- a/tests/test_notion_manual_execution_importer.py
++++ b/tests/test_notion_manual_execution_importer.py
+@@ -18,6 +18,7 @@ from core.notion_settings import NotionSettings
+ from core.paper_account_paths import PaperAccountPaths
+ from core.paper_execution_log import build_paper_trade_id
+ from scripts import import_notion_executions as execution_script
++from tests.paper_account_test_support import ensure_initialized_account_paths
+ 
+ 
+ def _settings() -> NotionSettings:
+@@ -512,6 +513,11 @@ def test_non_default_preview_rejects_mismatched_account_paths(tmp_path):
+ def test_cli_preview_passes_non_default_account_paths(monkeypatch, tmp_path):
+     captured: dict[str, object] = {}
+     account_paths = _account_paths("paper_pilot_202606", tmp_path / "paper_pilot_202606")
++    ensure_initialized_account_paths(
++        account_paths.root,
++        account_id=account_paths.account_id,
++        date_str="2026-06-04",
++    )
+ 
+     class Preview:
+         account_id = "paper_pilot_202606"
+@@ -551,7 +557,7 @@ def test_cli_preview_passes_non_default_account_paths(monkeypatch, tmp_path):
+ 
+     assert rc == 0
+     assert captured["path_account_id"] == "paper_pilot_202606"
+-    assert captured["path_create"] is True
++    assert captured["path_create"] is False
+     assert captured["account_id"] == "paper_pilot_202606"
+     assert captured["account_paths"] == account_paths
+ 
+@@ -642,7 +648,17 @@ def test_cli_commit_requires_pass_reconciliation_before_commit(monkeypatch, tmp_
+         called.update(kwargs)
+         return Result()
+ 
+-    monkeypatch.setattr(execution_script, "build_paper_account_paths", lambda account_id, create=False: object())
++    account_paths = _account_paths("paper_growth", tmp_path / "paper_growth")
++    ensure_initialized_account_paths(
++        account_paths.root,
++        account_id=account_paths.account_id,
++        date_str="2026-05-24",
++    )
++    monkeypatch.setattr(
++        execution_script,
++        "build_paper_account_paths",
++        lambda account_id, create=False: account_paths,
++    )
+     monkeypatch.setattr(execution_script, "commit_manual_execution_preview", fake_commit_manual_execution_preview)
+ 
+     exit_code = execution_script.main(
+diff --git a/tests/test_notion_manual_execution_status_sync.py b/tests/test_notion_manual_execution_status_sync.py
+index e9db4bb5de18aa1abbbce723132de2bb10b9ea9a..ba9ce5e59b7111847a3b110db0a8662f2850a928 100644
+--- a/tests/test_notion_manual_execution_status_sync.py
++++ b/tests/test_notion_manual_execution_status_sync.py
+@@ -14,6 +14,7 @@ from core.notion_manual_execution_status_sync import (
+     summarize_validation_issues,
+     sync_manual_execution_status,
+ )
++from tests.paper_account_test_support import ensure_initialized_account_paths
+ 
+ 
+ def _mapping_root() -> dict[str, dict[str, str]]:
+@@ -290,10 +291,16 @@ def test_cli_account_id_mismatch_fails(monkeypatch, tmp_path, capsys):
+ 
+ 
+ def test_status_sync_report_writer_creates_json_and_markdown(monkeypatch, tmp_path):
+-    class FakeAccountPaths:
+-        reports_dir = tmp_path / "reports"
+-
+-    monkeypatch.setattr(execution_sync_script, "build_paper_account_paths", lambda account_id, create=True: FakeAccountPaths())
++    account_paths = ensure_initialized_account_paths(
++        tmp_path,
++        account_id="paper_growth",
++        date_str="2026-05-24",
++    )
++    monkeypatch.setattr(
++        execution_sync_script,
++        "build_paper_account_paths",
++        lambda account_id, create=False: account_paths,
++    )
+     payload = {
+         "account_id": "paper_growth",
+         "execution_date": "2026-05-25",
+diff --git a/tests/test_notion_manual_review_importer.py b/tests/test_notion_manual_review_importer.py
+index bbc2bb0050a2efbfe9307a3daa0a83a99c4e1496..4c0977a491635f8cbfa5c21c9672411f8942c83c 100644
+--- a/tests/test_notion_manual_review_importer.py
++++ b/tests/test_notion_manual_review_importer.py
+@@ -16,6 +16,7 @@ from core.notion_manual_review_importer import (
+ from core.notion_settings import NotionSettings
+ from core.paper_account_paths import build_paper_account_paths
+ from scripts import import_notion_reviews as review_script
++from tests.paper_account_test_support import ensure_initialized_account_paths
+ 
+ 
+ def _settings() -> NotionSettings:
+@@ -475,9 +476,14 @@ def test_non_default_preview_uses_account_specific_review_paths(monkeypatch, tmp
+     assert str(tmp_path / "paper_test") not in preview.json_path
+ 
+ 
+-def test_cli_review_preview_passes_non_default_account_paths(monkeypatch):
++def test_cli_review_preview_passes_non_default_account_paths(monkeypatch, tmp_path):
+     captured: dict[str, object] = {}
+-    account_paths = build_paper_account_paths("paper_growth", account_root=Path("tmp") / "paper_growth")
++    account_paths = build_paper_account_paths("paper_growth", account_root=tmp_path / "paper_growth")
++    ensure_initialized_account_paths(
++        account_paths.root,
++        account_id=account_paths.account_id,
++        date_str="2026-05-24",
++    )
+ 
+     class DummyPreview:
+         account_id = "paper_growth"
+@@ -522,8 +528,15 @@ def test_cli_review_preview_passes_non_default_account_paths(monkeypatch):
+     assert captured["account_paths"] is account_paths
+ 
+ 
+-def test_commit_mode_returns_not_implemented(capsys):
+-    exit_code = review_script.main(["--date", "2026-05-25", "--commit", "--json", "--preview-json", "missing.json"])
++def test_commit_mode_returns_not_implemented(capsys, monkeypatch, tmp_path):
++    account_paths = build_paper_account_paths("paper_default", account_root=tmp_path / "paper_default")
++    ensure_initialized_account_paths(
++        account_paths.root,
++        account_id=account_paths.account_id,
++        date_str="2026-05-24",
++    )
++    monkeypatch.setattr(review_script, "build_paper_account_paths", lambda account_id, create=False: account_paths)
++    exit_code = review_script.main(["--date", "2026-05-25", "--account-id", "paper_default", "--commit", "--json", "--preview-json", "missing.json"])
+     captured = capsys.readouterr()
+     assert exit_code == 1
+     assert "Preview JSON not found" in captured.out
+@@ -580,7 +593,14 @@ def test_invalid_account_id_fails_for_review_preview(monkeypatch, tmp_path):
+         )
+ 
+ 
+-def test_cli_blocks_non_default_review_commit(capsys):
++def test_cli_blocks_non_default_review_commit(capsys, monkeypatch, tmp_path):
++    account_paths = build_paper_account_paths("paper_growth", account_root=tmp_path / "paper_growth")
++    ensure_initialized_account_paths(
++        account_paths.root,
++        account_id=account_paths.account_id,
++        date_str="2026-05-24",
++    )
++    monkeypatch.setattr(review_script, "build_paper_account_paths", lambda account_id, create=False: account_paths)
+     exit_code = review_script.main(
+         [
+             "--date",
+diff --git a/tests/test_paper15_3e_4d_import_commit_sync_contract.py b/tests/test_paper15_3e_4d_import_commit_sync_contract.py
+index e9e74dd4b222abed4de0bc7e92e7f2b08a2f52b5..1108d70134ed21deeb94de474f4ff464576135e3 100644
+--- a/tests/test_paper15_3e_4d_import_commit_sync_contract.py
++++ b/tests/test_paper15_3e_4d_import_commit_sync_contract.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import csv
+ import json
+ import shutil
++import sys
+ from pathlib import Path
+ from uuid import uuid4
+ 
+@@ -20,6 +21,8 @@ import core.paper_manual_review_log_validator as paper_manual_review_log_validat
+ import core.paper_manual_review_append_commit as review_commit_module
+ import core.paper_position_snapshot as paper_position_snapshot_module
+ from core.paper_account_paths import build_paper_account_paths
++from tests.paper_account_test_support import ensure_initialized_account_paths
++from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
+ from core.notion_manual_execution_importer import build_manual_execution_preview
+ from core.notion_manual_execution_status_sync import (
+     build_manual_execution_status_properties,
+@@ -41,6 +44,7 @@ from core.paper_manual_review_append_commit import (
+     commit_manual_review_preview,
+ )
+ from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
++from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
+ from core.paths import OUTPUTS, PAPER_TEST_DIR
+ 
+ 
+@@ -225,14 +229,25 @@ def _seed_execution_ledgers(root: Path) -> None:
+     account_path = root / "paper_account_snapshot.csv"
+     position_path = root / "paper_position_snapshot.csv"
+     execution_path = root / "paper_execution_log.csv"
+-    _write_csv(
+-        account_path,
+-        ["snapshot_date", "currency", "initial_cash", "cash"],
+-        [{"snapshot_date": "2026-05-24", "currency": "USD", "initial_cash": "1000.00", "cash": "1000.00"}],
++    account_columns = [column for column in PAPER_ACCOUNT_SNAPSHOT_COLUMNS if column != "account_id"]
++    account_row = {column: "" for column in account_columns}
++    account_row.update(
++        snapshot_date="2026-05-24",
++        currency="USD",
++        initial_cash="1000.00",
++        cash="1000.00",
++        positions_cost_value="0.00",
++        total_equity_cost_basis="1000.00",
++        cash_ratio_cost_basis="1.0000000",
++        position_count="0",
++        applied_trade_count="0",
++        valuation_method="cost_basis",
++        realized_pnl="0.00",
+     )
++    _write_csv(account_path, account_columns, [account_row])
+     _write_csv(
+         position_path,
+-        ["snapshot_date", "symbol", "shares"],
++        [column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "account_id"],
+         [],
+     )
+     _write_csv(execution_path, PAPER_EXECUTION_LOG_COLUMNS, [])
+@@ -365,23 +380,22 @@ def execution_contract_env(monkeypatch, tmp_path: Path):
+     reports_dir.mkdir(parents=True, exist_ok=True)
+     backups_dir.mkdir(parents=True, exist_ok=True)
+     _seed_execution_ledgers(root)
++    ensure_initialized_account_paths(root, account_id="paper_default", date_str="2026-05-24")
+ 
+     monkeypatch.setattr(execution_importer, "paper_account_snapshot_path", lambda: root / "paper_account_snapshot.csv")
+     monkeypatch.setattr(execution_importer, "paper_position_snapshot_path", lambda: root / "paper_position_snapshot.csv")
+     monkeypatch.setattr(execution_importer, "paper_reports_dir", lambda: reports_dir)
+ 
+-    monkeypatch.setattr(execution_commit_module, "paper_execution_log_path", lambda: root / "paper_execution_log.csv")
+-    monkeypatch.setattr(execution_commit_module, "paper_account_snapshot_path", lambda: root / "paper_account_snapshot.csv")
+-    monkeypatch.setattr(execution_commit_module, "paper_position_snapshot_path", lambda: root / "paper_position_snapshot.csv")
+-    monkeypatch.setattr(execution_commit_module, "paper_current_state_snapshot_path", lambda date: current_state_path)
+-    monkeypatch.setattr(execution_commit_module, "paper_reports_dir", lambda: reports_dir)
+-    monkeypatch.setattr(execution_commit_module, "dev_backups_dir", lambda: backups_dir)
+     monkeypatch.setattr(execution_commit_module, "market_db_path", lambda: str(root / "unused_market.db"))
+     monkeypatch.setattr(execution_commit_module, "value_paper_account_state", _fake_valuation)
+-    monkeypatch.setattr(paper_execution_log_module, "assert_paper_path", lambda path, paper_root: None)
+-    monkeypatch.setattr(paper_current_state_storage_module, "assert_paper_path", lambda path, paper_root: None)
+-    monkeypatch.setattr(paper_account_snapshot_module, "assert_paper_path", lambda path, paper_root: None)
+-    monkeypatch.setattr(paper_position_snapshot_module, "assert_paper_path", lambda path, paper_root: None)
++    account_paths = build_paper_account_paths("paper_default", account_root=root, create=False)
++    real_commit = commit_manual_execution_preview
++
++    def _commit_with_account_context(**kwargs):
++        kwargs.setdefault("account_paths", account_paths)
++        return real_commit(**kwargs)
++
++    monkeypatch.setattr(sys.modules[__name__], "commit_manual_execution_preview", _commit_with_account_context)
+     yield root
+     if root.exists():
+         shutil.rmtree(root, ignore_errors=True)
+@@ -396,15 +410,24 @@ def review_contract_env(monkeypatch, tmp_path: Path):
+     reports_dir.mkdir(parents=True, exist_ok=True)
+     backups_dir.mkdir(parents=True, exist_ok=True)
+     _seed_review_files(root)
++    ensure_initialized_account_paths(root, account_id="paper_default", date_str="2026-05-24")
+ 
+     monkeypatch.setattr(review_importer, "paper_reviews_dir", lambda: root)
+     monkeypatch.setattr(review_importer, "paper_reports_dir", lambda: reports_dir)
+-    monkeypatch.setattr(review_commit_module, "paper_reviews_dir", lambda: root)
+-    monkeypatch.setattr(review_commit_module, "paper_reports_dir", lambda: reports_dir)
+-    monkeypatch.setattr(review_commit_module, "dev_backups_dir", lambda: backups_dir)
+     monkeypatch.setattr(paper_manual_review_log_append_module, "assert_paper_path", lambda path, paper_root: None)
+     monkeypatch.setattr(paper_manual_review_log_template_module, "assert_paper_path", lambda path, paper_root: None)
+     monkeypatch.setattr(paper_manual_review_log_validator_module, "assert_paper_path", lambda path, paper_root: None)
++    account_paths = build_paper_account_paths("paper_default", account_root=root, create=False)
++    real_commit = commit_manual_review_preview
++
++    def _commit_with_account_context(**kwargs):
++        kwargs.setdefault("account_paths", account_paths)
++        kwargs.setdefault("review_log_path", root / "paper_manual_review_log.csv")
++        kwargs.setdefault("template_path", root / "paper_manual_review_log_template.csv")
++        kwargs.setdefault("reports_dir", reports_dir)
++        return real_commit(**kwargs)
++
++    monkeypatch.setattr(sys.modules[__name__], "commit_manual_review_preview", _commit_with_account_context)
+     yield root
+     if root.exists():
+         shutil.rmtree(root, ignore_errors=True)
+@@ -534,6 +557,11 @@ def test_non_default_execution_contract_keeps_account_namespace_and_syncs_from_a
+         allow_legacy_default=False,
+         create=True,
+     )
++    ensure_initialized_account_paths(
++        execution_contract_env,
++        account_id="paper_growth",
++        date_str="2026-05-24",
++    )
+     commit_result = commit_manual_execution_preview(
+         execution_date="2026-05-25",
+         preview_json_path=Path(preview.json_path),
+@@ -615,6 +643,11 @@ def test_non_default_review_contract_keeps_account_namespace_and_syncs_from_acco
+         allow_legacy_default=False,
+         create=True,
+     )
++    ensure_initialized_account_paths(
++        review_contract_env,
++        account_id="paper_growth",
++        date_str="2026-05-24",
++    )
+     append_result = commit_manual_review_preview(
+         review_date="2026-05-25",
+         preview_json_path=Path(preview.json_path),
+diff --git a/tests/test_paper_account_snapshot.py b/tests/test_paper_account_snapshot.py
+index 26326554d2e1bcf3fc3401adc8aaefe212112a2e..351dcb12a4bf97a2d90570502f8894ea08060e01 100644
+--- a/tests/test_paper_account_snapshot.py
++++ b/tests/test_paper_account_snapshot.py
+@@ -2,7 +2,6 @@ import csv
+ import json
+ from datetime import datetime
+ from pathlib import Path
+-from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -13,6 +12,7 @@ from core.paper_account_snapshot import (
+ )
+ from core.paper_market_valuation import PaperAccountValuation
+ from core.paper_account_state import build_paper_state_from_trades, create_initial_paper_state
++from tests.paper_account_test_support import ensure_initialized_account_paths
+ 
+ 
+ def _make_trade(
+@@ -38,8 +38,8 @@ def _read_rows(path: Path) -> list[dict]:
+         return list(csv.DictReader(handle))
+ 
+ 
+-def _account_paths(root: Path, account_id: str = "paper_growth") -> SimpleNamespace:
+-    return SimpleNamespace(account_id=account_id, root=root)
++def _account_paths(root: Path, account_id: str = "paper_growth"):
++    return ensure_initialized_account_paths(root, account_id=account_id)
+ 
+ 
+ def test_build_paper_account_snapshot_row_calculates_cost_basis_fields():
+@@ -325,7 +325,7 @@ def test_save_account_snapshot_backfills_legacy_identity_under_account_root(tmp_
+         writer = csv.DictWriter(handle, fieldnames=legacy_fieldnames)
+         writer.writeheader()
+         writer.writerow(legacy_row)
+-    account_paths = SimpleNamespace(account_id="paper_growth", root=root)
++    account_paths = _account_paths(root)
+     row = build_paper_account_snapshot_row(
+         create_initial_paper_state(),
+         "2026-05-09",
+@@ -379,11 +379,11 @@ def test_save_account_snapshot_rejects_mixed_identity_without_mutation(tmp_path)
+             row,
+             snapshot_path,
+             archive_dir,
+-            account_paths=SimpleNamespace(account_id="paper_growth", root=root),
++            account_paths=_account_paths(root),
+         )
+ 
+     assert snapshot_path.read_bytes() == before
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+ 
+ 
+ def test_save_account_snapshot_rejects_headerless_legacy_file_without_mutation(tmp_path):
+@@ -407,7 +407,7 @@ def test_save_account_snapshot_rejects_headerless_legacy_file_without_mutation(t
+         )
+ 
+     assert snapshot_path.read_bytes() == b""
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+ 
+ 
+ def test_account_snapshot_rejects_unknown_header_without_mutation(tmp_path):
+@@ -445,7 +445,7 @@ def test_account_snapshot_rejects_unknown_header_without_mutation(tmp_path):
+ 
+     assert "unknown_legacy_field" in str(exc_info.value)
+     assert snapshot_path.read_bytes() == before
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+ 
+ 
+ def test_account_snapshot_rejects_extra_values_without_mutation(tmp_path):
+@@ -479,7 +479,7 @@ def test_account_snapshot_rejects_extra_values_without_mutation(tmp_path):
+         )
+ 
+     assert snapshot_path.read_bytes() == before
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+ 
+ 
+ def test_account_snapshot_rejects_missing_required_header_without_mutation(tmp_path):
+@@ -518,7 +518,7 @@ def test_account_snapshot_rejects_missing_required_header_without_mutation(tmp_p
+ 
+     assert "currency" in str(exc_info.value)
+     assert snapshot_path.read_bytes() == before
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+ 
+ 
+ def test_account_snapshot_does_not_migrate_when_account_id_and_other_column_are_missing(tmp_path):
+@@ -555,4 +555,4 @@ def test_account_snapshot_does_not_migrate_when_account_id_and_other_column_are_
+     assert "account_id" in str(exc_info.value)
+     assert "currency" in str(exc_info.value)
+     assert snapshot_path.read_bytes() == before
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+diff --git a/tests/test_paper_cli.py b/tests/test_paper_cli.py
+index 60fbd635b252c9510b4b47f65b3fccb827a47bcc..6eeb142264e6c53e5022fd9cb6f88971eac10ece 100644
+--- a/tests/test_paper_cli.py
++++ b/tests/test_paper_cli.py
+@@ -8,6 +8,15 @@ import pytest
+ from scripts import paper
+ 
+ 
++@pytest.fixture(autouse=True)
++def _allow_initialized_writer_context_for_cli_orchestration(monkeypatch):
++    monkeypatch.setattr(
++        paper,
++        "require_initialized_writer_account_paths",
++        lambda account_paths, **kwargs: account_paths,
++    )
++
++
+ def test_help_shows_subcommands(capsys):
+     exit_code = paper.main([])
+     output = capsys.readouterr().out
+@@ -695,7 +704,7 @@ def test_commit_calls_eod_commit_only(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "check_same_date_commit_guard",
+-        lambda date_str: {
++        lambda date_str, **kwargs: {
+             "allowed": True,
+             "error": None,
+             "normalized_date": "2026-05-13",
+@@ -709,7 +718,7 @@ def test_commit_calls_eod_commit_only(monkeypatch):
+         return 0
+ 
+     monkeypatch.setattr(paper, "handle_eod", fake_handle_eod)
+-    exit_code = paper.main(["commit", "--date", "20260513"])
++    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert captured == [(False, True, "20260513")]
+ 
+@@ -718,7 +727,7 @@ def test_commit_blocks_when_current_state_snapshot_exists(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "check_same_date_commit_guard",
+-        lambda date_str: {
++        lambda date_str, **kwargs: {
+             "allowed": False,
+             "error": None,
+             "normalized_date": "2026-05-13",
+@@ -733,7 +742,7 @@ def test_commit_blocks_when_current_state_snapshot_exists(monkeypatch):
+         return 0
+ 
+     monkeypatch.setattr(paper, "handle_eod", fake_handle_eod)
+-    exit_code = paper.main(["commit", "--date", "20260513"])
++    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 1
+     assert called["eod"] is False
+ 
+@@ -742,7 +751,7 @@ def test_commit_blocks_when_account_snapshot_has_same_date(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "check_same_date_commit_guard",
+-        lambda date_str: {
++        lambda date_str, **kwargs: {
+             "allowed": False,
+             "error": None,
+             "normalized_date": "2026-05-13",
+@@ -751,7 +760,7 @@ def test_commit_blocks_when_account_snapshot_has_same_date(monkeypatch):
+         },
+     )
+     monkeypatch.setattr(paper, "handle_eod", lambda args: 0)
+-    exit_code = paper.main(["commit", "--date", "20260513"])
++    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 1
+ 
+ 
+@@ -759,7 +768,7 @@ def test_commit_blocks_when_position_snapshot_has_same_date(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "check_same_date_commit_guard",
+-        lambda date_str: {
++        lambda date_str, **kwargs: {
+             "allowed": False,
+             "error": None,
+             "normalized_date": "2026-05-13",
+@@ -768,7 +777,7 @@ def test_commit_blocks_when_position_snapshot_has_same_date(monkeypatch):
+         },
+     )
+     monkeypatch.setattr(paper, "handle_eod", lambda args: 0)
+-    exit_code = paper.main(["commit", "--date", "20260513"])
++    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 1
+ 
+ 
+@@ -778,7 +787,7 @@ def test_commit_allows_replace_on_same_date(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "check_same_date_commit_guard",
+-        lambda date_str: {
++        lambda date_str, **kwargs: {
+             "allowed": False,
+             "error": None,
+             "normalized_date": "2026-05-13",
+@@ -792,7 +801,7 @@ def test_commit_allows_replace_on_same_date(monkeypatch):
+         return 7
+ 
+     monkeypatch.setattr(paper, "handle_eod", fake_handle_eod)
+-    exit_code = paper.main(["commit", "--date", "20260513", "--replace"])
++    exit_code = paper.main(["commit", "--date", "20260513", "--replace", "--account-id", "paper_growth"])
+     assert exit_code == 7
+     assert captured == [(False, True, "20260513")]
+ 
+@@ -801,7 +810,7 @@ def test_commit_guard_error_returns_one(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "check_same_date_commit_guard",
+-        lambda date_str: {
++        lambda date_str, **kwargs: {
+             "allowed": False,
+             "error": "failed to parse paper_account_snapshot.csv",
+             "normalized_date": "2026-05-13",
+@@ -810,7 +819,7 @@ def test_commit_guard_error_returns_one(monkeypatch):
+         },
+     )
+     monkeypatch.setattr(paper, "handle_eod", lambda args: 0)
+-    exit_code = paper.main(["commit", "--date", "20260513"])
++    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 1
+ 
+ 
+@@ -820,7 +829,7 @@ def test_commit_guard_does_not_call_prepare_reports_or_review(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "check_same_date_commit_guard",
+-        lambda date_str: {
++        lambda date_str, **kwargs: {
+             "allowed": True,
+             "error": None,
+             "normalized_date": "2026-05-13",
+@@ -833,7 +842,7 @@ def test_commit_guard_does_not_call_prepare_reports_or_review(monkeypatch):
+     monkeypatch.setattr(paper, "handle_reports", lambda args: called.__setitem__("reports", True) or 0)
+     monkeypatch.setattr(paper, "handle_review_template", lambda args: called.__setitem__("review_template", True) or 0)
+     monkeypatch.setattr(paper, "handle_review_validate", lambda args: called.__setitem__("review_validate", True) or 0)
+-    exit_code = paper.main(["commit", "--date", "20260513"])
++    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert called == {"prepare": False, "reports": False, "review_template": False, "review_validate": False}
+ 
+@@ -950,7 +959,7 @@ def test_preflight_subcommand_calls_paper_preflight(monkeypatch):
+ def test_plan_subcommand_runs_preflight_first(monkeypatch):
+     order: list[str] = []
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         order.append("preflight")
+         return {
+             "stage": stage,
+@@ -968,7 +977,7 @@ def test_plan_subcommand_runs_preflight_first(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "run_paper_daily_plan", fake_run_paper_daily_plan)
+-    exit_code = paper.main(["plan", "--date", "20260513"])
++    exit_code = paper.main(["plan", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert order == ["preflight", "plan"]
+ 
+@@ -976,7 +985,7 @@ def test_plan_subcommand_runs_preflight_first(monkeypatch):
+ def test_plan_aborts_when_preflight_fails(monkeypatch):
+     called = {"plan": False}
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         return {
+             "stage": stage,
+             "date": date_str or "",
+@@ -993,7 +1002,7 @@ def test_plan_aborts_when_preflight_fails(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "run_paper_daily_plan", fake_run_paper_daily_plan)
+-    exit_code = paper.main(["plan", "--date", "20260513"])
++    exit_code = paper.main(["plan", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 1
+     assert called["plan"] is False
+ 
+@@ -1001,7 +1010,7 @@ def test_plan_aborts_when_preflight_fails(monkeypatch):
+ def test_plan_calls_existing_wrapper_on_pass(monkeypatch):
+     called: list[str] = []
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         return {
+             "stage": stage,
+             "date": date_str or "",
+@@ -1018,7 +1027,7 @@ def test_plan_calls_existing_wrapper_on_pass(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "run_paper_daily_plan", fake_run_paper_daily_plan)
+-    exit_code = paper.main(["plan", "--date", "20260513"])
++    exit_code = paper.main(["plan", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert called == ["20260513"]
+ 
+@@ -1026,7 +1035,7 @@ def test_plan_calls_existing_wrapper_on_pass(monkeypatch):
+ def test_eod_dry_run_runs_preflight_first(monkeypatch):
+     order: list[str] = []
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         order.append("preflight")
+         return {
+             "stage": stage,
+@@ -1048,7 +1057,7 @@ def test_eod_dry_run_runs_preflight_first(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
+-    exit_code = paper.main(["eod", "--date", "20260513", "--dry-run"])
++    exit_code = paper.main(["eod", "--date", "20260513", "--dry-run", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert order == ["preflight", "eod"]
+ 
+@@ -1056,7 +1065,7 @@ def test_eod_dry_run_runs_preflight_first(monkeypatch):
+ def test_eod_dry_run_calls_existing_wrapper(monkeypatch):
+     captured: dict[str, object] = {}
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         return {
+             "stage": stage,
+             "date": date_str or "",
+@@ -1080,7 +1089,7 @@ def test_eod_dry_run_calls_existing_wrapper(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
+-    exit_code = paper.main(["eod", "--date", "20260513", "--dry-run"])
++    exit_code = paper.main(["eod", "--date", "20260513", "--dry-run", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert captured == {
+         "date_str": "20260513",
+@@ -1093,7 +1102,7 @@ def test_eod_dry_run_calls_existing_wrapper(monkeypatch):
+ def test_eod_commit_runs_only_when_explicit(monkeypatch):
+     captured: list[bool] = []
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         return {
+             "stage": stage,
+             "date": date_str or "",
+@@ -1110,20 +1119,20 @@ def test_eod_commit_runs_only_when_explicit(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
+-    exit_code = paper.main(["eod", "--date", "20260513", "--commit"])
++    exit_code = paper.main(["eod", "--date", "20260513", "--commit", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert captured == [True]
+ 
+ 
+ def test_eod_requires_one_mode():
+     with pytest.raises(SystemExit) as exc_info:
+-        paper.main(["eod", "--date", "20260513"])
++        paper.main(["eod", "--date", "20260513", "--account-id", "paper_growth"])
+     assert exc_info.value.code == 2
+ 
+ 
+ def test_eod_rejects_both_modes():
+     with pytest.raises(SystemExit) as exc_info:
+-        paper.main(["eod", "--date", "20260513", "--dry-run", "--commit"])
++        paper.main(["eod", "--date", "20260513", "--dry-run", "--commit", "--account-id", "paper_growth"])
+     assert exc_info.value.code == 2
+ 
+ 
+@@ -1178,7 +1187,7 @@ def test_prepare_data_does_not_call_eod_commit(monkeypatch):
+ def test_reports_runs_preflight_first(monkeypatch):
+     order: list[str] = []
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         order.append("preflight")
+         return {
+             "stage": stage,
+@@ -1204,7 +1213,7 @@ def test_reports_runs_preflight_first(monkeypatch):
+ def test_reports_aborts_when_preflight_fails(monkeypatch):
+     called = {"reports": False}
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         return {
+             "stage": stage,
+             "date": date_str or "",
+@@ -1229,7 +1238,7 @@ def test_reports_aborts_when_preflight_fails(monkeypatch):
+ def test_reports_runs_on_pass_with_warnings_in_non_strict(monkeypatch):
+     called = {"reports": False}
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         return {
+             "stage": stage,
+             "date": date_str or "",
+@@ -1503,7 +1512,7 @@ def test_review_validate_returns_one_on_errors(monkeypatch):
+ def test_review_append_runs_preflight_first(monkeypatch):
+     order: list[str] = []
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         order.append("preflight")
+         return {
+             "stage": stage,
+@@ -1531,7 +1540,7 @@ def test_review_append_runs_preflight_first(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", fake_append)
+-    exit_code = paper.main(["review-append"])
++    exit_code = paper.main(["review-append", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert order == ["preflight", "append"]
+ 
+@@ -1539,7 +1548,7 @@ def test_review_append_runs_preflight_first(monkeypatch):
+ def test_review_append_aborts_when_preflight_fails(monkeypatch):
+     called = {"append": False}
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         return {
+             "stage": stage,
+             "date": date_str or "",
+@@ -1556,7 +1565,7 @@ def test_review_append_aborts_when_preflight_fails(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", fake_append)
+-    exit_code = paper.main(["review-append"])
++    exit_code = paper.main(["review-append", "--account-id", "paper_growth"])
+     assert exit_code == 1
+     assert called["append"] is False
+ 
+@@ -1564,7 +1573,7 @@ def test_review_append_aborts_when_preflight_fails(monkeypatch):
+ def test_review_append_calls_existing_append_on_pass(monkeypatch):
+     called = {"append": False}
+ 
+-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
++    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
+         return {
+             "stage": stage,
+             "date": date_str or "",
+@@ -1591,7 +1600,7 @@ def test_review_append_calls_existing_append_on_pass(monkeypatch):
+ 
+     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
+     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", fake_append)
+-    exit_code = paper.main(["review-append"])
++    exit_code = paper.main(["review-append", "--account-id", "paper_growth"])
+     assert exit_code == 0
+     assert called["append"] is True
+ 
+diff --git a/tests/test_paper_cli_account_scope.py b/tests/test_paper_cli_account_scope.py
+index 6a43612528e533f125ada1b06f2d4442ad53dbeb..355c3d0ea395fc7b762e6e92c8693a3c4a226435 100644
+--- a/tests/test_paper_cli_account_scope.py
++++ b/tests/test_paper_cli_account_scope.py
+@@ -286,6 +286,7 @@ def test_eod_dry_run_preflight_uses_non_default_account_paths(tmp_path, monkeypa
+         return 0
+ 
+     monkeypatch.setattr(paper, "build_paper_account_paths", fake_build_paper_account_paths)
++    monkeypatch.setattr(paper, "require_initialized_writer_account_paths", lambda *args, **kwargs: paths)
+     monkeypatch.setattr(paper, "_call_preflight", fake_call_preflight)
+     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
+ 
+@@ -306,6 +307,7 @@ def test_eod_dry_run_preflight_still_fails_when_account_plan_missing(tmp_path, m
+     account_root.mkdir(parents=True)
+ 
+     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id=None, *, create=False: paths)
++    monkeypatch.setattr(paper, "require_initialized_writer_account_paths", lambda *args, **kwargs: paths)
+ 
+     def fake_call_preflight(*, stage, date_str, strict, write_report, account_paths):
+         assert not account_paths.daily_action_plan_path(date_str).exists()
+@@ -328,7 +330,7 @@ def test_eod_dry_run_preflight_still_fails_when_account_plan_missing(tmp_path, m
+     assert called["eod"] is False
+ 
+ 
+-def test_eod_commit_path_builds_account_paths_before_preflight_with_create_true(monkeypatch):
++def test_eod_commit_path_builds_account_paths_before_preflight_without_creation(monkeypatch):
+     captured: dict[str, object] = {}
+     paths = _account_paths("paper_growth", Path("outputs/paper_accounts/paper_growth"))
+ 
+@@ -347,6 +349,7 @@ def test_eod_commit_path_builds_account_paths_before_preflight_with_create_true(
+         return 0
+ 
+     monkeypatch.setattr(paper, "build_paper_account_paths", fake_build_paper_account_paths)
++    monkeypatch.setattr(paper, "require_initialized_writer_account_paths", lambda *args, **kwargs: paths)
+     monkeypatch.setattr(paper, "_call_preflight", fake_call_preflight)
+     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
+ 
+@@ -363,7 +366,7 @@ def test_eod_commit_path_builds_account_paths_before_preflight_with_create_true(
+     assert exit_code == 0
+     assert captured == {
+         "build_account_id": "paper_growth",
+-        "build_create": True,
++        "build_create": False,
+         "preflight_account_id": "paper_growth",
+         "eod_commit": True,
+         "eod_account_id": "paper_growth",
+diff --git a/tests/test_paper_cli_writer_account_guard.py b/tests/test_paper_cli_writer_account_guard.py
+index c4d2f13ec24d19437cef251e32bcb8cbc453a9a8..1d4804743f2d2b63b5bf0fe78473a33131d47fde 100644
+--- a/tests/test_paper_cli_writer_account_guard.py
++++ b/tests/test_paper_cli_writer_account_guard.py
+@@ -7,6 +7,15 @@ import pytest
+ from scripts import paper
+ 
+ 
++@pytest.fixture(autouse=True)
++def _allow_initialized_writer_context_for_cli_orchestration(monkeypatch):
++    monkeypatch.setattr(
++        paper,
++        "require_initialized_writer_account_paths",
++        lambda account_paths, **kwargs: account_paths,
++    )
++
++
+ def test_commit_allows_non_default_account_and_passes_account_id(monkeypatch):
+     captured: dict[str, object] = {}
+ 
+@@ -61,7 +70,7 @@ def test_plan_builds_non_default_account_paths(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "run_preflight",
+-        lambda stage, date_str, strict, write_report: {"result": "PASS"},
++        lambda stage, date_str, strict, write_report, account_paths=None: {"result": "PASS"},
+     )
+     account_paths = paper.build_paper_account_paths("paper_growth", account_root=Path("outputs/paper_accounts/paper_growth"))
+     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id, create=False: account_paths)
+@@ -109,13 +118,20 @@ def test_plan_explicit_dates_pass_data_and_trade_dates(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "run_preflight",
+-        lambda stage, date_str, strict, write_report: captured.update({"preflight_date": date_str})
++        lambda stage, date_str, strict, write_report, account_paths=None: captured.update({"preflight_date": date_str})
+         or {"result": "PASS"},
+     )
+     account_paths = paper.build_paper_account_paths("paper_growth", account_root=Path("outputs/paper_accounts/paper_growth"))
+     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id, create=False: account_paths)
+ 
+-    def fake_run_paper_daily_plan(date_str=None, account_paths=None, *, data_date=None, trade_date=None):
++    def fake_run_paper_daily_plan(
++        date_str=None,
++        account_paths=None,
++        *,
++        data_date=None,
++        trade_date=None,
++        enforce_asof_contract=False,
++    ):
+         captured.update(
+             {
+                 "date_str": date_str,
+@@ -151,7 +167,7 @@ def test_plan_explicit_dates_pass_data_and_trade_dates(monkeypatch):
+ def test_plan_explicit_dates_require_pair(monkeypatch):
+     monkeypatch.setattr(paper, "_guard_writer_account", lambda *args, **kwargs: 0)
+ 
+-    exit_code = paper.main(["plan", "--data-date", "2026-06-05"])
++    exit_code = paper.main(["plan", "--data-date", "2026-06-05", "--account-id", "paper_growth"])
+ 
+     assert exit_code == 1
+ 
+@@ -170,7 +186,15 @@ def test_plan_explicit_dates_block_freshness_warnings(monkeypatch):
+     )
+ 
+     exit_code = paper.main(
+-        ["plan", "--data-date", "2026-06-05", "--trade-date", "2026-06-08"]
++        [
++            "plan",
++            "--data-date",
++            "2026-06-05",
++            "--trade-date",
++            "2026-06-08",
++            "--account-id",
++            "paper_growth",
++        ]
+     )
+ 
+     assert exit_code == 1
+@@ -195,7 +219,7 @@ def test_review_append_builds_non_default_account_paths(monkeypatch):
+     monkeypatch.setattr(
+         paper,
+         "run_preflight",
+-        lambda stage, date_str, strict, write_report: {"result": "PASS"},
++        lambda stage, date_str, strict, write_report, account_paths=None: {"result": "PASS"},
+     )
+     account_paths = paper.build_paper_account_paths("paper_growth", account_root=Path("outputs/paper_accounts/paper_growth"))
+     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id, create=False: account_paths)
+@@ -222,7 +246,7 @@ def test_review_append_builds_non_default_account_paths(monkeypatch):
+     assert captured["account_paths"] is account_paths
+ 
+ 
+-def test_commit_defaults_to_paper_default_and_passes_guard(monkeypatch):
++def test_commit_accepts_explicit_paper_default_and_passes_guard(monkeypatch):
+     captured: dict[str, object] = {}
+ 
+     monkeypatch.setattr(
+@@ -247,17 +271,17 @@ def test_commit_defaults_to_paper_default_and_passes_guard(monkeypatch):
+         or 0,
+     )
+ 
+-    exit_code = paper.main(["commit", "--date", "20260530"])
++    exit_code = paper.main(["commit", "--date", "20260530", "--account-id", "paper_default"])
+ 
+     assert exit_code == 0
+     assert captured == {
+         "date_str": "20260530",
+         "replace": False,
+-        "account_id": None,
++        "account_id": "paper_default",
+     }
+ 
+ 
+-def test_eod_allows_paper_default_and_preserves_writer_path_behavior(monkeypatch):
++def test_eod_allows_explicit_paper_default_and_passes_canonical_writer_paths(monkeypatch):
+     captured: dict[str, object] = {}
+ 
+     monkeypatch.setattr(
+@@ -276,7 +300,7 @@ def test_eod_allows_paper_default_and_preserves_writer_path_behavior(monkeypatch
+     monkeypatch.setattr(
+         paper,
+         "run_preflight",
+-        lambda stage, date_str, strict, write_report: {"result": "PASS"},
++        lambda stage, date_str, strict, write_report, account_paths=None: {"result": "PASS"},
+     )
+ 
+     def fake_run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool, commit: bool, plan_path, account_paths=None):
+@@ -288,12 +312,12 @@ def test_eod_allows_paper_default_and_preserves_writer_path_behavior(monkeypatch
+ 
+     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
+ 
+-    exit_code = paper.main(["eod", "--date", "20260530", "--commit"])
++    exit_code = paper.main(["eod", "--date", "20260530", "--commit", "--account-id", "paper_default"])
+ 
+     assert exit_code == 0
+     assert captured == {
+         "date_str": "20260530",
+         "commit": True,
+         "plan_path": None,
+-        "account_paths": None,
++        "account_paths": paper.build_paper_account_paths("paper_default", create=False),
+     }
+diff --git a/tests/test_paper_current_state_storage.py b/tests/test_paper_current_state_storage.py
+index 197203ef3cde865dadd517ee19e490a4e434b241..aecf382c729200e5dd054203fc3aa3d638a70648 100644
+--- a/tests/test_paper_current_state_storage.py
++++ b/tests/test_paper_current_state_storage.py
+@@ -9,6 +9,7 @@ from core.paper_account_state import build_paper_state_from_trades
+ from core.paths import FRONT_TEST_DIR, PAPER_TEST_DIR
+ from core.portfolio_state_manager import load_current_state
+ from core.paper_current_state_storage import save_paper_current_state
++from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
+ def _unique_state_path() -> Path:
+@@ -46,9 +47,10 @@ def _cleanup(path: Path, archive_dir: Path) -> None:
+         archive_dir.rmdir()
+ 
+ 
+-def test_save_paper_current_state_creates_json_with_required_fields():
+-    output_path = _unique_state_path()
+-    archive_dir = _unique_archive_dir()
++def test_save_paper_current_state_creates_json_with_required_fields(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    output_path = account_paths.current_state_snapshot_path("20260509")
++    archive_dir = account_paths.root / "archive"
+     try:
+         state = build_paper_state_from_trades(
+             [_make_trade("t1", "CPAY", "BUY", 29, 343.99)],
+@@ -61,6 +63,7 @@ def test_save_paper_current_state_creates_json_with_required_fields():
+             output_path,
+             archive_dir,
+             now=datetime(2026, 5, 10, 11, 0, 0),
++            account_paths=account_paths,
+         )
+         assert output_path.exists()
+         assert result["backup_path"] is None
+@@ -83,9 +86,10 @@ def test_save_paper_current_state_creates_json_with_required_fields():
+         _cleanup(output_path, archive_dir)
+ 
+ 
+-def test_paper_current_state_marks_configured_hedge_as_excluded_symbol():
+-    output_path = _unique_state_path()
+-    archive_dir = _unique_archive_dir()
++def test_paper_current_state_marks_configured_hedge_as_excluded_symbol(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    output_path = account_paths.current_state_snapshot_path("20260509")
++    archive_dir = account_paths.root / "archive"
+     try:
+         state = build_paper_state_from_trades(
+             [
+@@ -95,16 +99,23 @@ def test_paper_current_state_marks_configured_hedge_as_excluded_symbol():
+             initial_cash=100000.0,
+             currency="USD",
+         )
+-        payload = save_paper_current_state(state, "20260509", output_path, archive_dir)["payload"]
++        payload = save_paper_current_state(
++            state,
++            "20260509",
++            output_path,
++            archive_dir,
++            account_paths=account_paths,
++        )["payload"]
+         assert payload["hedge_symbols"] == ["SQQQ"]
+         assert payload["current_hedge_ratio"] > 0
+     finally:
+         _cleanup(output_path, archive_dir)
+ 
+ 
+-def test_save_paper_current_state_backs_up_existing_file_before_overwrite():
+-    output_path = _unique_state_path()
+-    archive_dir = _unique_archive_dir()
++def test_save_paper_current_state_backs_up_existing_file_before_overwrite(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    output_path = account_paths.current_state_snapshot_path("20260509")
++    archive_dir = account_paths.root / "archive"
+     try:
+         output_path.write_text('{"old": true}', encoding="utf-8")
+         state = build_paper_state_from_trades(
+@@ -118,6 +129,7 @@ def test_save_paper_current_state_backs_up_existing_file_before_overwrite():
+             output_path,
+             archive_dir,
+             now=datetime(2026, 5, 10, 11, 0, 0),
++            account_paths=account_paths,
+         )
+         assert result["backup_path"] is not None
+         assert result["backup_path"].exists()
+@@ -128,7 +140,8 @@ def test_save_paper_current_state_backs_up_existing_file_before_overwrite():
+         _cleanup(output_path, archive_dir)
+ 
+ 
+-def test_save_paper_current_state_rejects_non_paper_path():
++def test_save_paper_current_state_rejects_non_paper_path(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+     output_path = FRONT_TEST_DIR / f"paper_current_state_test_{uuid4().hex}.json"
+     archive_dir = _unique_archive_dir()
+     try:
+@@ -138,7 +151,13 @@ def test_save_paper_current_state_rejects_non_paper_path():
+             currency="USD",
+         )
+         with pytest.raises(ValueError):
+-            save_paper_current_state(state, "20260509", output_path, archive_dir)
++            save_paper_current_state(
++                state,
++                "20260509",
++                output_path,
++                archive_dir,
++                account_paths=account_paths,
++            )
+     finally:
+         if archive_dir.exists():
+             for child in archive_dir.iterdir():
+@@ -146,9 +165,10 @@ def test_save_paper_current_state_rejects_non_paper_path():
+             archive_dir.rmdir()
+ 
+ 
+-def test_saved_json_round_trips_through_existing_loader(monkeypatch):
+-    output_path = _unique_state_path()
+-    archive_dir = _unique_archive_dir()
++def test_saved_json_round_trips_through_existing_loader(monkeypatch, tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    output_path = account_paths.current_state_snapshot_path("20260509")
++    archive_dir = account_paths.root / "archive"
+     try:
+         state = build_paper_state_from_trades(
+             [
+@@ -164,6 +184,7 @@ def test_saved_json_round_trips_through_existing_loader(monkeypatch):
+             output_path,
+             archive_dir,
+             now=datetime(2026, 5, 10, 11, 0, 0),
++            account_paths=account_paths,
+         )
+         payload = result["payload"]
+         assert payload["applied_trade_ids"] == ["t1", "t2"]
+diff --git a/tests/test_paper_daily_plan_generation.py b/tests/test_paper_daily_plan_generation.py
+index cae559660ee9a5fcac1e444d8b0af0703fb0e437..1b1abd880bf86b8157c1cd76dd5c2a32b9a39e80 100644
+--- a/tests/test_paper_daily_plan_generation.py
++++ b/tests/test_paper_daily_plan_generation.py
+@@ -8,6 +8,7 @@ import pytest
+ 
+ import core.daily_plan_generator as daily_plan_generator
+ import scripts.run_paper_daily_plan as run_paper_daily_plan
++from tests.paper_account_test_support import create_initialized_account_paths
+ from core.paper_account_paths import build_paper_account_paths
+ from core.paper_account_state import build_paper_state_from_trades
+ from core.paper_config_snapshot import save_paper_config_snapshot
+@@ -73,10 +74,9 @@ def _capture_non_default_provider_seed(
+     initial_cash: str,
+     cash: str,
+ ) -> dict:
+-    account_paths = build_paper_account_paths(
+-        "paper_pilot_test",
+-        account_root=tmp_path / "paper_pilot_test",
+-        create=True,
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_pilot_test",
++        account_id="paper_pilot_test",
+     )
+     account_paths.execution_log_path.write_text(
+         "trade_id,date,symbol,side,shares,price,gross_amount\n",
+@@ -227,13 +227,21 @@ def test_generate_daily_plan_uses_injected_state_and_output_path(
+     assert output_path.read_text(encoding="utf-8") == "# injected paper plan\n"
+ 
+ 
+-def test_run_paper_daily_plan_uses_paper_output_path(monkeypatch: pytest.MonkeyPatch):
++def test_run_paper_daily_plan_uses_canonical_account_output_path(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++):
+     paper_state = _empty_state(cash=70245.95)
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_default",
++        account_id="paper_default",
++    )
+     captured: dict = {}
+     provider_calls: dict = {}
+ 
+-    def _fake_provider(date_str: str):
++    def _fake_provider(date_str: str, **kwargs):
+         provider_calls["date_str"] = date_str
++        provider_calls.update(kwargs)
+         return paper_state
+ 
+     monkeypatch.setattr(
+@@ -248,26 +256,37 @@ def test_run_paper_daily_plan_uses_paper_output_path(monkeypatch: pytest.MonkeyP
+ 
+     monkeypatch.setattr(run_paper_daily_plan, "generate_daily_plan", _fake_generate_daily_plan)
+ 
+-    report_path = run_paper_daily_plan.run_paper_daily_plan("20260509")
++    report_path = run_paper_daily_plan.run_paper_daily_plan(
++        "20260509", account_paths=account_paths
++    )
+ 
+-    assert report_path == str(paper_daily_action_plan_path("20260509"))
++    assert report_path == str(account_paths.daily_action_plan_path("20260509"))
+     assert provider_calls["date_str"] == "2026-05-09"
++    assert provider_calls["log_path"] == account_paths.execution_log_path
+     assert captured["current_state"] is paper_state
+     assert captured["current_state"].absolute_cash == 70245.95
+-    assert captured["output_path"] == paper_daily_action_plan_path("20260509")
++    assert captured["output_path"] == account_paths.daily_action_plan_path("20260509")
+     assert captured["date_str"] == "2026-05-09"
+     assert captured["market_state_write_log"] is False
+-    assert captured["config_snapshot_path"] == paper_config_snapshot_path("20260509")
+-    assert captured["config_snapshot_archive_dir"] == paper_config_snapshot_archive_dir()
++    assert captured["config_snapshot_path"] == account_paths.config_snapshot_path("20260509")
++    assert captured["config_snapshot_archive_dir"] == account_paths.config_snapshot_archive_dir
+     assert captured["config_snapshot_source"] == "run_paper_daily_plan"
+ 
+ 
+-def test_run_paper_daily_plan_default_account_keeps_default_state_loader(monkeypatch: pytest.MonkeyPatch):
++def test_run_paper_daily_plan_default_account_uses_canonical_ledger_loader(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++):
+     paper_state = _empty_state(cash=100000.0)
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_default",
++        account_id="paper_default",
++    )
+     provider_calls: dict = {}
+ 
+-    def _fake_provider(date_str: str):
++    def _fake_provider(date_str: str, **kwargs):
+         provider_calls["date_str"] = date_str
++        provider_calls.update(kwargs)
+         return paper_state
+ 
+     monkeypatch.setattr(
+@@ -280,17 +299,11 @@ def test_run_paper_daily_plan_default_account_keeps_default_state_loader(monkeyp
+         "generate_daily_plan",
+         lambda **kwargs: str(kwargs["output_path"]),
+     )
+-    monkeypatch.setattr(
+-        run_paper_daily_plan,
+-        "_read_account_initial_snapshot",
+-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+-            AssertionError("paper_default must not read an account snapshot seed")
+-        ),
+-    )
++    run_paper_daily_plan.run_paper_daily_plan("20260509", account_paths=account_paths)
+ 
+-    run_paper_daily_plan.run_paper_daily_plan("20260509")
+-
+-    assert provider_calls == {"date_str": "2026-05-09"}
++    assert provider_calls["date_str"] == "2026-05-09"
++    assert provider_calls["log_path"] == account_paths.execution_log_path
++    assert provider_calls["initial_cash"] == 100000.0
+ 
+ 
+ def test_read_account_initial_snapshot_uses_initial_cash_not_post_trade_cash(tmp_path: Path):
+@@ -447,10 +460,9 @@ def test_run_paper_daily_plan_non_default_uses_account_execution_log(
+     monkeypatch: pytest.MonkeyPatch,
+     tmp_path: Path,
+ ):
+-    account_paths = build_paper_account_paths(
+-        "paper_pilot_test",
+-        account_root=tmp_path / "paper_pilot_test",
+-        create=True,
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_pilot_test",
++        account_id="paper_pilot_test",
+     )
+     account_paths.execution_log_path.write_text(
+         "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n",
+@@ -505,10 +517,9 @@ def test_run_paper_daily_plan_explicit_dates_use_trade_date_artifacts_and_data_d
+     monkeypatch: pytest.MonkeyPatch,
+     tmp_path: Path,
+ ):
+-    account_paths = build_paper_account_paths(
+-        "paper_pilot_test",
+-        account_root=tmp_path / "paper_pilot_test",
+-        create=True,
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_pilot_test",
++        account_id="paper_pilot_test",
+     )
+     account_paths.execution_log_path.write_text(
+         "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n",
+@@ -561,10 +572,9 @@ def test_historical_official_plan_blocks_when_config_snapshot_is_missing(
+     monkeypatch: pytest.MonkeyPatch,
+     tmp_path: Path,
+ ) -> None:
+-    account_paths = build_paper_account_paths(
+-        "paper_pilot_test",
+-        account_root=tmp_path / "paper_pilot_test",
+-        create=True,
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_pilot_test",
++        account_id="paper_pilot_test",
+     )
+     account_paths.execution_log_path.write_text(
+         "trade_id,date,symbol,side,shares,price,gross_amount\n",
+@@ -593,10 +603,9 @@ def test_historical_official_plan_reuses_valid_config_and_data_date_account_snap
+     monkeypatch: pytest.MonkeyPatch,
+     tmp_path: Path,
+ ) -> None:
+-    account_paths = build_paper_account_paths(
+-        "paper_pilot_test",
+-        account_root=tmp_path / "paper_pilot_test",
+-        create=True,
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_pilot_test",
++        account_id="paper_pilot_test",
+     )
+     account_paths.execution_log_path.write_text(
+         "trade_id,date,symbol,side,shares,price,gross_amount\n",
+@@ -654,18 +663,18 @@ def test_historical_official_plan_reuses_valid_config_and_data_date_account_snap
+ def test_run_paper_daily_plan_non_default_rejects_plan_before_account_inception(
+     tmp_path: Path,
+ ):
+-    account_paths = build_paper_account_paths(
+-        "paper_pilot_test",
+-        account_root=tmp_path / "paper_pilot_test",
+-        create=True,
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_pilot_test",
++        account_id="paper_pilot_test",
++        date_str="2026-06-05",
+     )
+     account_paths.execution_log_path.write_text(
+         "trade_id,date,regime,symbol,side,shares,price,gross_amount,source,status,reason,notes,rec_shares,rec_price,created_at\n",
+         encoding="utf-8",
+     )
+     account_paths.account_snapshot_path.write_text(
+-        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+-        "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
++            "snapshot_date,initial_cash,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
++            "2026-06-05,100000.00,100000.00,100000.00,0.00,0,,USD\n",
+         encoding="utf-8",
+     )
+ 
+@@ -676,14 +685,14 @@ def test_run_paper_daily_plan_non_default_rejects_plan_before_account_inception(
+ def test_run_paper_daily_plan_explicit_dates_reject_before_account_inception(
+     tmp_path: Path,
+ ):
+-    account_paths = build_paper_account_paths(
+-        "paper_pilot_test",
+-        account_root=tmp_path / "paper_pilot_test",
+-        create=True,
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_pilot_test",
++        account_id="paper_pilot_test",
++        date_str="2026-06-05",
+     )
+     account_paths.account_snapshot_path.write_text(
+-        "snapshot_date,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
+-        "2026-06-05,100000.00,100000.00,0.00,0,,USD\n",
++            "snapshot_date,initial_cash,cash,total_equity_market_value,unrealized_pnl,position_count,symbols,currency\n"
++            "2026-06-05,100000.00,100000.00,100000.00,0.00,0,,USD\n",
+         encoding="utf-8",
+     )
+ 
+@@ -716,12 +725,19 @@ def test_run_paper_daily_plan_requires_data_and_trade_dates_together():
+         run_paper_daily_plan.run_paper_daily_plan(data_date="2026-06-05")
+ 
+ 
+-def test_run_paper_daily_plan_accepts_dashed_date(monkeypatch: pytest.MonkeyPatch):
++def test_run_paper_daily_plan_accepts_dashed_date(
++    monkeypatch: pytest.MonkeyPatch,
++    tmp_path: Path,
++):
+     paper_state = _empty_state(cash=11111.0)
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_default",
++        account_id="paper_default",
++    )
+     provider_calls: dict = {}
+     captured: dict = {}
+ 
+-    def _fake_provider(date_str: str):
++    def _fake_provider(date_str: str, **kwargs):
+         provider_calls["date_str"] = date_str
+         return paper_state
+ 
+@@ -737,14 +753,16 @@ def test_run_paper_daily_plan_accepts_dashed_date(monkeypatch: pytest.MonkeyPatc
+ 
+     monkeypatch.setattr(run_paper_daily_plan, "generate_daily_plan", _fake_generate_daily_plan)
+ 
+-    report_path = run_paper_daily_plan.run_paper_daily_plan("2026-05-09")
++    report_path = run_paper_daily_plan.run_paper_daily_plan(
++        "2026-05-09", account_paths=account_paths
++    )
+ 
+-    assert report_path == str(paper_daily_action_plan_path("2026-05-09"))
++    assert report_path == str(account_paths.daily_action_plan_path("2026-05-09"))
+     assert provider_calls["date_str"] == "2026-05-09"
+     assert captured["date_str"] == "2026-05-09"
+     assert captured["market_state_write_log"] is False
+-    assert captured["config_snapshot_path"] == paper_config_snapshot_path("2026-05-09")
+-    assert captured["config_snapshot_archive_dir"] == paper_config_snapshot_archive_dir()
++    assert captured["config_snapshot_path"] == account_paths.config_snapshot_path("2026-05-09")
++    assert captured["config_snapshot_archive_dir"] == account_paths.config_snapshot_archive_dir
+     assert captured["config_snapshot_source"] == "run_paper_daily_plan"
+ 
+ 
+diff --git a/tests/test_paper_daily_plan_market_log_policy.py b/tests/test_paper_daily_plan_market_log_policy.py
+index ae7f9ee8dcf97b9820de9dd379ae558ad35fe67b..20d2a2169a7d99c757ac343e8b8238ede3e72855 100644
+--- a/tests/test_paper_daily_plan_market_log_policy.py
++++ b/tests/test_paper_daily_plan_market_log_policy.py
+@@ -10,6 +10,7 @@ import core.daily_plan_generator as daily_plan_generator
+ import market_analyzer
+ import scripts.run_paper_daily_plan as run_paper_daily_plan
+ from core.target_portfolio_state import CurrentPortfolioState, RebalanceDecision, TargetPortfolioState
++from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
+ @pytest.fixture
+@@ -41,11 +42,14 @@ def _empty_state() -> CurrentPortfolioState:
+ 
+ def test_run_paper_daily_plan_disables_market_log_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+     captured: dict = {}
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_growth", account_id="paper_growth"
++    )
+ 
+     monkeypatch.setattr(
+         run_paper_daily_plan,
+         "load_official_paper_state_for_daily_plan",
+-        lambda date_str: _empty_state(),
++        lambda date_str, **kwargs: _empty_state(),
+     )
+ 
+     def _fake_generate_daily_plan(**kwargs):
+@@ -54,7 +58,7 @@ def test_run_paper_daily_plan_disables_market_log_write(monkeypatch: pytest.Monk
+ 
+     monkeypatch.setattr(run_paper_daily_plan, "generate_daily_plan", _fake_generate_daily_plan)
+ 
+-    run_paper_daily_plan.run_paper_daily_plan("20260512")
++    run_paper_daily_plan.run_paper_daily_plan("20260512", account_paths=account_paths)
+ 
+     assert captured["date_str"] == "2026-05-12"
+     assert captured["market_state_write_log"] is False
+diff --git a/tests/test_paper_daily_plan_screener_cutoff.py b/tests/test_paper_daily_plan_screener_cutoff.py
+index fc8b58b181afb2707d6a178858973d8731d702d9..d4e7054fd722b8766b559b6f60632563783e3128 100644
+--- a/tests/test_paper_daily_plan_screener_cutoff.py
++++ b/tests/test_paper_daily_plan_screener_cutoff.py
+@@ -8,6 +8,7 @@ import pytest
+ import core.daily_plan_generator as daily_plan_generator
+ import scripts.run_paper_daily_plan as run_paper_daily_plan
+ from core.target_portfolio_state import CurrentPortfolioState, RebalanceDecision, TargetPortfolioState
++from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
+ @pytest.fixture
+@@ -40,7 +41,14 @@ def _empty_state() -> CurrentPortfolioState:
+ def test_run_paper_daily_plan_passes_normalized_date_to_screener(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+     captured: dict = {}
+ 
+-    monkeypatch.setattr(run_paper_daily_plan, "load_official_paper_state_for_daily_plan", lambda date_str: _empty_state())
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_growth", account_id="paper_growth"
++    )
++    monkeypatch.setattr(
++        run_paper_daily_plan,
++        "load_official_paper_state_for_daily_plan",
++        lambda date_str, **kwargs: _empty_state(),
++    )
+ 
+     def _fake_generate_daily_plan(**kwargs):
+         captured.update(kwargs)
+@@ -48,7 +56,7 @@ def test_run_paper_daily_plan_passes_normalized_date_to_screener(monkeypatch: py
+ 
+     monkeypatch.setattr(run_paper_daily_plan, "generate_daily_plan", _fake_generate_daily_plan)
+ 
+-    run_paper_daily_plan.run_paper_daily_plan("20260512")
++    run_paper_daily_plan.run_paper_daily_plan("20260512", account_paths=account_paths)
+ 
+     assert captured["date_str"] == "2026-05-12"
+ 
+diff --git a/tests/test_paper_eod_accounting_close.py b/tests/test_paper_eod_accounting_close.py
+index 35650217f967a9964a8d41cfd78541647f117f61..d51d3254802f71a80dc1dcdb450276ad454faba2 100644
+--- a/tests/test_paper_eod_accounting_close.py
++++ b/tests/test_paper_eod_accounting_close.py
+@@ -69,20 +69,20 @@ def _seed_snapshots(paths: PaperAccountPaths) -> None:
+     _write_text(paths.current_state_snapshot_path("2026-06-14"), "{}\n")
+     _write_text(
+         paths.account_snapshot_path,
+-        "snapshot_date,currency,initial_cash,cash,positions_cost_value,total_equity_cost_basis,"
++        "account_id,snapshot_date,currency,initial_cash,cash,positions_cost_value,total_equity_cost_basis,"
+         "cash_ratio_cost_basis,position_count,symbols,applied_trade_count,valuation_method,"
+         "source_execution_log,source_current_state,created_at,positions_market_value,"
+         "total_equity_market_value,cash_ratio_market_value,unrealized_pnl,unrealized_pnl_pct,"
+         "realized_pnl,realized_pnl_by_symbol,total_pnl,total_pnl_pct,market_valuation_status,"
+         "market_valuation_error,valuation_price_date,valuation_price_dates,price_staleness_days,"
+         "max_price_staleness_days\n"
+-        "2026-06-14,USD,100000.00,100000.00,0.00,100000.00,1.0000000,0,,0,"
++        f"{paths.account_id},2026-06-14,USD,100000.00,100000.00,0.00,100000.00,1.0000000,0,,0,"
+         "db_daily_price_close,,,,0.00,100000.00,1.0000000,0.00,0.0000000,0.00,{},0.00,"
+         "0.0000000,success,,2026-06-14,{}, {},0\n",
+     )
+     _write_text(
+         paths.position_snapshot_path,
+-        "snapshot_date,symbol,shares,avg_price,cost_value,close_price,market_value,unrealized_pnl,"
++        "account_id,snapshot_date,symbol,shares,avg_price,cost_value,close_price,market_value,unrealized_pnl,"
+         "unrealized_pnl_pct,realized_pnl,total_pnl,total_pnl_pct_on_current_cost,valuation_method,"
+         "valuation_price_date,price_staleness_days,position_status,created_at\n",
+     )
+diff --git a/tests/test_paper_eod_plan_path.py b/tests/test_paper_eod_plan_path.py
+index 899ff11afc2fcff9cb52e40234571b25637d6166..2e0ab54a7be08d06837e8319d3c8a988170a2c28 100644
+--- a/tests/test_paper_eod_plan_path.py
++++ b/tests/test_paper_eod_plan_path.py
+@@ -5,7 +5,7 @@ from uuid import uuid4
+ import pytest
+ 
+ import scripts.run_paper_eod_update as run_paper_eod_update
+-from core.paths import paper_daily_action_plan_path
++from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
+ @pytest.fixture
+@@ -21,20 +21,20 @@ def tmp_path() -> Path:
+             shutil.rmtree(path)
+ 
+ 
+-def test_build_paper_eod_paths_defaults_to_paper_daily_plan():
+-    paths = run_paper_eod_update.build_paper_eod_paths("20260512")
+-    assert paths["input_report"] == paper_daily_action_plan_path("20260512")
++def test_legacy_eod_path_builder_requires_account_context():
++    with pytest.raises(ValueError, match="explicit account context"):
++        run_paper_eod_update.build_paper_eod_paths("20260512")
+ 
+ 
+-def test_build_paper_eod_paths_normalizes_dashed_date():
+-    paths = run_paper_eod_update.build_paper_eod_paths("2026-05-12")
+-    assert paths["input_report"] == paper_daily_action_plan_path("20260512")
++def test_legacy_eod_path_builder_rejects_dashed_date_without_context():
++    with pytest.raises(ValueError, match="explicit account context"):
++        run_paper_eod_update.build_paper_eod_paths("2026-05-12")
+ 
+ 
+-def test_build_paper_eod_paths_uses_plan_path_override(tmp_path: Path):
++def test_legacy_eod_path_builder_rejects_override_without_context(tmp_path: Path):
+     override_path = tmp_path / "custom_paper_plan.md"
+-    paths = run_paper_eod_update.build_paper_eod_paths("20260512", plan_path=override_path)
+-    assert paths["input_report"] == override_path
++    with pytest.raises(ValueError, match="explicit account context"):
++        run_paper_eod_update.build_paper_eod_paths("20260512", plan_path=override_path)
+ 
+ 
+ def test_run_paper_eod_dry_run_does_not_fallback_to_front_plan(
+@@ -42,22 +42,19 @@ def test_run_paper_eod_dry_run_does_not_fallback_to_front_plan(
+     tmp_path: Path,
+     capsys: pytest.CaptureFixture[str],
+ ):
+-    missing_paper_plan = tmp_path / "paper_test" / "daily_action_plan_20260512.md"
+-    missing_paper_plan.parent.mkdir(parents=True, exist_ok=True)
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_growth", account_id="paper_growth"
++    )
++    missing_paper_plan = account_paths.daily_action_plan_path("20260512")
+     front_plan = tmp_path / "front_test" / "daily_action_plan_20260512.md"
+     front_plan.parent.mkdir(parents=True, exist_ok=True)
+     front_plan.write_text("front plan should not be used", encoding="utf-8")
+ 
+-    monkeypatch.setattr(
+-        run_paper_eod_update,
+-        "paper_daily_action_plan_path",
+-        lambda date_str: missing_paper_plan,
+-    )
+-
+     exit_code = run_paper_eod_update.run_paper_eod_dry_run(
+         "20260512",
+         allow_empty_journal=True,
+         commit=False,
++        account_paths=account_paths,
+     )
+ 
+     captured = capsys.readouterr().out
+diff --git a/tests/test_paper_execution_log.py b/tests/test_paper_execution_log.py
+index 50a9d8bd855f1af1b9d5141af56815d9a8123fa8..aee94ecd6eb319e4bffd7805fc1f5b03037fe041 100644
+--- a/tests/test_paper_execution_log.py
++++ b/tests/test_paper_execution_log.py
+@@ -7,6 +7,7 @@ import pytest
+ from core.paths import FRONT_TEST_DIR, PAPER_TEST_DIR
+ from core.paper_execution_log import append_paper_execution_log, paper_trade_preview_to_row
+ from core.paper_trade_preview import PaperTradePreview
++from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
+ def make_preview(side: str = "BUY") -> PaperTradePreview:
+@@ -48,22 +49,29 @@ def _unique_log_path() -> Path:
+     return PAPER_TEST_DIR / f"paper_execution_log_test_{uuid4().hex}.csv"
+ 
+ 
+-def test_append_dry_run_does_not_create_file():
+-    log_path = _unique_log_path()
++def test_append_dry_run_does_not_modify_initialized_log(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    log_path = account_paths.execution_log_path
++    before = log_path.read_bytes()
+     try:
+-        rows, warnings = append_paper_execution_log([make_preview("BUY")], log_path, commit=False)
++        rows, warnings = append_paper_execution_log(
++            [make_preview("BUY")], log_path, commit=False, account_paths=account_paths
++        )
+         assert len(rows) == 1
+         assert warnings == []
+-        assert not log_path.exists()
++        assert log_path.read_bytes() == before
+     finally:
+         if log_path.exists():
+             log_path.unlink()
+ 
+ 
+-def test_append_commit_creates_csv():
+-    log_path = _unique_log_path()
++def test_append_commit_writes_initialized_csv(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    log_path = account_paths.execution_log_path
+     try:
+-        rows, warnings = append_paper_execution_log([make_preview("BUY")], log_path, commit=True)
++        rows, warnings = append_paper_execution_log(
++            [make_preview("BUY")], log_path, commit=True, account_paths=account_paths
++        )
+         assert len(rows) == 1
+         assert warnings == []
+         assert log_path.exists()
+@@ -75,12 +83,17 @@ def test_append_commit_creates_csv():
+             log_path.unlink()
+ 
+ 
+-def test_duplicate_preview_is_not_appended_twice():
+-    log_path = _unique_log_path()
++def test_duplicate_preview_is_not_appended_twice(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    log_path = account_paths.execution_log_path
+     try:
+         preview = make_preview("BUY")
+-        first_rows, first_warnings = append_paper_execution_log([preview], log_path, commit=True)
+-        second_rows, second_warnings = append_paper_execution_log([preview], log_path, commit=True)
++        first_rows, first_warnings = append_paper_execution_log(
++            [preview], log_path, commit=True, account_paths=account_paths
++        )
++        second_rows, second_warnings = append_paper_execution_log(
++            [preview], log_path, commit=True, account_paths=account_paths
++        )
+         assert len(first_rows) == 1
+         assert first_warnings == []
+         assert second_rows == []
+@@ -93,7 +106,10 @@ def test_duplicate_preview_is_not_appended_twice():
+             log_path.unlink()
+ 
+ 
+-def test_append_rejects_non_paper_path():
++def test_append_rejects_non_paper_path(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+     log_path = FRONT_TEST_DIR / f"paper_execution_log_test_{uuid4().hex}.csv"
+     with pytest.raises(ValueError):
+-        append_paper_execution_log([make_preview("BUY")], log_path, commit=True)
++        append_paper_execution_log(
++            [make_preview("BUY")], log_path, commit=True, account_paths=account_paths
++        )
+diff --git a/tests/test_paper_manual_execution_commit.py b/tests/test_paper_manual_execution_commit.py
+index 8c4b6b3d2b9c3c6ebd3f3ebcf00d482af9686816..9ab166fe294f8f64d47b5f8fdc822ae57038c36f 100644
+--- a/tests/test_paper_manual_execution_commit.py
++++ b/tests/test_paper_manual_execution_commit.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import csv
+ import json
+ import shutil
++import sys
+ from pathlib import Path
+ from uuid import uuid4
+ 
+@@ -20,6 +21,7 @@ from core.paper_manual_execution_commit import (
+ from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
+ from core.paper_daily_review_scope import sha256_file
+ from core.paths import OUTPUTS, PAPER_TEST_DIR
++from tests.paper_account_test_support import ensure_initialized_account_paths
+ 
+ 
+ def _unique_path(prefix: str, suffix: str) -> Path:
+@@ -243,29 +245,33 @@ def _fake_valuation(state, snapshot_date: str, db_path: Path) -> PaperAccountVal
+ 
+ @pytest.fixture
+ def commit_env(monkeypatch):
+-    exec_path = _unique_path("paper_execution_log_manual_commit", ".csv")
+-    account_path = _unique_path("paper_account_snapshot_manual_commit", ".csv")
+-    position_path = _unique_path("paper_position_snapshot_manual_commit", ".csv")
+-    current_state_path = _unique_path("paper_current_state_manual_commit", ".json")
+-    reports_dir = _unique_path("reports_manual_commit", "")
+-    backup_dir = _unique_output_dir("dev_backups_manual_commit")
+-    preview_path = _unique_path("manual_execution_preview_manual_commit", ".json")
+-    current_state_dates: list[str] = []
++    account_root = _unique_output_dir("acct_b")
++    account_root.mkdir(parents=True)
++    account_paths = build_paper_account_paths(
++        "paper_default",
++        account_root=account_root,
++        create=False,
++    )
++    ensure_initialized_account_paths(account_root, account_id="paper_default", date_str="2026-05-24")
++    exec_path = account_paths.execution_log_path
++    account_path = account_paths.account_snapshot_path
++    position_path = account_paths.position_snapshot_path
++    current_state_path = account_paths.current_state_snapshot_path("2026-05-25")
++    reports_dir = account_paths.reports_dir
++    backup_dir = account_root / "archive" / "dev_backups"
++    preview_path = reports_dir / "manual_execution_preview.json"
+     reports_dir.mkdir(parents=True, exist_ok=True)
+     backup_dir.mkdir(parents=True, exist_ok=True)
+ 
+-    monkeypatch.setattr(commit_module, "paper_execution_log_path", lambda: exec_path)
+-    monkeypatch.setattr(commit_module, "paper_account_snapshot_path", lambda: account_path)
+-    monkeypatch.setattr(commit_module, "paper_position_snapshot_path", lambda: position_path)
+-    def _current_state_path(date: str) -> Path:
+-        current_state_dates.append(date)
+-        return current_state_path
+-
+-    monkeypatch.setattr(commit_module, "paper_current_state_snapshot_path", _current_state_path)
+-    monkeypatch.setattr(commit_module, "paper_reports_dir", lambda: reports_dir)
+-    monkeypatch.setattr(commit_module, "dev_backups_dir", lambda: backup_dir)
+     monkeypatch.setattr(commit_module, "market_db_path", lambda: str(_unique_path("market_db_unused", ".db")))
+     monkeypatch.setattr(commit_module, "value_paper_account_state", _fake_valuation)
++    real_commit = commit_manual_execution_preview
++
++    def _commit_with_account_context(**kwargs):
++        kwargs.setdefault("account_paths", account_paths)
++        return real_commit(**kwargs)
++
++    monkeypatch.setattr(sys.modules[__name__], "commit_manual_execution_preview", _commit_with_account_context)
+ 
+     _write_csv(exec_path, PAPER_EXECUTION_LOG_COLUMNS, [])
+     _write_csv(account_path, list(_account_row().keys()), [_account_row()])
+@@ -277,18 +283,14 @@ def commit_env(monkeypatch):
+             "account_path": account_path,
+             "position_path": position_path,
+             "current_state_path": current_state_path,
+-            "current_state_dates": current_state_dates,
++            "account_paths": account_paths,
+             "reports_dir": reports_dir,
+             "backup_dir": backup_dir,
+             "preview_path": preview_path,
+         }
+     finally:
+-        for path in [preview_path, exec_path, account_path, position_path, current_state_path]:
+-            if path.exists():
+-                path.unlink()
+-        for directory in [reports_dir, backup_dir]:
+-            if directory.exists():
+-                shutil.rmtree(directory)
++        if account_root.exists():
++            shutil.rmtree(account_root)
+ 
+ 
+ def test_fail_preview_is_rejected(commit_env):
+@@ -304,6 +306,7 @@ def test_fail_preview_is_rejected(commit_env):
+         commit_manual_execution_preview(
+             execution_date="2026-05-25",
+             preview_json_path=commit_env["preview_path"],
++            account_paths=commit_env["account_paths"],
+         )
+ 
+ 
+@@ -346,7 +349,7 @@ def test_warning_preview_commits_with_allow_warnings(commit_env):
+     assert rows[0]["shares"] == "1"
+     current_state = json.loads(commit_env["current_state_path"].read_text(encoding="utf-8"))
+     assert current_state["absolute_cash"] == 900.0
+-    assert commit_env["current_state_dates"] == ["2026-05-25"]
++    assert commit_env["current_state_path"].exists()
+     with commit_env["account_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+         account_snapshot_rows = list(csv.DictReader(handle))
+     with commit_env["position_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+@@ -695,6 +698,7 @@ def test_non_default_preview_commit_writes_under_account_root(tmp_path, monkeypa
+         allow_legacy_default=False,
+         create=True,
+     )
++    ensure_initialized_account_paths(account_root, account_id="paper_growth", date_str="2026-05-24")
+     monkeypatch.setattr(commit_module, "market_db_path", lambda: str(tmp_path / "unused_market.db"))
+     monkeypatch.setattr(commit_module, "value_paper_account_state", _fake_valuation)
+ 
+diff --git a/tests/test_paper_manual_review_append_commit.py b/tests/test_paper_manual_review_append_commit.py
+index 874794a9cd555d8a77a96f89df6606fbb2a13f0a..dd4b060fdee8fa3417e4d9e54c7bab1d64f93947 100644
+--- a/tests/test_paper_manual_review_append_commit.py
++++ b/tests/test_paper_manual_review_append_commit.py
+@@ -15,6 +15,7 @@ from core.paper_manual_review_append_commit import (
+     commit_manual_review_preview,
+ )
+ from core.paths import OUTPUTS, PAPER_TEST_DIR
++from tests.paper_account_test_support import ensure_initialized_account_paths
+ 
+ 
+ REVIEW_COLUMNS = [
+@@ -43,7 +44,7 @@ def _unique_path(prefix: str, suffix: str) -> Path:
+ 
+ 
+ def _unique_output_dir(prefix: str) -> Path:
+-    path = PAPER_TEST_DIR / prefix / uuid4().hex
++    path = OUTPUTS / "paper_accounts" / prefix / uuid4().hex
+     path.mkdir(parents=True, exist_ok=True)
+     return path
+ 
+@@ -125,12 +126,19 @@ def _preview_payload(
+ 
+ @pytest.fixture
+ def review_commit_env():
+-    review_root = _unique_output_dir("paper_manual_review_commit_test")
++    account_root = _unique_output_dir("paper_manual_review_commit_test")
++    account_paths = build_paper_account_paths(
++        "paper_default",
++        account_root=account_root,
++        create=False,
++    )
++    ensure_initialized_account_paths(account_root, account_id="paper_default", date_str="2026-05-24")
++    review_root = account_paths.reviews_dir
+     review_log_path = review_root / "paper_manual_review_log.csv"
+     template_path = review_root / "paper_manual_review_log_template.csv"
+-    reports_dir = review_root / "reports"
+-    backup_dir = OUTPUTS / "dev_backups_manual_review_commit_test" / uuid4().hex
+-    preview_path = review_root / "manual_review_preview.json"
++    reports_dir = account_paths.reports_dir
++    backup_dir = account_root / "archive" / "dev_backups"
++    preview_path = reports_dir / "manual_review_preview.json"
+     reports_dir.mkdir(parents=True, exist_ok=True)
+     backup_dir.mkdir(parents=True, exist_ok=True)
+ 
+@@ -160,11 +168,6 @@ def review_commit_env():
+         ],
+     )
+ 
+-    monkeypatch = pytest.MonkeyPatch()
+-    monkeypatch.setattr(commit_module, "paper_reviews_dir", lambda: review_root)
+-    monkeypatch.setattr(commit_module, "paper_reports_dir", lambda: reports_dir)
+-    monkeypatch.setattr(commit_module, "dev_backups_dir", lambda: backup_dir)
+-
+     try:
+         yield {
+             "review_root": review_root,
+@@ -173,13 +176,11 @@ def review_commit_env():
+             "reports_dir": reports_dir,
+             "backup_dir": backup_dir,
+             "preview_path": preview_path,
++            "account_paths": account_paths,
+         }
+     finally:
+-        monkeypatch.undo()
+-        if review_root.exists():
+-            shutil.rmtree(review_root, ignore_errors=True)
+-        if backup_dir.exists():
+-            shutil.rmtree(backup_dir, ignore_errors=True)
++        if account_root.exists():
++            shutil.rmtree(account_root, ignore_errors=True)
+ 
+ 
+ def test_fail_preview_is_rejected(review_commit_env):
+@@ -193,6 +194,7 @@ def test_fail_preview_is_rejected(review_commit_env):
+         commit_manual_review_preview(
+             review_date="2026-05-25",
+             preview_json_path=review_commit_env["preview_path"],
++            account_paths=review_commit_env["account_paths"],
+         )
+ 
+ 
+@@ -212,6 +214,7 @@ def test_warning_preview_requires_allow_warnings(review_commit_env):
+         commit_manual_review_preview(
+             review_date="2026-05-25",
+             preview_json_path=review_commit_env["preview_path"],
++            account_paths=review_commit_env["account_paths"],
+         )
+ 
+ 
+@@ -231,6 +234,7 @@ def test_warning_preview_appends_with_allow_warnings(review_commit_env):
+         review_date="2026-05-25",
+         preview_json_path=review_commit_env["preview_path"],
+         allow_warnings=True,
++        account_paths=review_commit_env["account_paths"],
+     )
+     assert result.account_id == "paper_default"
+     assert result.appended_count == 1
+@@ -255,6 +259,7 @@ def test_pass_preview_is_appended(review_commit_env):
+     result = commit_manual_review_preview(
+         review_date="2026-05-25",
+         preview_json_path=review_commit_env["preview_path"],
++        account_paths=review_commit_env["account_paths"],
+     )
+     assert result.appended_count == 1
+ 
+@@ -266,6 +271,7 @@ def test_preview_date_mismatch_is_rejected(review_commit_env):
+         commit_manual_review_preview(
+             review_date="2026-05-25",
+             preview_json_path=review_commit_env["preview_path"],
++            account_paths=review_commit_env["account_paths"],
+         )
+ 
+ 
+@@ -300,6 +306,7 @@ def test_existing_review_log_duplicate_blocks_append(review_commit_env):
+         commit_manual_review_preview(
+             review_date="2026-05-25",
+             preview_json_path=review_commit_env["preview_path"],
++            account_paths=review_commit_env["account_paths"],
+         )
+ 
+ 
+@@ -309,6 +316,7 @@ def test_review_log_schema_is_preserved(review_commit_env):
+     commit_manual_review_preview(
+         review_date="2026-05-25",
+         preview_json_path=review_commit_env["preview_path"],
++        account_paths=review_commit_env["account_paths"],
+     )
+     with review_commit_env["review_log_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+         reader = csv.DictReader(handle)
+@@ -321,6 +329,7 @@ def test_commit_report_json_and_markdown_are_created(review_commit_env):
+     result = commit_manual_review_preview(
+         review_date="2026-05-25",
+         preview_json_path=review_commit_env["preview_path"],
++        account_paths=review_commit_env["account_paths"],
+     )
+     assert Path(result.commit_json_path).exists()
+     assert Path(result.commit_markdown_path).exists()
+@@ -339,6 +348,7 @@ def test_append_failure_rolls_back(review_commit_env, monkeypatch):
+         commit_manual_review_preview(
+             review_date="2026-05-25",
+             preview_json_path=review_commit_env["preview_path"],
++            account_paths=review_commit_env["account_paths"],
+         )
+ 
+     with review_commit_env["review_log_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+@@ -354,6 +364,7 @@ def test_non_default_review_append_writes_under_account_root(tmp_path, monkeypat
+         allow_legacy_default=False,
+         create=True,
+     )
++    ensure_initialized_account_paths(account_root, account_id="paper_growth", date_str="2026-05-24")
+     review_log_path = account_paths.reviews_dir / "paper_manual_review_log.csv"
+     template_path = account_paths.reviews_dir / "paper_manual_review_log_template.csv"
+     preview_path = tmp_path / "manual_review_preview_non_default.json"
+diff --git a/tests/test_paper_manual_review_log_append.py b/tests/test_paper_manual_review_log_append.py
+index 8c4076ff96b4fd41dd3ad24ba9b8b768676501fd..5e8499c85f2d171d7c5e9526a9a1575720461e05 100644
+--- a/tests/test_paper_manual_review_log_append.py
++++ b/tests/test_paper_manual_review_log_append.py
+@@ -20,6 +20,7 @@ from core.paper_manual_review_log_append import (
+ )
+ from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
+ from core.paths import PAPER_TEST_DIR
++from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
+ @pytest.fixture
+@@ -86,10 +87,11 @@ def _row(
+ 
+ 
+ def test_log_is_created_when_missing(tmp_path: Path):
+-    output_path = _paper_test_path("paper_manual_review_log_test", tmp_path, ".csv")
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    output_path = account_paths.reviews_dir / "paper_manual_review_log.csv"
+     try:
+         final_rows, _, summary = append_paper_manual_review_log([_row()], [])
+-        write_paper_manual_review_log(final_rows, output_path)
++        write_paper_manual_review_log(final_rows, output_path, account_paths=account_paths)
+         assert output_path.exists()
+         assert summary["rows_appended"] == 1
+     finally:
+@@ -97,11 +99,14 @@ def test_log_is_created_when_missing(tmp_path: Path):
+ 
+ 
+ def test_existing_log_is_appended(tmp_path: Path):
+-    output_path = _paper_test_path("paper_manual_review_log_test", tmp_path, ".csv")
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    output_path = account_paths.reviews_dir / "paper_manual_review_log.csv"
+     try:
+         existing_rows = [_row(symbol="OLD", question_id="old_1")]
+-        write_paper_manual_review_log(existing_rows, output_path)
+-        loaded_existing = load_existing_paper_manual_review_log_rows(output_path)
++        write_paper_manual_review_log(existing_rows, output_path, account_paths=account_paths)
++        loaded_existing = load_existing_paper_manual_review_log_rows(
++            output_path, allowed_root=account_paths.root
++        )
+         final_rows, _, summary = append_paper_manual_review_log([_row(symbol="NEW", question_id="new_1")], loaded_existing)
+         assert summary["existing_log_row_count_before"] == 1
+         assert summary["final_log_row_count_after"] == 2
+@@ -185,8 +190,9 @@ def test_validator_warning_does_not_block_append():
+ 
+ 
+ def test_append_report_and_issues_csv_are_generated(tmp_path: Path):
+-    report_path = _paper_test_path("paper_manual_review_log_append_report_test", tmp_path, ".md")
+-    issues_path = _paper_test_path("paper_manual_review_log_append_issues_test", tmp_path, ".csv")
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    report_path = account_paths.reports_dir / "paper_manual_review_log_append_report.md"
++    issues_path = account_paths.reports_dir / "paper_manual_review_log_append_issues.csv"
+     try:
+         _, append_issues, summary_data = append_paper_manual_review_log([_row(review_status="pending", manual_answer="")], [])
+         summary = summarize_paper_manual_review_log_append(
+@@ -196,8 +202,12 @@ def test_append_report_and_issues_csv_are_generated(tmp_path: Path):
+             append_issues_path=issues_path,
+             summary_data=summary_data,
+         )
+-        write_append_issues_csv(append_issues, issues_path)
+-        write_markdown(report_path, render_paper_manual_review_log_append_report(summary))
++        write_append_issues_csv(append_issues, issues_path, account_paths=account_paths)
++        write_markdown(
++            report_path,
++            render_paper_manual_review_log_append_report(summary),
++            account_paths=account_paths,
++        )
+         with issues_path.open("r", encoding="utf-8-sig", newline="") as handle:
+             written_rows = list(csv.DictReader(handle))
+         assert report_path.exists()
+diff --git a/tests/test_paper_position_snapshot.py b/tests/test_paper_position_snapshot.py
+index 3fc20d7285c641f16bbf087cf4c78f5d78f7204d..11a0bb5659e8bd29fcce4ce7247a88f3af88ddcc 100644
+--- a/tests/test_paper_position_snapshot.py
++++ b/tests/test_paper_position_snapshot.py
+@@ -1,7 +1,6 @@
+ import csv
+ from datetime import datetime
+ from pathlib import Path
+-from types import SimpleNamespace
+ 
+ import pytest
+ 
+@@ -12,6 +11,7 @@ from core.paper_position_snapshot import (
+     build_paper_position_snapshot_rows,
+     save_paper_position_snapshot,
+ )
++from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
+ def _trade(trade_id: str, symbol: str, side: str, shares: int, price: float) -> dict:
+@@ -134,9 +134,11 @@ def test_build_paper_position_snapshot_rows_reflects_realized_and_total_pnl():
+ 
+ 
+ def test_save_paper_position_snapshot_replaces_same_date_and_creates_backup(tmp_path):
+-    snapshot_path = _unique_snapshot_path(tmp_path)
+-    archive_dir = _unique_archive_dir(tmp_path)
+-    account_paths = SimpleNamespace(account_id="paper_growth", root=snapshot_path.parent)
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_growth", account_id="paper_growth"
++    )
++    snapshot_path = account_paths.position_snapshot_path
++    archive_dir = account_paths.root / "archive"
+     try:
+         old_row = {column: "" for column in PAPER_POSITION_SNAPSHOT_COLUMNS}
+         old_row.update(
+@@ -185,9 +187,11 @@ def test_save_paper_position_snapshot_replaces_same_date_and_creates_backup(tmp_
+ 
+ 
+ def test_save_paper_position_snapshot_keeps_other_dates(tmp_path):
+-    snapshot_path = _unique_snapshot_path(tmp_path)
+-    archive_dir = _unique_archive_dir(tmp_path)
+-    account_paths = SimpleNamespace(account_id="paper_growth", root=snapshot_path.parent)
++    account_paths = create_initialized_account_paths(
++        tmp_path / "paper_growth", account_id="paper_growth"
++    )
++    snapshot_path = account_paths.position_snapshot_path
++    archive_dir = account_paths.root / "archive"
+     try:
+         row_0508 = {column: "" for column in PAPER_POSITION_SNAPSHOT_COLUMNS}
+         row_0508.update(
+@@ -237,6 +241,7 @@ def test_save_paper_position_snapshot_keeps_other_dates(tmp_path):
+ 
+ def test_save_paper_position_snapshot_rejects_non_paper_path(tmp_path):
+     root = tmp_path / "paper_growth"
++    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
+     snapshot_path = tmp_path / "outside" / "paper_position_snapshot.csv"
+     archive_dir = root / "archive"
+     try:
+@@ -255,7 +260,7 @@ def test_save_paper_position_snapshot_rejects_non_paper_path(tmp_path):
+                 "2026-05-09",
+                 snapshot_path,
+                 archive_dir,
+-                account_paths=SimpleNamespace(account_id="paper_growth", root=root),
++                account_paths=account_paths,
+             )
+     finally:
+         if archive_dir.exists():
+@@ -266,9 +271,9 @@ def test_save_paper_position_snapshot_rejects_non_paper_path(tmp_path):
+ 
+ def test_save_position_snapshot_backfills_legacy_identity_under_account_root(tmp_path):
+     root = tmp_path / "paper_growth"
++    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
+     snapshot_path = root / "paper_position_snapshot.csv"
+     archive_dir = root / "archive"
+-    root.mkdir(parents=True)
+     legacy_fieldnames = [
+         column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "account_id"
+     ]
+@@ -299,7 +304,7 @@ def test_save_position_snapshot_backfills_legacy_identity_under_account_root(tmp
+         "2026-05-09",
+         snapshot_path,
+         archive_dir,
+-        account_paths=SimpleNamespace(account_id="paper_growth", root=root),
++        account_paths=account_paths,
+     )
+ 
+     assert result["legacy_backfilled"] is True
+@@ -309,9 +314,9 @@ def test_save_position_snapshot_backfills_legacy_identity_under_account_root(tmp
+ 
+ def test_position_snapshot_rejects_unknown_header_without_mutation(tmp_path):
+     root = tmp_path / "paper_growth"
++    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
+     snapshot_path = root / "paper_position_snapshot.csv"
+     archive_dir = root / "archive"
+-    root.mkdir(parents=True)
+     fieldnames = [*PAPER_POSITION_SNAPSHOT_COLUMNS, "unknown_legacy_field"]
+     existing_row = {column: "" for column in fieldnames}
+     existing_row.update(
+@@ -343,16 +348,17 @@ def test_position_snapshot_rejects_unknown_header_without_mutation(tmp_path):
+             "2026-05-09",
+             snapshot_path,
+             archive_dir,
+-            account_paths=SimpleNamespace(account_id="paper_growth", root=root),
++            account_paths=account_paths,
+         )
+ 
+     assert "unknown_legacy_field" in str(exc_info.value)
+     assert snapshot_path.read_bytes() == before
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+ 
+ 
+ def test_save_empty_position_snapshot_keeps_current_schema(tmp_path):
+     root = tmp_path / "paper_growth"
++    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
+     snapshot_path = root / "paper_position_snapshot.csv"
+     archive_dir = root / "archive"
+ 
+@@ -361,7 +367,7 @@ def test_save_empty_position_snapshot_keeps_current_schema(tmp_path):
+         "2026-05-09",
+         snapshot_path,
+         archive_dir,
+-        account_paths=SimpleNamespace(account_id="paper_growth", root=root),
++        account_paths=account_paths,
+     )
+ 
+     with snapshot_path.open("r", encoding="utf-8-sig", newline="") as handle:
+@@ -369,14 +375,14 @@ def test_save_empty_position_snapshot_keeps_current_schema(tmp_path):
+         assert reader.fieldnames == PAPER_POSITION_SNAPSHOT_COLUMNS
+         assert list(reader) == []
+     assert result["row_count"] == 0
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+ 
+ 
+ def test_position_snapshot_rejects_missing_required_header_without_mutation(tmp_path):
+     root = tmp_path / "paper_growth"
++    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
+     snapshot_path = root / "paper_position_snapshot.csv"
+     archive_dir = root / "archive"
+-    root.mkdir(parents=True)
+     fieldnames = [
+         column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "symbol"
+     ]
+@@ -408,9 +414,9 @@ def test_position_snapshot_rejects_missing_required_header_without_mutation(tmp_
+             "2026-05-09",
+             snapshot_path,
+             archive_dir,
+-            account_paths=SimpleNamespace(account_id="paper_growth", root=root),
++            account_paths=account_paths,
+         )
+ 
+     assert "symbol" in str(exc_info.value)
+     assert snapshot_path.read_bytes() == before
+-    assert not archive_dir.exists()
++    assert list(archive_dir.iterdir()) == []
+diff --git a/tests/test_reset_paper_execution_log.py b/tests/test_reset_paper_execution_log.py
+index e024b6a5763f1701b17566dfe17806a3375f5b20..6835ddfd81ed8505c684072f504453913074ab31 100644
+--- a/tests/test_reset_paper_execution_log.py
++++ b/tests/test_reset_paper_execution_log.py
+@@ -8,6 +8,7 @@ import pytest
+ from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
+ from core.paths import FRONT_TEST_DIR, PAPER_TEST_DIR
+ from scripts.reset_paper_execution_log import reset_paper_execution_log
++from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
+ def _unique_log_path() -> Path:
+@@ -49,9 +50,10 @@ def _sample_row() -> dict:
+     }
+ 
+ 
+-def test_reset_dry_run_does_not_modify_file():
+-    log_path = _unique_log_path()
+-    archive_dir = _unique_archive_dir()
++def test_reset_dry_run_does_not_modify_file(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    log_path = account_paths.execution_log_path
++    archive_dir = account_paths.root / "archive"
+     try:
+         _write_log(log_path, [_sample_row()])
+         before = _read_lines(log_path)
+@@ -60,6 +62,7 @@ def test_reset_dry_run_does_not_modify_file():
+             archive_dir=archive_dir,
+             commit=False,
+             now=datetime(2026, 5, 9, 10, 50, 0),
++            account_paths=account_paths,
+         )
+         after = _read_lines(log_path)
+         assert before == after
+@@ -74,9 +77,10 @@ def test_reset_dry_run_does_not_modify_file():
+             archive_dir.rmdir()
+ 
+ 
+-def test_reset_commit_backs_up_existing_log_and_recreates_header_only():
+-    log_path = _unique_log_path()
+-    archive_dir = _unique_archive_dir()
++def test_reset_commit_backs_up_existing_log_and_recreates_header_only(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    log_path = account_paths.execution_log_path
++    archive_dir = account_paths.root / "archive"
+     try:
+         _write_log(log_path, [_sample_row()])
+         result = reset_paper_execution_log(
+@@ -84,6 +88,7 @@ def test_reset_commit_backs_up_existing_log_and_recreates_header_only():
+             archive_dir=archive_dir,
+             commit=True,
+             now=datetime(2026, 5, 9, 10, 50, 0),
++            account_paths=account_paths,
+         )
+         assert result["backup_created"] is True
+         assert result["backup_target"].exists()
+@@ -101,21 +106,21 @@ def test_reset_commit_backs_up_existing_log_and_recreates_header_only():
+             archive_dir.rmdir()
+ 
+ 
+-def test_reset_commit_creates_header_only_log_when_missing():
+-    log_path = _unique_log_path()
+-    archive_dir = _unique_archive_dir()
++def test_reset_rejects_missing_core_log_without_recreating_it(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
++    log_path = account_paths.execution_log_path
++    archive_dir = account_paths.root / "archive"
++    log_path.unlink()
+     try:
+-        result = reset_paper_execution_log(
+-            log_path=log_path,
+-            archive_dir=archive_dir,
+-            commit=True,
+-            now=datetime(2026, 5, 9, 10, 50, 0),
+-        )
+-        assert result["backup_created"] is False
+-        assert log_path.exists()
+-        lines = _read_lines(log_path)
+-        assert len(lines) == 1
+-        assert lines[0] == ",".join(PAPER_EXECUTION_LOG_COLUMNS)
++        with pytest.raises(ValueError, match="paper_execution_log.csv"):
++            reset_paper_execution_log(
++                log_path=log_path,
++                archive_dir=archive_dir,
++                commit=True,
++                now=datetime(2026, 5, 9, 10, 50, 0),
++                account_paths=account_paths,
++            )
++        assert not log_path.exists()
+     finally:
+         if log_path.exists():
+             log_path.unlink()
+@@ -125,12 +130,18 @@ def test_reset_commit_creates_header_only_log_when_missing():
+             archive_dir.rmdir()
+ 
+ 
+-def test_reset_rejects_non_paper_path():
++def test_reset_rejects_non_paper_path(tmp_path):
++    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+     log_path = FRONT_TEST_DIR / f"paper_execution_log_reset_test_{uuid4().hex}.csv"
+     archive_dir = _unique_archive_dir()
+     try:
+         with pytest.raises(ValueError):
+-            reset_paper_execution_log(log_path=log_path, archive_dir=archive_dir, commit=True)
++            reset_paper_execution_log(
++                log_path=log_path,
++                archive_dir=archive_dir,
++                commit=True,
++                account_paths=account_paths,
++            )
+     finally:
+         if archive_dir.exists():
+             for child in archive_dir.iterdir():
+diff --git a/tests/test_runbook_execution_reconciliation_preview.py b/tests/test_runbook_execution_reconciliation_preview.py
+index ac16109b1027cd62459f67b3cf7534ec9d08925f..50755f220ec446f46ed21e0faa0d646610009262 100644
+--- a/tests/test_runbook_execution_reconciliation_preview.py
++++ b/tests/test_runbook_execution_reconciliation_preview.py
+@@ -8,6 +8,7 @@ from core.notion_account_keys import build_daily_plan_external_key
+ from scripts import runbook_state
+ from scripts import runbook_execution_reconciliation_preview as preview_script
+ from core.execution_reconciliation import build_manual_execution_key
++from tests.paper_account_test_support import ensure_initialized_account_paths
+ 
+ 
+ ACCOUNT_ID = "paper_pilot_202606"
+@@ -56,6 +57,7 @@ def _row(symbol: str, side: str, sequence: int, quantity: int, actual_price: flo
+ def test_preview_writes_json_md_and_latest_artifacts(tmp_path: Path) -> None:
+     workspace = tmp_path / "workspace"
+     account_root = tmp_path / "account"
++    ensure_initialized_account_paths(account_root, account_id=ACCOUNT_ID, date_str=DATA_DATE)
+     daily_plan_path = tmp_path / "daily_action_plan_20260701.json"
+     executions_path = tmp_path / "manual_executions.json"
+     _write_daily_plan(daily_plan_path)
+@@ -92,6 +94,7 @@ def test_preview_writes_json_md_and_latest_artifacts(tmp_path: Path) -> None:
+ def test_preview_preserves_persisted_explicit_v1_dispatch(tmp_path: Path) -> None:
+     workspace = tmp_path / "workspace"
+     account_root = tmp_path / "account"
++    ensure_initialized_account_paths(account_root, account_id=ACCOUNT_ID, date_str=DATA_DATE)
+     daily_plan_path = tmp_path / "daily_action_plan_20260701.json"
+     executions_path = tmp_path / "manual_executions.json"
+     _write_daily_plan(daily_plan_path)
+@@ -145,6 +148,7 @@ def test_preview_paths_are_separated_by_runbook_day_id(tmp_path: Path) -> None:
+ def test_cli_reads_fixture_json_without_notion_or_ledger_writes(tmp_path: Path, capsys) -> None:
+     workspace = tmp_path / "workspace"
+     account_root = tmp_path / "account"
++    ensure_initialized_account_paths(account_root, account_id=ACCOUNT_ID, date_str=DATA_DATE)
+     daily_plan_path = tmp_path / "daily_action_plan_20260701.json"
+     executions_path = tmp_path / "manual_executions.json"
+     _write_daily_plan(daily_plan_path)

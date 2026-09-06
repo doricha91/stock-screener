@@ -69,20 +69,20 @@ def _seed_snapshots(paths: PaperAccountPaths) -> None:
     _write_text(paths.current_state_snapshot_path("2026-06-14"), "{}\n")
     _write_text(
         paths.account_snapshot_path,
-        "snapshot_date,currency,initial_cash,cash,positions_cost_value,total_equity_cost_basis,"
+        "account_id,snapshot_date,currency,initial_cash,cash,positions_cost_value,total_equity_cost_basis,"
         "cash_ratio_cost_basis,position_count,symbols,applied_trade_count,valuation_method,"
         "source_execution_log,source_current_state,created_at,positions_market_value,"
         "total_equity_market_value,cash_ratio_market_value,unrealized_pnl,unrealized_pnl_pct,"
         "realized_pnl,realized_pnl_by_symbol,total_pnl,total_pnl_pct,market_valuation_status,"
         "market_valuation_error,valuation_price_date,valuation_price_dates,price_staleness_days,"
         "max_price_staleness_days\n"
-        "2026-06-14,USD,100000.00,100000.00,0.00,100000.00,1.0000000,0,,0,"
+        f"{paths.account_id},2026-06-14,USD,100000.00,100000.00,0.00,100000.00,1.0000000,0,,0,"
         "db_daily_price_close,,,,0.00,100000.00,1.0000000,0.00,0.0000000,0.00,{},0.00,"
         "0.0000000,success,,2026-06-14,{}, {},0\n",
     )
     _write_text(
         paths.position_snapshot_path,
-        "snapshot_date,symbol,shares,avg_price,cost_value,close_price,market_value,unrealized_pnl,"
+        "account_id,snapshot_date,symbol,shares,avg_price,cost_value,close_price,market_value,unrealized_pnl,"
         "unrealized_pnl_pct,realized_pnl,total_pnl,total_pnl_pct_on_current_cost,valuation_method,"
         "valuation_price_date,price_staleness_days,position_status,created_at\n",
     )

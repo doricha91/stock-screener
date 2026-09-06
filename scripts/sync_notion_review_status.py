@@ -26,6 +26,7 @@ from core.notion_settings import (  # noqa: E402
     load_notion_settings,
 )
 from core.paper_account_paths import build_paper_account_paths  # noqa: E402
+from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
 
 load_dotenv()
 
@@ -55,14 +56,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--date", required=True, help="Review date in YYYY-MM-DD format")
     parser.add_argument("--commit-report", required=True, help="Path to manual review commit report JSON")
-    parser.add_argument("--account-id", help="Paper account id for status sync namespace")
+    parser.add_argument("--account-id", required=True, help="Paper account id for status sync namespace")
     parser.add_argument("--dry-run", action="store_true", help="Build sync payload without updating Notion pages")
     parser.add_argument("--json", action="store_true", help="Print machine-readable result JSON")
     return parser
 
 
 def write_status_sync_report(payload: dict, account_id: str, review_date: str) -> tuple[Path, Path]:
-    account_paths = build_paper_account_paths(account_id, create=True)
+    account_paths = build_paper_account_paths(account_id, create=False)
+    require_initialized_writer_account_paths(
+        account_paths, command_name="sync_notion_review_status"
+    )
     compact_date = str(review_date).replace("-", "")
     json_path = account_paths.reports_dir / f"manual_review_status_sync_{compact_date}.json"
     markdown_path = account_paths.reports_dir / f"manual_review_status_sync_{compact_date}.md"
@@ -152,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = result.to_dict()
     try:
         write_status_sync_report(payload, resolved_account_id, args.date)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         if args.json:
             print(json.dumps({"overall_status": "FAILED", "error": str(exc)}, ensure_ascii=False, indent=2))
         else:

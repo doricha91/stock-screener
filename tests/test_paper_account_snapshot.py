@@ -2,7 +2,6 @@ import csv
 import json
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +12,7 @@ from core.paper_account_snapshot import (
 )
 from core.paper_market_valuation import PaperAccountValuation
 from core.paper_account_state import build_paper_state_from_trades, create_initial_paper_state
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _make_trade(
@@ -38,8 +38,8 @@ def _read_rows(path: Path) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
-def _account_paths(root: Path, account_id: str = "paper_growth") -> SimpleNamespace:
-    return SimpleNamespace(account_id=account_id, root=root)
+def _account_paths(root: Path, account_id: str = "paper_growth"):
+    return ensure_initialized_account_paths(root, account_id=account_id)
 
 
 def test_build_paper_account_snapshot_row_calculates_cost_basis_fields():
@@ -325,7 +325,7 @@ def test_save_account_snapshot_backfills_legacy_identity_under_account_root(tmp_
         writer = csv.DictWriter(handle, fieldnames=legacy_fieldnames)
         writer.writeheader()
         writer.writerow(legacy_row)
-    account_paths = SimpleNamespace(account_id="paper_growth", root=root)
+    account_paths = _account_paths(root)
     row = build_paper_account_snapshot_row(
         create_initial_paper_state(),
         "2026-05-09",
@@ -379,11 +379,11 @@ def test_save_account_snapshot_rejects_mixed_identity_without_mutation(tmp_path)
             row,
             snapshot_path,
             archive_dir,
-            account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+            account_paths=_account_paths(root),
         )
 
     assert snapshot_path.read_bytes() == before
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []
 
 
 def test_save_account_snapshot_rejects_headerless_legacy_file_without_mutation(tmp_path):
@@ -407,7 +407,7 @@ def test_save_account_snapshot_rejects_headerless_legacy_file_without_mutation(t
         )
 
     assert snapshot_path.read_bytes() == b""
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []
 
 
 def test_account_snapshot_rejects_unknown_header_without_mutation(tmp_path):
@@ -445,7 +445,7 @@ def test_account_snapshot_rejects_unknown_header_without_mutation(tmp_path):
 
     assert "unknown_legacy_field" in str(exc_info.value)
     assert snapshot_path.read_bytes() == before
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []
 
 
 def test_account_snapshot_rejects_extra_values_without_mutation(tmp_path):
@@ -479,7 +479,7 @@ def test_account_snapshot_rejects_extra_values_without_mutation(tmp_path):
         )
 
     assert snapshot_path.read_bytes() == before
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []
 
 
 def test_account_snapshot_rejects_missing_required_header_without_mutation(tmp_path):
@@ -518,7 +518,7 @@ def test_account_snapshot_rejects_missing_required_header_without_mutation(tmp_p
 
     assert "currency" in str(exc_info.value)
     assert snapshot_path.read_bytes() == before
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []
 
 
 def test_account_snapshot_does_not_migrate_when_account_id_and_other_column_are_missing(tmp_path):
@@ -555,4 +555,4 @@ def test_account_snapshot_does_not_migrate_when_account_id_and_other_column_are_
     assert "account_id" in str(exc_info.value)
     assert "currency" in str(exc_info.value)
     assert snapshot_path.read_bytes() == before
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []

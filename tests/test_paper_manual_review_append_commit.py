@@ -15,6 +15,7 @@ from core.paper_manual_review_append_commit import (
     commit_manual_review_preview,
 )
 from core.paths import OUTPUTS, PAPER_TEST_DIR
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 REVIEW_COLUMNS = [
@@ -43,7 +44,7 @@ def _unique_path(prefix: str, suffix: str) -> Path:
 
 
 def _unique_output_dir(prefix: str) -> Path:
-    path = PAPER_TEST_DIR / prefix / uuid4().hex
+    path = OUTPUTS / "paper_accounts" / prefix / uuid4().hex
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -125,12 +126,19 @@ def _preview_payload(
 
 @pytest.fixture
 def review_commit_env():
-    review_root = _unique_output_dir("paper_manual_review_commit_test")
+    account_root = _unique_output_dir("paper_manual_review_commit_test")
+    account_paths = build_paper_account_paths(
+        "paper_default",
+        account_root=account_root,
+        create=False,
+    )
+    ensure_initialized_account_paths(account_root, account_id="paper_default", date_str="2026-05-24")
+    review_root = account_paths.reviews_dir
     review_log_path = review_root / "paper_manual_review_log.csv"
     template_path = review_root / "paper_manual_review_log_template.csv"
-    reports_dir = review_root / "reports"
-    backup_dir = OUTPUTS / "dev_backups_manual_review_commit_test" / uuid4().hex
-    preview_path = review_root / "manual_review_preview.json"
+    reports_dir = account_paths.reports_dir
+    backup_dir = account_root / "archive" / "dev_backups"
+    preview_path = reports_dir / "manual_review_preview.json"
     reports_dir.mkdir(parents=True, exist_ok=True)
     backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,11 +168,6 @@ def review_commit_env():
         ],
     )
 
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(commit_module, "paper_reviews_dir", lambda: review_root)
-    monkeypatch.setattr(commit_module, "paper_reports_dir", lambda: reports_dir)
-    monkeypatch.setattr(commit_module, "dev_backups_dir", lambda: backup_dir)
-
     try:
         yield {
             "review_root": review_root,
@@ -173,13 +176,11 @@ def review_commit_env():
             "reports_dir": reports_dir,
             "backup_dir": backup_dir,
             "preview_path": preview_path,
+            "account_paths": account_paths,
         }
     finally:
-        monkeypatch.undo()
-        if review_root.exists():
-            shutil.rmtree(review_root, ignore_errors=True)
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir, ignore_errors=True)
+        if account_root.exists():
+            shutil.rmtree(account_root, ignore_errors=True)
 
 
 def test_fail_preview_is_rejected(review_commit_env):
@@ -193,6 +194,7 @@ def test_fail_preview_is_rejected(review_commit_env):
         commit_manual_review_preview(
             review_date="2026-05-25",
             preview_json_path=review_commit_env["preview_path"],
+            account_paths=review_commit_env["account_paths"],
         )
 
 
@@ -212,6 +214,7 @@ def test_warning_preview_requires_allow_warnings(review_commit_env):
         commit_manual_review_preview(
             review_date="2026-05-25",
             preview_json_path=review_commit_env["preview_path"],
+            account_paths=review_commit_env["account_paths"],
         )
 
 
@@ -231,6 +234,7 @@ def test_warning_preview_appends_with_allow_warnings(review_commit_env):
         review_date="2026-05-25",
         preview_json_path=review_commit_env["preview_path"],
         allow_warnings=True,
+        account_paths=review_commit_env["account_paths"],
     )
     assert result.account_id == "paper_default"
     assert result.appended_count == 1
@@ -255,6 +259,7 @@ def test_pass_preview_is_appended(review_commit_env):
     result = commit_manual_review_preview(
         review_date="2026-05-25",
         preview_json_path=review_commit_env["preview_path"],
+        account_paths=review_commit_env["account_paths"],
     )
     assert result.appended_count == 1
 
@@ -266,6 +271,7 @@ def test_preview_date_mismatch_is_rejected(review_commit_env):
         commit_manual_review_preview(
             review_date="2026-05-25",
             preview_json_path=review_commit_env["preview_path"],
+            account_paths=review_commit_env["account_paths"],
         )
 
 
@@ -300,6 +306,7 @@ def test_existing_review_log_duplicate_blocks_append(review_commit_env):
         commit_manual_review_preview(
             review_date="2026-05-25",
             preview_json_path=review_commit_env["preview_path"],
+            account_paths=review_commit_env["account_paths"],
         )
 
 
@@ -309,6 +316,7 @@ def test_review_log_schema_is_preserved(review_commit_env):
     commit_manual_review_preview(
         review_date="2026-05-25",
         preview_json_path=review_commit_env["preview_path"],
+        account_paths=review_commit_env["account_paths"],
     )
     with review_commit_env["review_log_path"].open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -321,6 +329,7 @@ def test_commit_report_json_and_markdown_are_created(review_commit_env):
     result = commit_manual_review_preview(
         review_date="2026-05-25",
         preview_json_path=review_commit_env["preview_path"],
+        account_paths=review_commit_env["account_paths"],
     )
     assert Path(result.commit_json_path).exists()
     assert Path(result.commit_markdown_path).exists()
@@ -339,6 +348,7 @@ def test_append_failure_rolls_back(review_commit_env, monkeypatch):
         commit_manual_review_preview(
             review_date="2026-05-25",
             preview_json_path=review_commit_env["preview_path"],
+            account_paths=review_commit_env["account_paths"],
         )
 
     with review_commit_env["review_log_path"].open("r", encoding="utf-8-sig", newline="") as handle:
@@ -354,6 +364,7 @@ def test_non_default_review_append_writes_under_account_root(tmp_path, monkeypat
         allow_legacy_default=False,
         create=True,
     )
+    ensure_initialized_account_paths(account_root, account_id="paper_growth", date_str="2026-05-24")
     review_log_path = account_paths.reviews_dir / "paper_manual_review_log.csv"
     template_path = account_paths.reviews_dir / "paper_manual_review_log_template.csv"
     preview_path = tmp_path / "manual_review_preview_non_default.json"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ from core.paper_manual_execution_commit import (
 from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
 from core.paper_daily_review_scope import sha256_file
 from core.paths import OUTPUTS, PAPER_TEST_DIR
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _unique_path(prefix: str, suffix: str) -> Path:
@@ -243,29 +245,33 @@ def _fake_valuation(state, snapshot_date: str, db_path: Path) -> PaperAccountVal
 
 @pytest.fixture
 def commit_env(monkeypatch):
-    exec_path = _unique_path("paper_execution_log_manual_commit", ".csv")
-    account_path = _unique_path("paper_account_snapshot_manual_commit", ".csv")
-    position_path = _unique_path("paper_position_snapshot_manual_commit", ".csv")
-    current_state_path = _unique_path("paper_current_state_manual_commit", ".json")
-    reports_dir = _unique_path("reports_manual_commit", "")
-    backup_dir = _unique_output_dir("dev_backups_manual_commit")
-    preview_path = _unique_path("manual_execution_preview_manual_commit", ".json")
-    current_state_dates: list[str] = []
+    account_root = _unique_output_dir("acct_b")
+    account_root.mkdir(parents=True)
+    account_paths = build_paper_account_paths(
+        "paper_default",
+        account_root=account_root,
+        create=False,
+    )
+    ensure_initialized_account_paths(account_root, account_id="paper_default", date_str="2026-05-24")
+    exec_path = account_paths.execution_log_path
+    account_path = account_paths.account_snapshot_path
+    position_path = account_paths.position_snapshot_path
+    current_state_path = account_paths.current_state_snapshot_path("2026-05-25")
+    reports_dir = account_paths.reports_dir
+    backup_dir = account_root / "archive" / "dev_backups"
+    preview_path = reports_dir / "manual_execution_preview.json"
     reports_dir.mkdir(parents=True, exist_ok=True)
     backup_dir.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(commit_module, "paper_execution_log_path", lambda: exec_path)
-    monkeypatch.setattr(commit_module, "paper_account_snapshot_path", lambda: account_path)
-    monkeypatch.setattr(commit_module, "paper_position_snapshot_path", lambda: position_path)
-    def _current_state_path(date: str) -> Path:
-        current_state_dates.append(date)
-        return current_state_path
-
-    monkeypatch.setattr(commit_module, "paper_current_state_snapshot_path", _current_state_path)
-    monkeypatch.setattr(commit_module, "paper_reports_dir", lambda: reports_dir)
-    monkeypatch.setattr(commit_module, "dev_backups_dir", lambda: backup_dir)
     monkeypatch.setattr(commit_module, "market_db_path", lambda: str(_unique_path("market_db_unused", ".db")))
     monkeypatch.setattr(commit_module, "value_paper_account_state", _fake_valuation)
+    real_commit = commit_manual_execution_preview
+
+    def _commit_with_account_context(**kwargs):
+        kwargs.setdefault("account_paths", account_paths)
+        return real_commit(**kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "commit_manual_execution_preview", _commit_with_account_context)
 
     _write_csv(exec_path, PAPER_EXECUTION_LOG_COLUMNS, [])
     _write_csv(account_path, list(_account_row().keys()), [_account_row()])
@@ -277,18 +283,14 @@ def commit_env(monkeypatch):
             "account_path": account_path,
             "position_path": position_path,
             "current_state_path": current_state_path,
-            "current_state_dates": current_state_dates,
+            "account_paths": account_paths,
             "reports_dir": reports_dir,
             "backup_dir": backup_dir,
             "preview_path": preview_path,
         }
     finally:
-        for path in [preview_path, exec_path, account_path, position_path, current_state_path]:
-            if path.exists():
-                path.unlink()
-        for directory in [reports_dir, backup_dir]:
-            if directory.exists():
-                shutil.rmtree(directory)
+        if account_root.exists():
+            shutil.rmtree(account_root)
 
 
 def test_fail_preview_is_rejected(commit_env):
@@ -304,6 +306,7 @@ def test_fail_preview_is_rejected(commit_env):
         commit_manual_execution_preview(
             execution_date="2026-05-25",
             preview_json_path=commit_env["preview_path"],
+            account_paths=commit_env["account_paths"],
         )
 
 
@@ -346,7 +349,7 @@ def test_warning_preview_commits_with_allow_warnings(commit_env):
     assert rows[0]["shares"] == "1"
     current_state = json.loads(commit_env["current_state_path"].read_text(encoding="utf-8"))
     assert current_state["absolute_cash"] == 900.0
-    assert commit_env["current_state_dates"] == ["2026-05-25"]
+    assert commit_env["current_state_path"].exists()
     with commit_env["account_path"].open("r", encoding="utf-8-sig", newline="") as handle:
         account_snapshot_rows = list(csv.DictReader(handle))
     with commit_env["position_path"].open("r", encoding="utf-8-sig", newline="") as handle:
@@ -695,6 +698,7 @@ def test_non_default_preview_commit_writes_under_account_root(tmp_path, monkeypa
         allow_legacy_default=False,
         create=True,
     )
+    ensure_initialized_account_paths(account_root, account_id="paper_growth", date_str="2026-05-24")
     monkeypatch.setattr(commit_module, "market_db_path", lambda: str(tmp_path / "unused_market.db"))
     monkeypatch.setattr(commit_module, "value_paper_account_state", _fake_valuation)
 

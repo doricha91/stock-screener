@@ -13,7 +13,10 @@ from core.notion_account_keys import (
     build_manual_review_canonical_key,
     normalize_notion_account_id,
 )
-from core.paper_account_guard import assert_non_default_writer_target
+from core.paper_account_guard import (
+    assert_account_writer_target,
+    require_initialized_writer_account_paths,
+)
 from core.paper_account_paths import PaperAccountPaths
 from core.paper_manual_review_log_append import (
     append_paper_manual_review_log,
@@ -24,7 +27,6 @@ from core.paper_manual_review_log_template import (
     PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS,
     load_csv_rows,
 )
-from core.paths import dev_backups_dir, paper_reports_dir, paper_reviews_dir
 
 
 class ManualReviewAppendCommitError(RuntimeError):
@@ -56,6 +58,13 @@ def commit_manual_review_preview(
 ) -> ManualReviewAppendCommitResult:
     payload = _load_preview_payload(preview_json_path)
     resolved_account_id = _resolve_preview_account_id(payload, account_paths=account_paths)
+    try:
+        require_initialized_writer_account_paths(
+            account_paths,
+            command_name="commit_manual_review_preview",
+        )
+    except ValueError as exc:
+        raise ManualReviewAppendCommitError(str(exc)) from exc
     _validate_preview_payload(payload, review_date=review_date, allow_warnings=allow_warnings)
 
     writer_paths = _resolve_review_writer_paths(account_paths=account_paths)
@@ -97,7 +106,7 @@ def commit_manual_review_preview(
             backups={},
         )
 
-    allowed_root = account_paths.root if account_paths is not None and account_paths.account_id != "paper_default" else None
+    allowed_root = account_paths.root
     existing_rows = load_existing_paper_manual_review_log_rows(target_log_path, allowed_root=allowed_root)
     template_by_key = _load_template_index(template_csv_path, allowed_root=allowed_root)
     _normalize_append_candidate_payloads(candidate_payloads, account_id=resolved_account_id)
@@ -131,7 +140,7 @@ def commit_manual_review_preview(
     output_reports_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        write_paper_manual_review_log(final_rows, target_log_path, allowed_root=allowed_root)
+        write_paper_manual_review_log(final_rows, target_log_path, account_paths=account_paths)
         if _count_data_rows(target_log_path) != len(final_rows):
             raise ManualReviewAppendCommitError("Review log row count mismatch after append write.")
         _write_commit_sidecar(
@@ -267,9 +276,9 @@ def _resolve_preview_account_id(
         resolved_account_id = candidate_account_id
     if account_paths is not None and account_paths.account_id != resolved_account_id:
         raise ManualReviewAppendCommitError("Provided account_paths.account_id does not match preview account_id.")
-    if resolved_account_id != "paper_default" and account_paths is None:
+    if account_paths is None:
         raise ManualReviewAppendCommitError(
-            "Non-default manual review append requires account-aware writer paths."
+            "Manual review append requires explicit account-aware writer paths."
         )
     return resolved_account_id
 
@@ -520,15 +529,10 @@ def _resolve_review_writer_paths(
     *,
     account_paths: PaperAccountPaths | None,
 ) -> dict[str, Path]:
-    if account_paths is None or account_paths.account_id == "paper_default":
-        reviews_dir = paper_reviews_dir()
-        return {
-            "review_log_path": reviews_dir / "paper_manual_review_log.csv",
-            "template_path": reviews_dir / "paper_manual_review_log_template.csv",
-            "reports_dir": paper_reports_dir(),
-            "backup_dir": dev_backups_dir(),
-        }
-
+    require_initialized_writer_account_paths(
+        account_paths,
+        command_name="commit_manual_review_preview",
+    )
     targets = {
         "review_log_path": account_paths.reviews_dir / "paper_manual_review_log.csv",
         "template_path": account_paths.reviews_dir / "paper_manual_review_log_template.csv",
@@ -536,9 +540,9 @@ def _resolve_review_writer_paths(
         "backup_dir": account_paths.root / "archive" / "dev_backups",
     }
     for path in targets.values():
-        assert_non_default_writer_target(
+        assert_account_writer_target(
             path,
-            account_id=account_paths.account_id,
-            account_root=account_paths.root,
+            account_paths=account_paths,
+            command_name="commit_manual_review_preview",
         )
     return targets

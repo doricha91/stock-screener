@@ -11,7 +11,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.daily_plan_generator import generate_daily_plan
-from core.paper_account_paths import PaperAccountPaths, latest_current_state_snapshot_path
+from core.paper_account_guard import require_initialized_writer_account_paths
+from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths, latest_current_state_snapshot_path
 from core.paper_state_provider import load_official_paper_state_for_daily_plan
 from core.stage_a_asof_contract import (
     StageAAsOfContext,
@@ -20,13 +21,7 @@ from core.stage_a_asof_contract import (
     sha256_payload,
     validate_config_snapshot,
 )
-from core.paths import (
-    paper_config_snapshot_archive_dir,
-    paper_config_snapshot_path,
-    paper_current_state_snapshot_path,
-    paper_daily_action_plan_path,
-    market_db_path,
-)
+from core.paths import market_db_path
 
 
 def _normalize_date_for_db(date_str: str) -> str:
@@ -145,6 +140,10 @@ def run_paper_daily_plan(
         normalized_data_date = None
         normalized_db_date = _normalize_date_for_db(date_str)
         artifact_date = normalized_db_date
+    require_initialized_writer_account_paths(
+        account_paths,
+        command_name="run_paper_daily_plan",
+    )
     asof_context = None
     if enforce_asof_contract:
         if normalized_data_date is None:
@@ -153,7 +152,7 @@ def run_paper_daily_plan(
                 "official Stage A AS-OF contract requires explicit data_date and trade_date",
             )
         asof_context = StageAAsOfContext.build(
-            account_id=account_paths.account_id if account_paths is not None else "paper_default",
+            account_id=account_paths.account_id,
             data_date=normalized_data_date,
             trade_date=normalized_db_date,
             observed_at=observed_at,
@@ -161,52 +160,32 @@ def run_paper_daily_plan(
     state_log_path = None
     initial_cash = 100000.0
     currency = "USD"
-    if account_paths is not None and account_paths.account_id != "paper_default":
-        inception_date = _account_inception_date(account_paths)
-        if inception_date is None:
-            raise ValueError(
-                f"Cannot determine account inception date for account_id={account_paths.account_id}"
-            )
-        plan_compact_date = normalized_db_date.replace("-", "")
-        if plan_compact_date < inception_date:
-            raise ValueError(
-                f"plan_date {normalized_db_date} is before account inception date "
-                f"{datetime.strptime(inception_date, '%Y%m%d').strftime('%Y-%m-%d')} "
-                f"for account_id={account_paths.account_id}"
-            )
-        state_log_path = account_paths.execution_log_path
-        initial_cash, currency = _read_account_initial_snapshot(account_paths)
+    inception_date = _account_inception_date(account_paths)
+    if inception_date is None:
+        raise ValueError(
+            f"Cannot determine account inception date for account_id={account_paths.account_id}"
+        )
+    plan_compact_date = normalized_db_date.replace("-", "")
+    if plan_compact_date < inception_date:
+        raise ValueError(
+            f"plan_date {normalized_db_date} is before account inception date "
+            f"{datetime.strptime(inception_date, '%Y%m%d').strftime('%Y-%m-%d')} "
+            f"for account_id={account_paths.account_id}"
+        )
+    state_log_path = account_paths.execution_log_path
+    initial_cash, currency = _read_account_initial_snapshot(account_paths)
 
     state_cutoff_date = normalized_data_date or normalized_db_date
-    if state_log_path is None:
-        paper_state = load_official_paper_state_for_daily_plan(state_cutoff_date)
-    else:
-        paper_state = load_official_paper_state_for_daily_plan(
-            state_cutoff_date,
-            log_path=state_log_path,
-            initial_cash=initial_cash,
-            currency=currency,
-        )
-    output_path = (
-        account_paths.daily_action_plan_path(artifact_date)
-        if account_paths is not None and account_paths.account_id != "paper_default"
-        else paper_daily_action_plan_path(artifact_date)
+    paper_state = load_official_paper_state_for_daily_plan(
+        state_cutoff_date,
+        log_path=state_log_path,
+        initial_cash=initial_cash,
+        currency=currency,
     )
-    config_snapshot_output_path = (
-        account_paths.config_snapshot_path(artifact_date)
-        if account_paths is not None and account_paths.account_id != "paper_default"
-        else paper_config_snapshot_path(artifact_date)
-    )
-    config_snapshot_archive_path = (
-        account_paths.config_snapshot_archive_dir
-        if account_paths is not None and account_paths.account_id != "paper_default"
-        else paper_config_snapshot_archive_dir()
-    )
-    if account_paths is not None and account_paths.account_id != "paper_default":
-        state_snapshot_path = latest_current_state_snapshot_path(account_paths, state_cutoff_date)
-    else:
-        default_state_snapshot_path = paper_current_state_snapshot_path(state_cutoff_date)
-        state_snapshot_path = default_state_snapshot_path if default_state_snapshot_path.exists() else None
+    output_path = account_paths.daily_action_plan_path(artifact_date)
+    config_snapshot_output_path = account_paths.config_snapshot_path(artifact_date)
+    config_snapshot_archive_path = account_paths.config_snapshot_archive_dir
+    state_snapshot_path = latest_current_state_snapshot_path(account_paths, state_cutoff_date)
     pinned_config_snapshot = None
     if asof_context is not None and Path(config_snapshot_output_path).exists():
         try:
@@ -261,7 +240,7 @@ def run_paper_daily_plan(
         config_snapshot_path=config_snapshot_output_path,
         config_snapshot_archive_dir=config_snapshot_archive_path,
         config_snapshot_source="run_paper_daily_plan",
-        account_id=account_paths.account_id if account_paths is not None else "paper_default",
+        account_id=account_paths.account_id,
         run_mode="official",
         official_run=True,
         state_snapshot_path=state_snapshot_path,
@@ -276,13 +255,20 @@ def main() -> int:
     parser.add_argument("--date", help="Legacy target date (YYYYMMDD or YYYY-MM-DD)")
     parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
     parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
+    parser.add_argument("--account-id", required=True, help="Initialized paper account id")
     args = parser.parse_args()
 
-    report_path = run_paper_daily_plan(
-        args.date,
-        data_date=args.data_date,
-        trade_date=args.trade_date,
-    )
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        report_path = run_paper_daily_plan(
+            args.date,
+            account_paths=account_paths,
+            data_date=args.data_date,
+            trade_date=args.trade_date,
+        )
+    except (ValueError, StageAAsOfContractError) as exc:
+        print(f"Paper daily plan aborted: {exc}")
+        return 1
     if not report_path:
         print("Failed to generate official paper daily plan.")
         return 1

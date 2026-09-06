@@ -18,6 +18,7 @@ from core.notion_settings import NotionSettings
 from core.paper_account_paths import PaperAccountPaths
 from core.paper_execution_log import build_paper_trade_id
 from scripts import import_notion_executions as execution_script
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _settings() -> NotionSettings:
@@ -512,6 +513,11 @@ def test_non_default_preview_rejects_mismatched_account_paths(tmp_path):
 def test_cli_preview_passes_non_default_account_paths(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
     account_paths = _account_paths("paper_pilot_202606", tmp_path / "paper_pilot_202606")
+    ensure_initialized_account_paths(
+        account_paths.root,
+        account_id=account_paths.account_id,
+        date_str="2026-06-04",
+    )
 
     class Preview:
         account_id = "paper_pilot_202606"
@@ -551,7 +557,7 @@ def test_cli_preview_passes_non_default_account_paths(monkeypatch, tmp_path):
 
     assert rc == 0
     assert captured["path_account_id"] == "paper_pilot_202606"
-    assert captured["path_create"] is True
+    assert captured["path_create"] is False
     assert captured["account_id"] == "paper_pilot_202606"
     assert captured["account_paths"] == account_paths
 
@@ -642,7 +648,17 @@ def test_cli_commit_requires_pass_reconciliation_before_commit(monkeypatch, tmp_
         called.update(kwargs)
         return Result()
 
-    monkeypatch.setattr(execution_script, "build_paper_account_paths", lambda account_id, create=False: object())
+    account_paths = _account_paths("paper_growth", tmp_path / "paper_growth")
+    ensure_initialized_account_paths(
+        account_paths.root,
+        account_id=account_paths.account_id,
+        date_str="2026-05-24",
+    )
+    monkeypatch.setattr(
+        execution_script,
+        "build_paper_account_paths",
+        lambda account_id, create=False: account_paths,
+    )
     monkeypatch.setattr(execution_script, "commit_manual_execution_preview", fake_commit_manual_execution_preview)
 
     exit_code = execution_script.main(

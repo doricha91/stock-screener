@@ -20,6 +20,7 @@ from core.paper_manual_review_log_append import (
 )
 from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
 from core.paths import PAPER_TEST_DIR
+from tests.paper_account_test_support import create_initialized_account_paths
 
 
 @pytest.fixture
@@ -86,10 +87,11 @@ def _row(
 
 
 def test_log_is_created_when_missing(tmp_path: Path):
-    output_path = _paper_test_path("paper_manual_review_log_test", tmp_path, ".csv")
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    output_path = account_paths.reviews_dir / "paper_manual_review_log.csv"
     try:
         final_rows, _, summary = append_paper_manual_review_log([_row()], [])
-        write_paper_manual_review_log(final_rows, output_path)
+        write_paper_manual_review_log(final_rows, output_path, account_paths=account_paths)
         assert output_path.exists()
         assert summary["rows_appended"] == 1
     finally:
@@ -97,11 +99,14 @@ def test_log_is_created_when_missing(tmp_path: Path):
 
 
 def test_existing_log_is_appended(tmp_path: Path):
-    output_path = _paper_test_path("paper_manual_review_log_test", tmp_path, ".csv")
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    output_path = account_paths.reviews_dir / "paper_manual_review_log.csv"
     try:
         existing_rows = [_row(symbol="OLD", question_id="old_1")]
-        write_paper_manual_review_log(existing_rows, output_path)
-        loaded_existing = load_existing_paper_manual_review_log_rows(output_path)
+        write_paper_manual_review_log(existing_rows, output_path, account_paths=account_paths)
+        loaded_existing = load_existing_paper_manual_review_log_rows(
+            output_path, allowed_root=account_paths.root
+        )
         final_rows, _, summary = append_paper_manual_review_log([_row(symbol="NEW", question_id="new_1")], loaded_existing)
         assert summary["existing_log_row_count_before"] == 1
         assert summary["final_log_row_count_after"] == 2
@@ -185,8 +190,9 @@ def test_validator_warning_does_not_block_append():
 
 
 def test_append_report_and_issues_csv_are_generated(tmp_path: Path):
-    report_path = _paper_test_path("paper_manual_review_log_append_report_test", tmp_path, ".md")
-    issues_path = _paper_test_path("paper_manual_review_log_append_issues_test", tmp_path, ".csv")
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    report_path = account_paths.reports_dir / "paper_manual_review_log_append_report.md"
+    issues_path = account_paths.reports_dir / "paper_manual_review_log_append_issues.csv"
     try:
         _, append_issues, summary_data = append_paper_manual_review_log([_row(review_status="pending", manual_answer="")], [])
         summary = summarize_paper_manual_review_log_append(
@@ -196,8 +202,12 @@ def test_append_report_and_issues_csv_are_generated(tmp_path: Path):
             append_issues_path=issues_path,
             summary_data=summary_data,
         )
-        write_append_issues_csv(append_issues, issues_path)
-        write_markdown(report_path, render_paper_manual_review_log_append_report(summary))
+        write_append_issues_csv(append_issues, issues_path, account_paths=account_paths)
+        write_markdown(
+            report_path,
+            render_paper_manual_review_log_append_report(summary),
+            account_paths=account_paths,
+        )
         with issues_path.open("r", encoding="utf-8-sig", newline="") as handle:
             written_rows = list(csv.DictReader(handle))
         assert report_path.exists()

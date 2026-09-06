@@ -23,7 +23,7 @@ from core.paper_data_freshness import (  # noqa: E402
     run_paper_data_freshness_check,
     write_paper_data_freshness_report,
 )
-from core.paper_commit_guard import check_same_date_commit_guard  # noqa: E402
+from core.paper_commit_guard import PaperCommitGuardPaths, check_same_date_commit_guard  # noqa: E402
 from core.paper_status import format_paper_status, paper_status_to_json, run_paper_status  # noqa: E402
 from core.paper_weekly_status import generate_paper_weekly_status  # noqa: E402
 from core.paper_benchmark_comparison import generate_paper_benchmark_comparison  # noqa: E402
@@ -31,6 +31,7 @@ from core.paper_account_paths import build_paper_account_paths  # noqa: E402
 from core.paper_account_guard import (  # noqa: E402
     format_writer_account_guard_message,
     guard_paper_writer_account,
+    require_initialized_writer_account_paths,
 )
 from core.paper_account_bootstrap import (  # noqa: E402
     PaperAccountBootstrapError,
@@ -134,11 +135,15 @@ def _guard_writer_account(
     *,
     allow_non_default: bool = False,
 ) -> int:
-    context = guard_paper_writer_account(
-        account_id=account_id,
-        command_name=command_name,
-        allow_non_default=allow_non_default,
-    )
+    try:
+        context = guard_paper_writer_account(
+            account_id=account_id,
+            command_name=command_name,
+            allow_non_default=allow_non_default,
+        )
+    except ValueError as exc:
+        print(f"Writer account guard blocked {command_name}: {exc}")
+        return 1
     print(format_writer_account_guard_message(context))
     return 0 if context["write_allowed"] else 1
 
@@ -316,7 +321,20 @@ def run_preview_shortcut(date_str: str, allow_warnings: bool) -> int:
 
 
 def run_commit_shortcut(date_str: str, replace: bool, account_id: str | None = None) -> int:
-    guard = check_same_date_commit_guard(date_str)
+    try:
+        account_paths = build_paper_account_paths(account_id, create=False)
+        require_initialized_writer_account_paths(account_paths, command_name="paper.py commit")
+    except ValueError as exc:
+        print(f"Paper commit aborted: {exc}")
+        return 1
+    guard = check_same_date_commit_guard(
+        date_str,
+        paths=PaperCommitGuardPaths(
+            account_snapshot=account_paths.account_snapshot_path,
+            position_snapshot=account_paths.position_snapshot_path,
+            current_state_snapshot=account_paths.current_state_snapshot_path(date_str),
+        ),
+    )
     if guard["error"]:
         print(f"Commit guard failed: {guard['error']}")
         return 1
@@ -619,9 +637,12 @@ def handle_plan(args: argparse.Namespace) -> int:
             "Use --data-date and --trade-date for official EOD operation."
         )
 
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=True)
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        require_initialized_writer_account_paths(account_paths, command_name="paper.py plan")
+    except ValueError as exc:
+        print(f"Paper plan aborted: {exc}")
+        return 1
     summary = _call_preflight(
         stage="plan",
         date_str=preflight_date,
@@ -671,9 +692,12 @@ def handle_eod(args: argparse.Namespace) -> int:
             return 1
 
     commit = bool(args.commit)
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=commit)
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        require_initialized_writer_account_paths(account_paths, command_name="paper.py eod")
+    except ValueError as exc:
+        print(f"Paper EOD aborted: {exc}")
+        return 1
 
     summary = _call_preflight(
         stage="eod",
@@ -864,18 +888,22 @@ def handle_review_validate(args: argparse.Namespace) -> int:
 def handle_review_append(args: argparse.Namespace) -> int:
     if _guard_writer_account(args.account_id, "paper.py review-append", allow_non_default=True) != 0:
         return 1
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        require_initialized_writer_account_paths(account_paths, command_name="paper.py review-append")
+    except ValueError as exc:
+        print(f"Paper review-append aborted: {exc}")
+        return 1
     summary = run_preflight(
         stage="review-append",
         date_str=None,
         strict=False,
         write_report=False,
+        account_paths=account_paths,
     )
     if summary["result"] == "FAIL":
         print("Paper review-append aborted because preflight failed.")
         return 1
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=True)
     result = _call_with_optional_account_paths(
         append_paper_manual_review_log_from_template,
         account_paths=account_paths,
@@ -988,7 +1016,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commit_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
     commit_parser.add_argument("--replace", action="store_true", help="Allow same-date snapshot replacement intentionally")
-    commit_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    commit_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     commit_parser.set_defaults(handler=handle_commit)
 
     preflight_parser = subparsers.add_parser(
@@ -1013,7 +1041,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--date", help="Legacy target date (YYYYMMDD or YYYY-MM-DD)")
     plan_parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
     plan_parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
-    plan_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    plan_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     plan_parser.add_argument("--enforce-asof-contract", action="store_true", help=argparse.SUPPRESS)
     plan_parser.set_defaults(handler=handle_plan)
 
@@ -1025,7 +1053,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     eod_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
-    eod_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    eod_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     eod_mode_group = eod_parser.add_mutually_exclusive_group(required=True)
     eod_mode_group.add_argument("--dry-run", action="store_true", help="Run read-only EOD preview wrapper")
     eod_mode_group.add_argument(
@@ -1076,7 +1104,7 @@ def build_parser() -> argparse.ArgumentParser:
         "review-append",
         help="Run manual review log append workflow after automatic paper preflight",
     )
-    review_append_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    review_append_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     review_append_parser.set_defaults(handler=handle_review_append)
 
     return parser

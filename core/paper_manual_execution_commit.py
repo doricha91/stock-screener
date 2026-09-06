@@ -25,7 +25,10 @@ from core.execution_outcome_flow import (
     RECONCILIATION_CONTRACT_V2,
     build_execution_commit_plan,
 )
-from core.paper_account_guard import assert_non_default_writer_target
+from core.paper_account_guard import (
+    assert_account_writer_target,
+    require_initialized_writer_account_paths,
+)
 from core.paper_account_snapshot import (
     build_paper_account_snapshot_row,
     save_paper_account_snapshot,
@@ -47,16 +50,7 @@ from core.paper_position_snapshot import (
     save_paper_position_snapshot,
 )
 from core.paper_trade_preview import PaperTradePreview
-from core.paths import (
-    PAPER_TEST_DIR,
-    dev_backups_dir,
-    market_db_path,
-    paper_account_snapshot_path,
-    paper_current_state_snapshot_path,
-    paper_execution_log_path,
-    paper_position_snapshot_path,
-    paper_reports_dir,
-)
+from core.paths import market_db_path
 
 
 MANUAL_EXECUTION_REGIME = "MANUAL"
@@ -99,8 +93,15 @@ def commit_manual_execution_preview(
     resolved_account_id = _resolve_preview_account_id(
         preview_payload,
         account_paths=account_paths,
-        require_writer_paths=not (allow_zero_write and eligible_candidate_keys == set()),
+        require_writer_paths=True,
     )
+    try:
+        require_initialized_writer_account_paths(
+            account_paths,
+            command_name="commit_manual_execution_preview",
+        )
+    except ValueError as exc:
+        raise ManualExecutionCommitError(str(exc)) from exc
     v2_evidence: dict[str, Any] | None = None
     if eligible_candidate_keys is not None:
         v2_evidence = _validate_v2_reconciliation_evidence(
@@ -135,6 +136,7 @@ def commit_manual_execution_preview(
                 execution_date=execution_date,
                 preview_json_path=preview_json_path,
                 v2_evidence=v2_evidence,
+                reports_dir=account_paths.reports_dir,
             )
             return ManualExecutionCommitResult(
                 account_id=resolved_account_id,
@@ -151,8 +153,6 @@ def commit_manual_execution_preview(
             )
         raise ManualExecutionCommitError("Preview JSON contains no committable candidates.")
     _normalize_commit_candidate_payloads(candidate_payloads, account_id=resolved_account_id)
-    allowed_root = account_paths.root if account_paths is not None and account_paths.account_id != "paper_default" else None
-
     previews = [_candidate_to_trade_preview(candidate) for candidate in candidate_payloads]
     writer_paths = _resolve_execution_writer_paths(execution_date=execution_date, account_paths=account_paths)
     log_path = writer_paths["paper_execution_log"]
@@ -185,7 +185,7 @@ def commit_manual_execution_preview(
         previews,
         log_path,
         commit=False,
-        allowed_root=allowed_root,
+        account_paths=account_paths,
     )
     duplicate_warnings = [
         warning for warning in append_warnings
@@ -218,7 +218,7 @@ def commit_manual_execution_preview(
             previews,
             log_path,
             commit=True,
-            allowed_root=allowed_root,
+            account_paths=account_paths,
         )
         if committed_warnings:
             raise ManualExecutionCommitError(
@@ -528,9 +528,9 @@ def _resolve_preview_account_id(
         resolved_account_id = candidate_account_id
     if account_paths is not None and account_paths.account_id != resolved_account_id:
         raise ManualExecutionCommitError("Provided account_paths.account_id does not match preview account_id.")
-    if require_writer_paths and resolved_account_id != "paper_default" and account_paths is None:
+    if require_writer_paths and account_paths is None:
         raise ManualExecutionCommitError(
-            "Non-default manual execution commit requires account-aware writer paths."
+            "Manual execution commit requires explicit account-aware writer paths."
         )
     return resolved_account_id
 
@@ -764,12 +764,14 @@ def _write_zero_commit_sidecar(
     execution_date: str,
     preview_json_path: Path,
     v2_evidence: dict[str, Any] | None,
+    reports_dir: Path,
 ) -> dict[str, Path]:
     if v2_evidence is None:
         raise ManualExecutionCommitError("v2 zero-write commit requires pinned reconciliation evidence.")
     compact_date = execution_date.replace("-", "")
-    json_path = preview_json_path.parent / f"manual_execution_import_commit_{compact_date}.json"
-    markdown_path = preview_json_path.parent / f"manual_execution_import_commit_{compact_date}.md"
+    json_path = reports_dir / f"manual_execution_import_commit_{compact_date}.json"
+    markdown_path = reports_dir / f"manual_execution_import_commit_{compact_date}.md"
+    reports_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": "execution_commit.v2",
         "execution_contract_version": "execution_reconciliation_preview.v2",
@@ -800,17 +802,10 @@ def _resolve_execution_writer_paths(
     execution_date: str,
     account_paths: PaperAccountPaths | None,
 ) -> dict[str, Path]:
-    if account_paths is None or account_paths.account_id == "paper_default":
-        return {
-            "paper_execution_log": paper_execution_log_path(),
-            "paper_account_snapshot": paper_account_snapshot_path(),
-            "paper_position_snapshot": paper_position_snapshot_path(),
-            "paper_state": paper_current_state_snapshot_path(execution_date),
-            "reports_dir": paper_reports_dir(),
-            "archive_dir": PAPER_TEST_DIR / "archive",
-            "backup_dir": dev_backups_dir(),
-        }
-
+    require_initialized_writer_account_paths(
+        account_paths,
+        command_name="commit_manual_execution_preview",
+    )
     targets = {
         "paper_execution_log": account_paths.execution_log_path,
         "paper_account_snapshot": account_paths.account_snapshot_path,
@@ -821,9 +816,9 @@ def _resolve_execution_writer_paths(
         "backup_dir": account_paths.root / "archive" / "dev_backups",
     }
     for path in targets.values():
-        assert_non_default_writer_target(
+        assert_account_writer_target(
             path,
-            account_id=account_paths.account_id,
-            account_root=account_paths.root,
+            account_paths=account_paths,
+            command_name="commit_manual_execution_preview",
         )
     return targets

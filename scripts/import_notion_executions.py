@@ -31,6 +31,7 @@ from core.paper_manual_execution_commit import (  # noqa: E402
 from core.notion_mapping import load_notion_property_mapping  # noqa: E402
 from core.notion_account_keys import normalize_notion_account_id  # noqa: E402
 from core.paper_account_paths import build_paper_account_paths  # noqa: E402
+from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
 from core.notion_settings import (  # noqa: E402
     NotionSettingsError,
     get_notion_token,
@@ -52,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--date", required=True, help="Execution date in YYYY-MM-DD format")
     parser.add_argument("--data-date", help="Daily Plan data date in YYYY-MM-DD format; required for --commit gate")
     parser.add_argument("--workspace", help="Runbook workspace path for future/latest artifact resolution")
-    parser.add_argument("--account-id", help="Paper account id for preview account filtering")
+    parser.add_argument("--account-id", required=True, help="Paper account id for preview account filtering")
     parser.add_argument("--preview", action="store_true", help="Generate preview only")
     parser.add_argument("--commit", action="store_true", help="Commit validated preview JSON rows to paper ledger")
     parser.add_argument("--preview-json", help="Preview JSON path required for --commit")
@@ -72,15 +73,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Select one mode: --preview or --commit.")
 
     if args.preview:
-        account_paths = (
-            None
-            if resolved_account_id == "paper_default"
-            else build_paper_account_paths(resolved_account_id, create=True)
-        )
-        settings = load_notion_settings(allow_missing=True)
-        mapping = load_notion_property_mapping()
-        client = NotionClient(get_notion_token(settings))
         try:
+            account_paths = build_paper_account_paths(resolved_account_id, create=False)
+            require_initialized_writer_account_paths(
+                account_paths, command_name="import_notion_executions preview"
+            )
+            settings = load_notion_settings(allow_missing=True)
+            mapping = load_notion_property_mapping()
+            client = NotionClient(get_notion_token(settings))
             preview = build_manual_execution_preview(
                 client=client,
                 settings=settings,
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                 account_id=resolved_account_id,
                 account_paths=account_paths,
             )
-        except (ManualExecutionImportError, NotionAPIError, NotionSettingsError) as exc:
+        except (ManualExecutionImportError, NotionAPIError, NotionSettingsError, ValueError) as exc:
             if args.json:
                 print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
             else:
@@ -180,10 +180,9 @@ def main(argv: list[str] | None = None) -> int:
     if not gate_result["ok"]:
         return _print_commit_blocked(args, gate_result)
     try:
-        account_paths = (
-            None
-            if resolved_account_id == "paper_default"
-            else build_paper_account_paths(resolved_account_id, create=True)
+        account_paths = build_paper_account_paths(resolved_account_id, create=False)
+        require_initialized_writer_account_paths(
+            account_paths, command_name="import_notion_executions commit"
         )
         result = commit_manual_execution_preview(
             execution_date=args.date,
@@ -209,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                 reconciliation_preview_sha256 if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
             ),
         )
-    except ManualExecutionCommitError as exc:
+    except (ManualExecutionCommitError, ValueError) as exc:
         if args.json:
             print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
         else:

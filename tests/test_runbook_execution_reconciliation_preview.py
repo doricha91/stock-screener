@@ -8,6 +8,7 @@ from core.notion_account_keys import build_daily_plan_external_key
 from scripts import runbook_state
 from scripts import runbook_execution_reconciliation_preview as preview_script
 from core.execution_reconciliation import build_manual_execution_key
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 ACCOUNT_ID = "paper_pilot_202606"
@@ -56,6 +57,7 @@ def _row(symbol: str, side: str, sequence: int, quantity: int, actual_price: flo
 def test_preview_writes_json_md_and_latest_artifacts(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     account_root = tmp_path / "account"
+    ensure_initialized_account_paths(account_root, account_id=ACCOUNT_ID, date_str=DATA_DATE)
     daily_plan_path = tmp_path / "daily_action_plan_20260701.json"
     executions_path = tmp_path / "manual_executions.json"
     _write_daily_plan(daily_plan_path)
@@ -92,6 +94,7 @@ def test_preview_writes_json_md_and_latest_artifacts(tmp_path: Path) -> None:
 def test_preview_preserves_persisted_explicit_v1_dispatch(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     account_root = tmp_path / "account"
+    ensure_initialized_account_paths(account_root, account_id=ACCOUNT_ID, date_str=DATA_DATE)
     daily_plan_path = tmp_path / "daily_action_plan_20260701.json"
     executions_path = tmp_path / "manual_executions.json"
     _write_daily_plan(daily_plan_path)
@@ -145,6 +148,7 @@ def test_preview_paths_are_separated_by_runbook_day_id(tmp_path: Path) -> None:
 def test_cli_reads_fixture_json_without_notion_or_ledger_writes(tmp_path: Path, capsys) -> None:
     workspace = tmp_path / "workspace"
     account_root = tmp_path / "account"
+    ensure_initialized_account_paths(account_root, account_id=ACCOUNT_ID, date_str=DATA_DATE)
     daily_plan_path = tmp_path / "daily_action_plan_20260701.json"
     executions_path = tmp_path / "manual_executions.json"
     _write_daily_plan(daily_plan_path)

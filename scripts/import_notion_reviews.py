@@ -23,6 +23,7 @@ from core.paper_manual_review_append_commit import (  # noqa: E402
 from core.notion_mapping import load_notion_property_mapping  # noqa: E402
 from core.notion_account_keys import normalize_notion_account_id  # noqa: E402
 from core.paper_account_paths import build_paper_account_paths  # noqa: E402
+from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
 from core.notion_settings import (  # noqa: E402
     NotionSettingsError,
     get_notion_token,
@@ -40,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--date", required=True, help="Review date in YYYY-MM-DD format")
-    parser.add_argument("--account-id", help="Paper account id for preview account filtering")
+    parser.add_argument("--account-id", required=True, help="Paper account id for preview account filtering")
     parser.add_argument("--preview", action="store_true", help="Generate preview only")
     parser.add_argument("--commit", action="store_true", help="Append validated preview JSON rows to paper_manual_review_log.csv")
     parser.add_argument("--preview-json", help="Preview JSON path required for --commit")
@@ -62,10 +63,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.preview_json:
             parser.error("--preview-json is required for --commit.")
         try:
-            account_paths = (
-                None
-                if resolved_account_id == "paper_default"
-                else build_paper_account_paths(resolved_account_id, create=True)
+            account_paths = build_paper_account_paths(resolved_account_id, create=False)
+            require_initialized_writer_account_paths(
+                account_paths, command_name="import_notion_reviews commit"
             )
             result = commit_manual_review_preview(
                 review_date=args.date,
@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                 allow_warnings=args.allow_warnings,
                 account_paths=account_paths,
             )
-        except ManualReviewAppendCommitError as exc:
+        except (ManualReviewAppendCommitError, ValueError) as exc:
             if args.json:
                 print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
             else:
@@ -105,10 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     mapping = load_notion_property_mapping()
     client = NotionClient(get_notion_token(settings))
     try:
-        account_paths = (
-            None
-            if resolved_account_id == "paper_default"
-            else build_paper_account_paths(resolved_account_id, create=True)
+        account_paths = build_paper_account_paths(resolved_account_id, create=False)
+        require_initialized_writer_account_paths(
+            account_paths, command_name="import_notion_reviews preview"
         )
         preview = build_manual_review_preview(
             client=client,
@@ -118,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
             account_id=resolved_account_id,
             account_paths=account_paths,
         )
-    except (ManualReviewImportError, NotionAPIError, NotionSettingsError) as exc:
+    except (ManualReviewImportError, NotionAPIError, NotionSettingsError, ValueError) as exc:
         if args.json:
             print(json.dumps({"status": "FAIL", "error": str(exc)}, ensure_ascii=False, indent=2))
         else:

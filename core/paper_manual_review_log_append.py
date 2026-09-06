@@ -6,7 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.paper_account_guard import assert_path_under_account_root
+from core.paper_account_guard import assert_account_writer_target, assert_path_under_account_root
+from core.paper_account_paths import PaperAccountPaths
 from core.paper_manual_review_log_template import PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS
 from core.paper_manual_review_log_validator import (
     load_paper_manual_review_log_rows,
@@ -190,12 +191,11 @@ def append_paper_manual_review_log(
 def write_paper_manual_review_log(
     rows: list[dict[str, str]],
     output_path: Path,
-    allowed_root: Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> None:
-    if allowed_root is None:
-        assert_paper_path(output_path, PAPER_TEST_DIR)
-    else:
-        assert_path_under_account_root(output_path, allowed_root)
+    assert_account_writer_target(
+        output_path, account_paths=account_paths, command_name="write_paper_manual_review_log"
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=PAPER_MANUAL_REVIEW_LOG_TEMPLATE_COLUMNS)
@@ -206,12 +206,11 @@ def write_paper_manual_review_log(
 def write_append_issues_csv(
     issues: list[dict[str, str]],
     output_path: Path,
-    allowed_root: Path | None = None,
+    account_paths: PaperAccountPaths | None = None,
 ) -> None:
-    if allowed_root is None:
-        assert_paper_path(output_path, PAPER_TEST_DIR)
-    else:
-        assert_path_under_account_root(output_path, allowed_root)
+    assert_account_writer_target(
+        output_path, account_paths=account_paths, command_name="write_append_issues_csv"
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=APPEND_ISSUE_COLUMNS)
@@ -274,10 +273,13 @@ def render_paper_manual_review_log_append_report(summary: dict[str, Any]) -> str
     return "\n".join(lines) + "\n"
 
 
-def write_markdown(path: Path, markdown: str, allowed_root: Path | None = None) -> None:
-    if allowed_root is None:
-        assert_paper_path(path, PAPER_TEST_DIR)
-    else:
-        assert_path_under_account_root(path, allowed_root)
+def write_markdown(
+    path: Path,
+    markdown: str,
+    account_paths: PaperAccountPaths | None = None,
+) -> None:
+    assert_account_writer_target(
+        path, account_paths=account_paths, command_name="write_paper_manual_review_markdown"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(markdown, encoding="utf-8")

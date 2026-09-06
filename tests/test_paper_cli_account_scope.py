@@ -286,6 +286,7 @@ def test_eod_dry_run_preflight_uses_non_default_account_paths(tmp_path, monkeypa
         return 0
 
     monkeypatch.setattr(paper, "build_paper_account_paths", fake_build_paper_account_paths)
+    monkeypatch.setattr(paper, "require_initialized_writer_account_paths", lambda *args, **kwargs: paths)
     monkeypatch.setattr(paper, "_call_preflight", fake_call_preflight)
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
 
@@ -306,6 +307,7 @@ def test_eod_dry_run_preflight_still_fails_when_account_plan_missing(tmp_path, m
     account_root.mkdir(parents=True)
 
     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id=None, *, create=False: paths)
+    monkeypatch.setattr(paper, "require_initialized_writer_account_paths", lambda *args, **kwargs: paths)
 
     def fake_call_preflight(*, stage, date_str, strict, write_report, account_paths):
         assert not account_paths.daily_action_plan_path(date_str).exists()
@@ -328,7 +330,7 @@ def test_eod_dry_run_preflight_still_fails_when_account_plan_missing(tmp_path, m
     assert called["eod"] is False
 
 
-def test_eod_commit_path_builds_account_paths_before_preflight_with_create_true(monkeypatch):
+def test_eod_commit_path_builds_account_paths_before_preflight_without_creation(monkeypatch):
     captured: dict[str, object] = {}
     paths = _account_paths("paper_growth", Path("outputs/paper_accounts/paper_growth"))
 
@@ -347,6 +349,7 @@ def test_eod_commit_path_builds_account_paths_before_preflight_with_create_true(
         return 0
 
     monkeypatch.setattr(paper, "build_paper_account_paths", fake_build_paper_account_paths)
+    monkeypatch.setattr(paper, "require_initialized_writer_account_paths", lambda *args, **kwargs: paths)
     monkeypatch.setattr(paper, "_call_preflight", fake_call_preflight)
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
 
@@ -363,7 +366,7 @@ def test_eod_commit_path_builds_account_paths_before_preflight_with_create_true(
     assert exit_code == 0
     assert captured == {
         "build_account_id": "paper_growth",
-        "build_create": True,
+        "build_create": False,
         "preflight_account_id": "paper_growth",
         "eod_commit": True,
         "eod_account_id": "paper_growth",

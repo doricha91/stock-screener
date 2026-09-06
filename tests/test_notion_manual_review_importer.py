@@ -16,6 +16,7 @@ from core.notion_manual_review_importer import (
 from core.notion_settings import NotionSettings
 from core.paper_account_paths import build_paper_account_paths
 from scripts import import_notion_reviews as review_script
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _settings() -> NotionSettings:
@@ -475,9 +476,14 @@ def test_non_default_preview_uses_account_specific_review_paths(monkeypatch, tmp
     assert str(tmp_path / "paper_test") not in preview.json_path
 
 
-def test_cli_review_preview_passes_non_default_account_paths(monkeypatch):
+def test_cli_review_preview_passes_non_default_account_paths(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
-    account_paths = build_paper_account_paths("paper_growth", account_root=Path("tmp") / "paper_growth")
+    account_paths = build_paper_account_paths("paper_growth", account_root=tmp_path / "paper_growth")
+    ensure_initialized_account_paths(
+        account_paths.root,
+        account_id=account_paths.account_id,
+        date_str="2026-05-24",
+    )
 
     class DummyPreview:
         account_id = "paper_growth"
@@ -522,8 +528,15 @@ def test_cli_review_preview_passes_non_default_account_paths(monkeypatch):
     assert captured["account_paths"] is account_paths
 
 
-def test_commit_mode_returns_not_implemented(capsys):
-    exit_code = review_script.main(["--date", "2026-05-25", "--commit", "--json", "--preview-json", "missing.json"])
+def test_commit_mode_returns_not_implemented(capsys, monkeypatch, tmp_path):
+    account_paths = build_paper_account_paths("paper_default", account_root=tmp_path / "paper_default")
+    ensure_initialized_account_paths(
+        account_paths.root,
+        account_id=account_paths.account_id,
+        date_str="2026-05-24",
+    )
+    monkeypatch.setattr(review_script, "build_paper_account_paths", lambda account_id, create=False: account_paths)
+    exit_code = review_script.main(["--date", "2026-05-25", "--account-id", "paper_default", "--commit", "--json", "--preview-json", "missing.json"])
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "Preview JSON not found" in captured.out
@@ -580,7 +593,14 @@ def test_invalid_account_id_fails_for_review_preview(monkeypatch, tmp_path):
         )
 
 
-def test_cli_blocks_non_default_review_commit(capsys):
+def test_cli_blocks_non_default_review_commit(capsys, monkeypatch, tmp_path):
+    account_paths = build_paper_account_paths("paper_growth", account_root=tmp_path / "paper_growth")
+    ensure_initialized_account_paths(
+        account_paths.root,
+        account_id=account_paths.account_id,
+        date_str="2026-05-24",
+    )
+    monkeypatch.setattr(review_script, "build_paper_account_paths", lambda account_id, create=False: account_paths)
     exit_code = review_script.main(
         [
             "--date",

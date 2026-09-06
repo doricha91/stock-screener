@@ -7,6 +7,15 @@ import pytest
 from scripts import paper
 
 
+@pytest.fixture(autouse=True)
+def _allow_initialized_writer_context_for_cli_orchestration(monkeypatch):
+    monkeypatch.setattr(
+        paper,
+        "require_initialized_writer_account_paths",
+        lambda account_paths, **kwargs: account_paths,
+    )
+
+
 def test_commit_allows_non_default_account_and_passes_account_id(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -61,7 +70,7 @@ def test_plan_builds_non_default_account_paths(monkeypatch):
     monkeypatch.setattr(
         paper,
         "run_preflight",
-        lambda stage, date_str, strict, write_report: {"result": "PASS"},
+        lambda stage, date_str, strict, write_report, account_paths=None: {"result": "PASS"},
     )
     account_paths = paper.build_paper_account_paths("paper_growth", account_root=Path("outputs/paper_accounts/paper_growth"))
     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id, create=False: account_paths)
@@ -109,13 +118,20 @@ def test_plan_explicit_dates_pass_data_and_trade_dates(monkeypatch):
     monkeypatch.setattr(
         paper,
         "run_preflight",
-        lambda stage, date_str, strict, write_report: captured.update({"preflight_date": date_str})
+        lambda stage, date_str, strict, write_report, account_paths=None: captured.update({"preflight_date": date_str})
         or {"result": "PASS"},
     )
     account_paths = paper.build_paper_account_paths("paper_growth", account_root=Path("outputs/paper_accounts/paper_growth"))
     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id, create=False: account_paths)
 
-    def fake_run_paper_daily_plan(date_str=None, account_paths=None, *, data_date=None, trade_date=None):
+    def fake_run_paper_daily_plan(
+        date_str=None,
+        account_paths=None,
+        *,
+        data_date=None,
+        trade_date=None,
+        enforce_asof_contract=False,
+    ):
         captured.update(
             {
                 "date_str": date_str,
@@ -151,7 +167,7 @@ def test_plan_explicit_dates_pass_data_and_trade_dates(monkeypatch):
 def test_plan_explicit_dates_require_pair(monkeypatch):
     monkeypatch.setattr(paper, "_guard_writer_account", lambda *args, **kwargs: 0)
 
-    exit_code = paper.main(["plan", "--data-date", "2026-06-05"])
+    exit_code = paper.main(["plan", "--data-date", "2026-06-05", "--account-id", "paper_growth"])
 
     assert exit_code == 1
 
@@ -170,7 +186,15 @@ def test_plan_explicit_dates_block_freshness_warnings(monkeypatch):
     )
 
     exit_code = paper.main(
-        ["plan", "--data-date", "2026-06-05", "--trade-date", "2026-06-08"]
+        [
+            "plan",
+            "--data-date",
+            "2026-06-05",
+            "--trade-date",
+            "2026-06-08",
+            "--account-id",
+            "paper_growth",
+        ]
     )
 
     assert exit_code == 1
@@ -195,7 +219,7 @@ def test_review_append_builds_non_default_account_paths(monkeypatch):
     monkeypatch.setattr(
         paper,
         "run_preflight",
-        lambda stage, date_str, strict, write_report: {"result": "PASS"},
+        lambda stage, date_str, strict, write_report, account_paths=None: {"result": "PASS"},
     )
     account_paths = paper.build_paper_account_paths("paper_growth", account_root=Path("outputs/paper_accounts/paper_growth"))
     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id, create=False: account_paths)
@@ -222,7 +246,7 @@ def test_review_append_builds_non_default_account_paths(monkeypatch):
     assert captured["account_paths"] is account_paths
 
 
-def test_commit_defaults_to_paper_default_and_passes_guard(monkeypatch):
+def test_commit_accepts_explicit_paper_default_and_passes_guard(monkeypatch):
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
@@ -247,17 +271,17 @@ def test_commit_defaults_to_paper_default_and_passes_guard(monkeypatch):
         or 0,
     )
 
-    exit_code = paper.main(["commit", "--date", "20260530"])
+    exit_code = paper.main(["commit", "--date", "20260530", "--account-id", "paper_default"])
 
     assert exit_code == 0
     assert captured == {
         "date_str": "20260530",
         "replace": False,
-        "account_id": None,
+        "account_id": "paper_default",
     }
 
 
-def test_eod_allows_paper_default_and_preserves_writer_path_behavior(monkeypatch):
+def test_eod_allows_explicit_paper_default_and_passes_canonical_writer_paths(monkeypatch):
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
@@ -276,7 +300,7 @@ def test_eod_allows_paper_default_and_preserves_writer_path_behavior(monkeypatch
     monkeypatch.setattr(
         paper,
         "run_preflight",
-        lambda stage, date_str, strict, write_report: {"result": "PASS"},
+        lambda stage, date_str, strict, write_report, account_paths=None: {"result": "PASS"},
     )
 
     def fake_run_paper_eod_dry_run(date_str: str, allow_empty_journal: bool, commit: bool, plan_path, account_paths=None):
@@ -288,12 +312,12 @@ def test_eod_allows_paper_default_and_preserves_writer_path_behavior(monkeypatch
 
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
 
-    exit_code = paper.main(["eod", "--date", "20260530", "--commit"])
+    exit_code = paper.main(["eod", "--date", "20260530", "--commit", "--account-id", "paper_default"])
 
     assert exit_code == 0
     assert captured == {
         "date_str": "20260530",
         "commit": True,
         "plan_path": None,
-        "account_paths": None,
+        "account_paths": paper.build_paper_account_paths("paper_default", create=False),
     }

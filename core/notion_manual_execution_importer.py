@@ -552,7 +552,7 @@ def _resolve_preview_reports_dir(
     account_paths: PaperAccountPaths | None = None,
     reports_dir: Path | None = None,
 ) -> Path:
-    if account_paths is not None and account_paths.account_id != "paper_default":
+    if account_paths is not None:
         return account_paths.reports_dir
     return reports_dir if reports_dir is not None else paper_reports_dir()
 
@@ -560,7 +560,7 @@ def _resolve_preview_reports_dir(
 def _load_existing_trade_ids(*, account_paths: PaperAccountPaths | None = None) -> set[str]:
     path = (
         account_paths.execution_log_path
-        if account_paths is not None and account_paths.account_id != "paper_default"
+        if account_paths is not None
         else paper_account_snapshot_path().parent / "paper_execution_log.csv"
     )
     if not path.exists():
@@ -576,7 +576,7 @@ def _load_existing_trade_ids(*, account_paths: PaperAccountPaths | None = None) 
 def _load_latest_cash_balance(*, account_paths: PaperAccountPaths | None = None) -> float:
     path = (
         account_paths.account_snapshot_path
-        if account_paths is not None and account_paths.account_id != "paper_default"
+        if account_paths is not None
         else paper_account_snapshot_path()
     )
     rows = _read_csv_rows(path)
@@ -589,7 +589,7 @@ def _load_latest_cash_balance(*, account_paths: PaperAccountPaths | None = None)
 def _load_latest_position_shares(*, account_paths: PaperAccountPaths | None = None) -> dict[str, int]:
     path = (
         account_paths.position_snapshot_path
-        if account_paths is not None and account_paths.account_id != "paper_default"
+        if account_paths is not None
         else paper_position_snapshot_path()
     )
     if not path.exists():

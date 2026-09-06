@@ -1,7 +1,6 @@
 import csv
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +11,7 @@ from core.paper_position_snapshot import (
     build_paper_position_snapshot_rows,
     save_paper_position_snapshot,
 )
+from tests.paper_account_test_support import create_initialized_account_paths
 
 
 def _trade(trade_id: str, symbol: str, side: str, shares: int, price: float) -> dict:
@@ -134,9 +134,11 @@ def test_build_paper_position_snapshot_rows_reflects_realized_and_total_pnl():
 
 
 def test_save_paper_position_snapshot_replaces_same_date_and_creates_backup(tmp_path):
-    snapshot_path = _unique_snapshot_path(tmp_path)
-    archive_dir = _unique_archive_dir(tmp_path)
-    account_paths = SimpleNamespace(account_id="paper_growth", root=snapshot_path.parent)
+    account_paths = create_initialized_account_paths(
+        tmp_path / "paper_growth", account_id="paper_growth"
+    )
+    snapshot_path = account_paths.position_snapshot_path
+    archive_dir = account_paths.root / "archive"
     try:
         old_row = {column: "" for column in PAPER_POSITION_SNAPSHOT_COLUMNS}
         old_row.update(
@@ -185,9 +187,11 @@ def test_save_paper_position_snapshot_replaces_same_date_and_creates_backup(tmp_
 
 
 def test_save_paper_position_snapshot_keeps_other_dates(tmp_path):
-    snapshot_path = _unique_snapshot_path(tmp_path)
-    archive_dir = _unique_archive_dir(tmp_path)
-    account_paths = SimpleNamespace(account_id="paper_growth", root=snapshot_path.parent)
+    account_paths = create_initialized_account_paths(
+        tmp_path / "paper_growth", account_id="paper_growth"
+    )
+    snapshot_path = account_paths.position_snapshot_path
+    archive_dir = account_paths.root / "archive"
     try:
         row_0508 = {column: "" for column in PAPER_POSITION_SNAPSHOT_COLUMNS}
         row_0508.update(
@@ -237,6 +241,7 @@ def test_save_paper_position_snapshot_keeps_other_dates(tmp_path):
 
 def test_save_paper_position_snapshot_rejects_non_paper_path(tmp_path):
     root = tmp_path / "paper_growth"
+    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
     snapshot_path = tmp_path / "outside" / "paper_position_snapshot.csv"
     archive_dir = root / "archive"
     try:
@@ -255,7 +260,7 @@ def test_save_paper_position_snapshot_rejects_non_paper_path(tmp_path):
                 "2026-05-09",
                 snapshot_path,
                 archive_dir,
-                account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+                account_paths=account_paths,
             )
     finally:
         if archive_dir.exists():
@@ -266,9 +271,9 @@ def test_save_paper_position_snapshot_rejects_non_paper_path(tmp_path):
 
 def test_save_position_snapshot_backfills_legacy_identity_under_account_root(tmp_path):
     root = tmp_path / "paper_growth"
+    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
     snapshot_path = root / "paper_position_snapshot.csv"
     archive_dir = root / "archive"
-    root.mkdir(parents=True)
     legacy_fieldnames = [
         column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "account_id"
     ]
@@ -299,7 +304,7 @@ def test_save_position_snapshot_backfills_legacy_identity_under_account_root(tmp
         "2026-05-09",
         snapshot_path,
         archive_dir,
-        account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+        account_paths=account_paths,
     )
 
     assert result["legacy_backfilled"] is True
@@ -309,9 +314,9 @@ def test_save_position_snapshot_backfills_legacy_identity_under_account_root(tmp
 
 def test_position_snapshot_rejects_unknown_header_without_mutation(tmp_path):
     root = tmp_path / "paper_growth"
+    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
     snapshot_path = root / "paper_position_snapshot.csv"
     archive_dir = root / "archive"
-    root.mkdir(parents=True)
     fieldnames = [*PAPER_POSITION_SNAPSHOT_COLUMNS, "unknown_legacy_field"]
     existing_row = {column: "" for column in fieldnames}
     existing_row.update(
@@ -343,16 +348,17 @@ def test_position_snapshot_rejects_unknown_header_without_mutation(tmp_path):
             "2026-05-09",
             snapshot_path,
             archive_dir,
-            account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+            account_paths=account_paths,
         )
 
     assert "unknown_legacy_field" in str(exc_info.value)
     assert snapshot_path.read_bytes() == before
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []
 
 
 def test_save_empty_position_snapshot_keeps_current_schema(tmp_path):
     root = tmp_path / "paper_growth"
+    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
     snapshot_path = root / "paper_position_snapshot.csv"
     archive_dir = root / "archive"
 
@@ -361,7 +367,7 @@ def test_save_empty_position_snapshot_keeps_current_schema(tmp_path):
         "2026-05-09",
         snapshot_path,
         archive_dir,
-        account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+        account_paths=account_paths,
     )
 
     with snapshot_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -369,14 +375,14 @@ def test_save_empty_position_snapshot_keeps_current_schema(tmp_path):
         assert reader.fieldnames == PAPER_POSITION_SNAPSHOT_COLUMNS
         assert list(reader) == []
     assert result["row_count"] == 0
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []
 
 
 def test_position_snapshot_rejects_missing_required_header_without_mutation(tmp_path):
     root = tmp_path / "paper_growth"
+    account_paths = create_initialized_account_paths(root, account_id="paper_growth")
     snapshot_path = root / "paper_position_snapshot.csv"
     archive_dir = root / "archive"
-    root.mkdir(parents=True)
     fieldnames = [
         column for column in PAPER_POSITION_SNAPSHOT_COLUMNS if column != "symbol"
     ]
@@ -408,9 +414,9 @@ def test_position_snapshot_rejects_missing_required_header_without_mutation(tmp_
             "2026-05-09",
             snapshot_path,
             archive_dir,
-            account_paths=SimpleNamespace(account_id="paper_growth", root=root),
+            account_paths=account_paths,
         )
 
     assert "symbol" in str(exc_info.value)
     assert snapshot_path.read_bytes() == before
-    assert not archive_dir.exists()
+    assert list(archive_dir.iterdir()) == []

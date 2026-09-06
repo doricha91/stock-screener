@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
 
@@ -17,23 +18,19 @@ from core.paper_manual_review_log_append import (  # noqa: E402
     write_paper_manual_review_log,
 )
 from core.paper_manual_review_log_validator import load_paper_manual_review_log_rows  # noqa: E402
-from core.paper_account_paths import PaperAccountPaths  # noqa: E402
-from core.paths import paper_reviews_dir  # noqa: E402
+from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths  # noqa: E402
+from core.paper_account_guard import require_initialized_writer_account_paths  # noqa: E402
 
 
 def append_paper_manual_review_log_from_template(
     account_paths: PaperAccountPaths | None = None,
 ) -> dict:
-    reviews_dir = (
-        account_paths.reviews_dir
-        if account_paths is not None and account_paths.account_id != "paper_default"
-        else paper_reviews_dir()
+    require_initialized_writer_account_paths(
+        account_paths,
+        command_name="append_paper_manual_review_log_from_template",
     )
-    allowed_root = (
-        account_paths.root
-        if account_paths is not None and account_paths.account_id != "paper_default"
-        else None
-    )
+    reviews_dir = account_paths.reviews_dir
+    allowed_root = account_paths.root
     template_path = reviews_dir / "paper_manual_review_log_template.csv"
     target_log_path = reviews_dir / "paper_manual_review_log.csv"
     append_report_path = reviews_dir / "paper_manual_review_log_append_report.md"
@@ -46,8 +43,8 @@ def append_paper_manual_review_log_from_template(
         existing_log_rows,
     )
     if summary_data["append_executed"]:
-        write_paper_manual_review_log(final_rows, target_log_path, allowed_root=allowed_root)
-    write_append_issues_csv(append_issues, append_issues_path, allowed_root=allowed_root)
+        write_paper_manual_review_log(final_rows, target_log_path, account_paths=account_paths)
+    write_append_issues_csv(append_issues, append_issues_path, account_paths=account_paths)
     summary = summarize_paper_manual_review_log_append(
         template_path=template_path,
         target_log_path=target_log_path,
@@ -58,7 +55,7 @@ def append_paper_manual_review_log_from_template(
     write_markdown(
         append_report_path,
         render_paper_manual_review_log_append_report(summary),
-        allowed_root=allowed_root,
+        account_paths=account_paths,
     )
     return {
         "template_path": template_path,
@@ -70,7 +67,15 @@ def append_paper_manual_review_log_from_template(
 
 
 def main() -> int:
-    result = append_paper_manual_review_log_from_template()
+    parser = argparse.ArgumentParser(description="Append a manual review log for one paper account")
+    parser.add_argument("--account-id", required=True, help="Initialized paper account id")
+    args = parser.parse_args()
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        result = append_paper_manual_review_log_from_template(account_paths=account_paths)
+    except ValueError as exc:
+        print(f"Paper manual review append aborted: {exc}")
+        return 1
     summary = result["summary"]
     print("Paper manual review log append completed")
     print(f"  template_path: {result['template_path']}")

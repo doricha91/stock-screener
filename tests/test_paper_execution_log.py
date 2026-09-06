@@ -7,6 +7,7 @@ import pytest
 from core.paths import FRONT_TEST_DIR, PAPER_TEST_DIR
 from core.paper_execution_log import append_paper_execution_log, paper_trade_preview_to_row
 from core.paper_trade_preview import PaperTradePreview
+from tests.paper_account_test_support import create_initialized_account_paths
 
 
 def make_preview(side: str = "BUY") -> PaperTradePreview:
@@ -48,22 +49,29 @@ def _unique_log_path() -> Path:
     return PAPER_TEST_DIR / f"paper_execution_log_test_{uuid4().hex}.csv"
 
 
-def test_append_dry_run_does_not_create_file():
-    log_path = _unique_log_path()
+def test_append_dry_run_does_not_modify_initialized_log(tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    log_path = account_paths.execution_log_path
+    before = log_path.read_bytes()
     try:
-        rows, warnings = append_paper_execution_log([make_preview("BUY")], log_path, commit=False)
+        rows, warnings = append_paper_execution_log(
+            [make_preview("BUY")], log_path, commit=False, account_paths=account_paths
+        )
         assert len(rows) == 1
         assert warnings == []
-        assert not log_path.exists()
+        assert log_path.read_bytes() == before
     finally:
         if log_path.exists():
             log_path.unlink()
 
 
-def test_append_commit_creates_csv():
-    log_path = _unique_log_path()
+def test_append_commit_writes_initialized_csv(tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    log_path = account_paths.execution_log_path
     try:
-        rows, warnings = append_paper_execution_log([make_preview("BUY")], log_path, commit=True)
+        rows, warnings = append_paper_execution_log(
+            [make_preview("BUY")], log_path, commit=True, account_paths=account_paths
+        )
         assert len(rows) == 1
         assert warnings == []
         assert log_path.exists()
@@ -75,12 +83,17 @@ def test_append_commit_creates_csv():
             log_path.unlink()
 
 
-def test_duplicate_preview_is_not_appended_twice():
-    log_path = _unique_log_path()
+def test_duplicate_preview_is_not_appended_twice(tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
+    log_path = account_paths.execution_log_path
     try:
         preview = make_preview("BUY")
-        first_rows, first_warnings = append_paper_execution_log([preview], log_path, commit=True)
-        second_rows, second_warnings = append_paper_execution_log([preview], log_path, commit=True)
+        first_rows, first_warnings = append_paper_execution_log(
+            [preview], log_path, commit=True, account_paths=account_paths
+        )
+        second_rows, second_warnings = append_paper_execution_log(
+            [preview], log_path, commit=True, account_paths=account_paths
+        )
         assert len(first_rows) == 1
         assert first_warnings == []
         assert second_rows == []
@@ -93,7 +106,10 @@ def test_duplicate_preview_is_not_appended_twice():
             log_path.unlink()
 
 
-def test_append_rejects_non_paper_path():
+def test_append_rejects_non_paper_path(tmp_path):
+    account_paths = create_initialized_account_paths(tmp_path / "paper_growth")
     log_path = FRONT_TEST_DIR / f"paper_execution_log_test_{uuid4().hex}.csv"
     with pytest.raises(ValueError):
-        append_paper_execution_log([make_preview("BUY")], log_path, commit=True)
+        append_paper_execution_log(
+            [make_preview("BUY")], log_path, commit=True, account_paths=account_paths
+        )

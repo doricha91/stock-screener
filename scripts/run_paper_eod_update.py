@@ -10,8 +10,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.execution_logger import parse_journal_from_markdown, map_journal_to_trades
-from core.paper_account_guard import assert_non_default_writer_target
-from core.paper_account_paths import PaperAccountPaths
+from core.paper_account_guard import assert_account_writer_target, require_initialized_writer_account_paths
+from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
 from core.paper_account_snapshot import (
     build_paper_account_snapshot_row,
     save_paper_account_snapshot,
@@ -28,16 +28,9 @@ from core.paper_high_watermark import (
     filter_execution_rows_on_or_before,
 )
 from core.paper_daily_plan_candidates import count_daily_plan_execution_candidates
-from core.paper_safety import assert_paper_path
 from core.paper_trade_preview import build_paper_trade_previews, can_resolve_paper_actual_fill
 from core.paths import (
-    PAPER_TEST_DIR,
     market_db_path,
-    paper_account_snapshot_path,
-    paper_current_state_snapshot_path,
-    paper_daily_action_plan_path,
-    paper_execution_log_path,
-    paper_position_snapshot_path,
 )
 
 
@@ -54,18 +47,9 @@ def _normalize_date(date_str: str) -> str:
 
 
 def build_paper_eod_paths(date_str: str, plan_path: str | Path | None = None) -> dict[str, Path]:
-    clean_date = _normalize_date(date_str)
-    input_report = Path(plan_path) if plan_path is not None else paper_daily_action_plan_path(clean_date)
-    outputs = {
-        "input_report": input_report,
-        "paper_state": paper_current_state_snapshot_path(clean_date),
-        "paper_execution_log": paper_execution_log_path(),
-        "paper_account_snapshot": paper_account_snapshot_path(),
-        "paper_position_snapshot": paper_position_snapshot_path(),
-    }
-    for key in ("paper_state", "paper_execution_log", "paper_account_snapshot", "paper_position_snapshot"):
-        assert_paper_path(outputs[key], PAPER_TEST_DIR)
-    return outputs
+    raise ValueError(
+        "EOD paths require explicit account context; use build_account_aware_paper_eod_paths."
+    )
 
 
 def build_account_aware_paper_eod_paths(
@@ -86,10 +70,10 @@ def build_account_aware_paper_eod_paths(
     for key, path in outputs.items():
         if key == "input_report":
             continue
-        assert_non_default_writer_target(
+        assert_account_writer_target(
             path,
-            account_id=account_paths.account_id,
-            account_root=account_paths.root,
+            account_paths=account_paths,
+            command_name="run_paper_eod_update",
         )
     return outputs
 
@@ -166,14 +150,11 @@ def load_paper_execution_rows(
     log_path: Path,
     account_paths: PaperAccountPaths | None = None,
 ) -> list[dict[str, Any]]:
-    if account_paths is not None and account_paths.account_id != "paper_default":
-        assert_non_default_writer_target(
-            log_path,
-            account_id=account_paths.account_id,
-            account_root=account_paths.root,
-        )
-    else:
-        assert_paper_path(log_path, PAPER_TEST_DIR)
+    assert_account_writer_target(
+        log_path,
+        account_paths=account_paths,
+        command_name="run_paper_eod_update",
+    )
     if not log_path.exists():
         return []
 
@@ -305,11 +286,11 @@ def run_paper_eod_dry_run(
     json_output: bool = False,
 ) -> int:
     clean_date = _normalize_date(date_str)
-    if account_paths is not None and account_paths.account_id != "paper_default":
-        paths = build_account_aware_paper_eod_paths(date_str, account_paths, plan_path=plan_path)
-    else:
-        paths = build_paper_eod_paths(date_str, plan_path=plan_path)
-        paths["archive_dir"] = PAPER_TEST_DIR / "archive"
+    require_initialized_writer_account_paths(
+        account_paths,
+        command_name="run_paper_eod_update",
+    )
+    paths = build_account_aware_paper_eod_paths(date_str, account_paths, plan_path=plan_path)
     report_exists = paths["input_report"].exists()
     parser_mode = "not_run"
     journal_rows: list[dict[str, Any]] = []
@@ -449,7 +430,7 @@ def run_paper_eod_dry_run(
                 source_current_state=str(paths["paper_state"]),
                 market_valuation=market_valuation,
                 market_valuation_error=market_valuation_error,
-                account_id=account_paths.account_id if account_paths is not None else "paper_default",
+                account_id=account_paths.account_id,
             )
         except Exception as exc:
             snapshot_save_error = str(exc)
@@ -460,7 +441,7 @@ def run_paper_eod_dry_run(
                 paper_account_state,
                 market_valuation,
                 date_str,
-                account_id=account_paths.account_id if account_paths is not None else "paper_default",
+                account_id=account_paths.account_id,
             )
         except Exception as exc:
             position_snapshot_save_error = str(exc)
@@ -529,7 +510,7 @@ def run_paper_eod_dry_run(
     )
     print("EOD roll-forward intent:")
     print("  eod_mode: accounting_close")
-    print(f"  account_id: {account_paths.account_id if account_paths is not None else 'paper_default'}")
+    print(f"  account_id: {account_paths.account_id}")
     print(f"  date: {target_snapshot_date}")
     print(f"  execution_candidate_count: {execution_candidate_count}")
     print(f"  candidate_count_source: {candidate_count_source}")
@@ -815,7 +796,7 @@ def run_paper_eod_dry_run(
         print("  WARNING: market valuation failed, but cost-basis snapshot was preserved")
         print("  WARNING: paper_position_snapshot was skipped")
     if json_output:
-        account_id = account_paths.account_id if account_paths is not None else "paper_default"
+        account_id = account_paths.account_id
         payload = {
             "schema_version": "paper_eod_update.v1",
             "runner_result": "PASS",
@@ -850,6 +831,7 @@ def run_paper_eod_dry_run(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Paper EOD update dry-run")
     parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+    parser.add_argument("--account-id", required=True, help="Initialized paper account id")
     parser.add_argument(
         "--plan-path",
         help="Optional override path to the paper daily action plan markdown.",
@@ -865,12 +847,18 @@ def main() -> int:
         help="Close paper accounting snapshots from the committed execution log without appending execution rows.",
     )
     args = parser.parse_args()
-    return run_paper_eod_dry_run(
-        args.date,
-        allow_empty_journal=args.allow_empty_journal,
-        commit=args.commit,
-        plan_path=args.plan_path,
-    )
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        return run_paper_eod_dry_run(
+            args.date,
+            allow_empty_journal=args.allow_empty_journal,
+            commit=args.commit,
+            plan_path=args.plan_path,
+            account_paths=account_paths,
+        )
+    except ValueError as exc:
+        print(f"Paper EOD aborted: {exc}")
+        return 1
 
 
 if __name__ == "__main__":

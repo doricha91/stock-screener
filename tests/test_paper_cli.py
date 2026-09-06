@@ -8,6 +8,15 @@ import pytest
 from scripts import paper
 
 
+@pytest.fixture(autouse=True)
+def _allow_initialized_writer_context_for_cli_orchestration(monkeypatch):
+    monkeypatch.setattr(
+        paper,
+        "require_initialized_writer_account_paths",
+        lambda account_paths, **kwargs: account_paths,
+    )
+
+
 def test_help_shows_subcommands(capsys):
     exit_code = paper.main([])
     output = capsys.readouterr().out
@@ -695,7 +704,7 @@ def test_commit_calls_eod_commit_only(monkeypatch):
     monkeypatch.setattr(
         paper,
         "check_same_date_commit_guard",
-        lambda date_str: {
+        lambda date_str, **kwargs: {
             "allowed": True,
             "error": None,
             "normalized_date": "2026-05-13",
@@ -709,7 +718,7 @@ def test_commit_calls_eod_commit_only(monkeypatch):
         return 0
 
     monkeypatch.setattr(paper, "handle_eod", fake_handle_eod)
-    exit_code = paper.main(["commit", "--date", "20260513"])
+    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert captured == [(False, True, "20260513")]
 
@@ -718,7 +727,7 @@ def test_commit_blocks_when_current_state_snapshot_exists(monkeypatch):
     monkeypatch.setattr(
         paper,
         "check_same_date_commit_guard",
-        lambda date_str: {
+        lambda date_str, **kwargs: {
             "allowed": False,
             "error": None,
             "normalized_date": "2026-05-13",
@@ -733,7 +742,7 @@ def test_commit_blocks_when_current_state_snapshot_exists(monkeypatch):
         return 0
 
     monkeypatch.setattr(paper, "handle_eod", fake_handle_eod)
-    exit_code = paper.main(["commit", "--date", "20260513"])
+    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 1
     assert called["eod"] is False
 
@@ -742,7 +751,7 @@ def test_commit_blocks_when_account_snapshot_has_same_date(monkeypatch):
     monkeypatch.setattr(
         paper,
         "check_same_date_commit_guard",
-        lambda date_str: {
+        lambda date_str, **kwargs: {
             "allowed": False,
             "error": None,
             "normalized_date": "2026-05-13",
@@ -751,7 +760,7 @@ def test_commit_blocks_when_account_snapshot_has_same_date(monkeypatch):
         },
     )
     monkeypatch.setattr(paper, "handle_eod", lambda args: 0)
-    exit_code = paper.main(["commit", "--date", "20260513"])
+    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 1
 
 
@@ -759,7 +768,7 @@ def test_commit_blocks_when_position_snapshot_has_same_date(monkeypatch):
     monkeypatch.setattr(
         paper,
         "check_same_date_commit_guard",
-        lambda date_str: {
+        lambda date_str, **kwargs: {
             "allowed": False,
             "error": None,
             "normalized_date": "2026-05-13",
@@ -768,7 +777,7 @@ def test_commit_blocks_when_position_snapshot_has_same_date(monkeypatch):
         },
     )
     monkeypatch.setattr(paper, "handle_eod", lambda args: 0)
-    exit_code = paper.main(["commit", "--date", "20260513"])
+    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 1
 
 
@@ -778,7 +787,7 @@ def test_commit_allows_replace_on_same_date(monkeypatch):
     monkeypatch.setattr(
         paper,
         "check_same_date_commit_guard",
-        lambda date_str: {
+        lambda date_str, **kwargs: {
             "allowed": False,
             "error": None,
             "normalized_date": "2026-05-13",
@@ -792,7 +801,7 @@ def test_commit_allows_replace_on_same_date(monkeypatch):
         return 7
 
     monkeypatch.setattr(paper, "handle_eod", fake_handle_eod)
-    exit_code = paper.main(["commit", "--date", "20260513", "--replace"])
+    exit_code = paper.main(["commit", "--date", "20260513", "--replace", "--account-id", "paper_growth"])
     assert exit_code == 7
     assert captured == [(False, True, "20260513")]
 
@@ -801,7 +810,7 @@ def test_commit_guard_error_returns_one(monkeypatch):
     monkeypatch.setattr(
         paper,
         "check_same_date_commit_guard",
-        lambda date_str: {
+        lambda date_str, **kwargs: {
             "allowed": False,
             "error": "failed to parse paper_account_snapshot.csv",
             "normalized_date": "2026-05-13",
@@ -810,7 +819,7 @@ def test_commit_guard_error_returns_one(monkeypatch):
         },
     )
     monkeypatch.setattr(paper, "handle_eod", lambda args: 0)
-    exit_code = paper.main(["commit", "--date", "20260513"])
+    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 1
 
 
@@ -820,7 +829,7 @@ def test_commit_guard_does_not_call_prepare_reports_or_review(monkeypatch):
     monkeypatch.setattr(
         paper,
         "check_same_date_commit_guard",
-        lambda date_str: {
+        lambda date_str, **kwargs: {
             "allowed": True,
             "error": None,
             "normalized_date": "2026-05-13",
@@ -833,7 +842,7 @@ def test_commit_guard_does_not_call_prepare_reports_or_review(monkeypatch):
     monkeypatch.setattr(paper, "handle_reports", lambda args: called.__setitem__("reports", True) or 0)
     monkeypatch.setattr(paper, "handle_review_template", lambda args: called.__setitem__("review_template", True) or 0)
     monkeypatch.setattr(paper, "handle_review_validate", lambda args: called.__setitem__("review_validate", True) or 0)
-    exit_code = paper.main(["commit", "--date", "20260513"])
+    exit_code = paper.main(["commit", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert called == {"prepare": False, "reports": False, "review_template": False, "review_validate": False}
 
@@ -950,7 +959,7 @@ def test_preflight_subcommand_calls_paper_preflight(monkeypatch):
 def test_plan_subcommand_runs_preflight_first(monkeypatch):
     order: list[str] = []
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         order.append("preflight")
         return {
             "stage": stage,
@@ -968,7 +977,7 @@ def test_plan_subcommand_runs_preflight_first(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_paper_daily_plan", fake_run_paper_daily_plan)
-    exit_code = paper.main(["plan", "--date", "20260513"])
+    exit_code = paper.main(["plan", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert order == ["preflight", "plan"]
 
@@ -976,7 +985,7 @@ def test_plan_subcommand_runs_preflight_first(monkeypatch):
 def test_plan_aborts_when_preflight_fails(monkeypatch):
     called = {"plan": False}
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         return {
             "stage": stage,
             "date": date_str or "",
@@ -993,7 +1002,7 @@ def test_plan_aborts_when_preflight_fails(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_paper_daily_plan", fake_run_paper_daily_plan)
-    exit_code = paper.main(["plan", "--date", "20260513"])
+    exit_code = paper.main(["plan", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 1
     assert called["plan"] is False
 
@@ -1001,7 +1010,7 @@ def test_plan_aborts_when_preflight_fails(monkeypatch):
 def test_plan_calls_existing_wrapper_on_pass(monkeypatch):
     called: list[str] = []
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         return {
             "stage": stage,
             "date": date_str or "",
@@ -1018,7 +1027,7 @@ def test_plan_calls_existing_wrapper_on_pass(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_paper_daily_plan", fake_run_paper_daily_plan)
-    exit_code = paper.main(["plan", "--date", "20260513"])
+    exit_code = paper.main(["plan", "--date", "20260513", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert called == ["20260513"]
 
@@ -1026,7 +1035,7 @@ def test_plan_calls_existing_wrapper_on_pass(monkeypatch):
 def test_eod_dry_run_runs_preflight_first(monkeypatch):
     order: list[str] = []
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         order.append("preflight")
         return {
             "stage": stage,
@@ -1048,7 +1057,7 @@ def test_eod_dry_run_runs_preflight_first(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
-    exit_code = paper.main(["eod", "--date", "20260513", "--dry-run"])
+    exit_code = paper.main(["eod", "--date", "20260513", "--dry-run", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert order == ["preflight", "eod"]
 
@@ -1056,7 +1065,7 @@ def test_eod_dry_run_runs_preflight_first(monkeypatch):
 def test_eod_dry_run_calls_existing_wrapper(monkeypatch):
     captured: dict[str, object] = {}
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         return {
             "stage": stage,
             "date": date_str or "",
@@ -1080,7 +1089,7 @@ def test_eod_dry_run_calls_existing_wrapper(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
-    exit_code = paper.main(["eod", "--date", "20260513", "--dry-run"])
+    exit_code = paper.main(["eod", "--date", "20260513", "--dry-run", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert captured == {
         "date_str": "20260513",
@@ -1093,7 +1102,7 @@ def test_eod_dry_run_calls_existing_wrapper(monkeypatch):
 def test_eod_commit_runs_only_when_explicit(monkeypatch):
     captured: list[bool] = []
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         return {
             "stage": stage,
             "date": date_str or "",
@@ -1110,20 +1119,20 @@ def test_eod_commit_runs_only_when_explicit(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
-    exit_code = paper.main(["eod", "--date", "20260513", "--commit"])
+    exit_code = paper.main(["eod", "--date", "20260513", "--commit", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert captured == [True]
 
 
 def test_eod_requires_one_mode():
     with pytest.raises(SystemExit) as exc_info:
-        paper.main(["eod", "--date", "20260513"])
+        paper.main(["eod", "--date", "20260513", "--account-id", "paper_growth"])
     assert exc_info.value.code == 2
 
 
 def test_eod_rejects_both_modes():
     with pytest.raises(SystemExit) as exc_info:
-        paper.main(["eod", "--date", "20260513", "--dry-run", "--commit"])
+        paper.main(["eod", "--date", "20260513", "--dry-run", "--commit", "--account-id", "paper_growth"])
     assert exc_info.value.code == 2
 
 
@@ -1178,7 +1187,7 @@ def test_prepare_data_does_not_call_eod_commit(monkeypatch):
 def test_reports_runs_preflight_first(monkeypatch):
     order: list[str] = []
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         order.append("preflight")
         return {
             "stage": stage,
@@ -1204,7 +1213,7 @@ def test_reports_runs_preflight_first(monkeypatch):
 def test_reports_aborts_when_preflight_fails(monkeypatch):
     called = {"reports": False}
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         return {
             "stage": stage,
             "date": date_str or "",
@@ -1229,7 +1238,7 @@ def test_reports_aborts_when_preflight_fails(monkeypatch):
 def test_reports_runs_on_pass_with_warnings_in_non_strict(monkeypatch):
     called = {"reports": False}
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         return {
             "stage": stage,
             "date": date_str or "",
@@ -1503,7 +1512,7 @@ def test_review_validate_returns_one_on_errors(monkeypatch):
 def test_review_append_runs_preflight_first(monkeypatch):
     order: list[str] = []
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         order.append("preflight")
         return {
             "stage": stage,
@@ -1531,7 +1540,7 @@ def test_review_append_runs_preflight_first(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", fake_append)
-    exit_code = paper.main(["review-append"])
+    exit_code = paper.main(["review-append", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert order == ["preflight", "append"]
 
@@ -1539,7 +1548,7 @@ def test_review_append_runs_preflight_first(monkeypatch):
 def test_review_append_aborts_when_preflight_fails(monkeypatch):
     called = {"append": False}
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         return {
             "stage": stage,
             "date": date_str or "",
@@ -1556,7 +1565,7 @@ def test_review_append_aborts_when_preflight_fails(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", fake_append)
-    exit_code = paper.main(["review-append"])
+    exit_code = paper.main(["review-append", "--account-id", "paper_growth"])
     assert exit_code == 1
     assert called["append"] is False
 
@@ -1564,7 +1573,7 @@ def test_review_append_aborts_when_preflight_fails(monkeypatch):
 def test_review_append_calls_existing_append_on_pass(monkeypatch):
     called = {"append": False}
 
-    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool) -> dict:
+    def fake_run_preflight_check(stage: str, date_str: str | None, strict: bool, **kwargs) -> dict:
         return {
             "stage": stage,
             "date": date_str or "",
@@ -1591,7 +1600,7 @@ def test_review_append_calls_existing_append_on_pass(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", fake_append)
-    exit_code = paper.main(["review-append"])
+    exit_code = paper.main(["review-append", "--account-id", "paper_growth"])
     assert exit_code == 0
     assert called["append"] is True
 
