@@ -9,8 +9,17 @@ from core.paths import PAPER_TEST_DIR
 
 
 def resolve_writer_account_context(account_id: str | None = None) -> dict[str, Any]:
-    resolved_account_id = "paper_default" if account_id is None else validate_account_id(account_id)
-    account_paths = build_paper_account_paths(resolved_account_id, create=False)
+    if account_id is None:
+        raise ValueError(
+            "account_id is required for a direct write; use an explicit account_id "
+            "or the frozen runbook account context."
+        )
+    resolved_account_id = validate_account_id(account_id)
+    account_paths = build_paper_account_paths(
+        resolved_account_id,
+        allow_legacy_default=False,
+        create=False,
+    )
     return {
         "account_id": account_paths.account_id,
         "account_root": str(account_paths.root),
@@ -26,12 +35,20 @@ def guard_paper_writer_account(
 ) -> dict[str, Any]:
     context = resolve_writer_account_context(account_id)
     resolved_account_id = context["account_id"]
-    write_allowed = resolved_account_id == "paper_default" or allow_non_default
+    legacy_default_used = bool(context["legacy_default_used"])
+    write_allowed = not legacy_default_used and (
+        resolved_account_id == "paper_default" or allow_non_default
+    )
     if write_allowed:
         message = (
             f"Writer account guard: allowing {command_name} for account_id={resolved_account_id} "
             f"(account_root={context['account_root']}, "
             f"legacy_default_used={str(context['legacy_default_used']).lower()})."
+        )
+    elif legacy_default_used:
+        message = (
+            f"Writer account guard blocked {command_name} for account_id={resolved_account_id}. "
+            "Legacy outputs/paper_test compatibility is read-only and cannot be a write target."
         )
     else:
         message = (

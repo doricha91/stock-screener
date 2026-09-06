@@ -1,0 +1,500 @@
+diff --git a/core/paper_account_guard.py b/core/paper_account_guard.py
+index 5495ed695f00bf9831bef9c05849d045ad5a28ca..5b3d9fddcd1e412a67c76ca1917d996d6f48fe3b 100644
+--- a/core/paper_account_guard.py
++++ b/core/paper_account_guard.py
+@@ -9,8 +9,17 @@ from core.paths import PAPER_TEST_DIR
+ 
+ 
+ def resolve_writer_account_context(account_id: str | None = None) -> dict[str, Any]:
+-    resolved_account_id = "paper_default" if account_id is None else validate_account_id(account_id)
+-    account_paths = build_paper_account_paths(resolved_account_id, create=False)
++    if account_id is None:
++        raise ValueError(
++            "account_id is required for a direct write; use an explicit account_id "
++            "or the frozen runbook account context."
++        )
++    resolved_account_id = validate_account_id(account_id)
++    account_paths = build_paper_account_paths(
++        resolved_account_id,
++        allow_legacy_default=False,
++        create=False,
++    )
+     return {
+         "account_id": account_paths.account_id,
+         "account_root": str(account_paths.root),
+@@ -26,13 +35,21 @@ def guard_paper_writer_account(
+ ) -> dict[str, Any]:
+     context = resolve_writer_account_context(account_id)
+     resolved_account_id = context["account_id"]
+-    write_allowed = resolved_account_id == "paper_default" or allow_non_default
++    legacy_default_used = bool(context["legacy_default_used"])
++    write_allowed = not legacy_default_used and (
++        resolved_account_id == "paper_default" or allow_non_default
++    )
+     if write_allowed:
+         message = (
+             f"Writer account guard: allowing {command_name} for account_id={resolved_account_id} "
+             f"(account_root={context['account_root']}, "
+             f"legacy_default_used={str(context['legacy_default_used']).lower()})."
+         )
++    elif legacy_default_used:
++        message = (
++            f"Writer account guard blocked {command_name} for account_id={resolved_account_id}. "
++            "Legacy outputs/paper_test compatibility is read-only and cannot be a write target."
++        )
+     else:
+         message = (
+             f"Writer account guard blocked {command_name} for non-default account_id={resolved_account_id}. "
+diff --git a/core/paper_account_paths.py b/core/paper_account_paths.py
+index c5b36feef102709b0c5d4f557cd7a284953d806e..27b543f2245ce209e4a8f9853108432a0cfc6e9d 100644
+--- a/core/paper_account_paths.py
++++ b/core/paper_account_paths.py
+@@ -74,13 +74,27 @@ def resolve_paper_account_root(
+     account_id: str | None = None,
+     *,
+     account_root: Path | None = None,
+-    allow_legacy_default: bool = True,
++    allow_legacy_default: bool = False,
+     create: bool = False,
+ ) -> Path:
++    """Resolve an account root without silently selecting the legacy default root.
++
++    ``allow_legacy_default`` is an explicit read-only compatibility switch.  Root
++    creation through ``create=True`` remains temporarily available to existing
++    callers until ACCT-01B closes them, but it may never target the legacy root.
++    New account initialization is owned by ``init-account --confirm-create``.
++    """
+     resolved_account_id = _resolve_account_id(account_id)
+ 
+     if account_root is not None:
+         root = Path(account_root)
++        if _is_legacy_root(root):
++            if resolved_account_id != "paper_default":
++                raise ValueError("Legacy paper root compatibility is only available for paper_default.")
++            if not allow_legacy_default:
++                raise ValueError(
++                    "Legacy paper_default root requires explicit allow_legacy_default=True read compatibility."
++                )
+     else:
+         new_root = PAPER_ACCOUNTS_ROOT / resolved_account_id
+         if resolved_account_id != "paper_default":
+@@ -93,6 +107,10 @@ def resolve_paper_account_root(
+             root = new_root
+ 
+     if create:
++        if allow_legacy_default or _is_legacy_root(root):
++            raise ValueError(
++                "Legacy paper_default compatibility is read-only and cannot be used with create=True."
++            )
+         root.mkdir(parents=True, exist_ok=True)
+ 
+     return root
+@@ -102,7 +120,7 @@ def build_paper_account_paths(
+     account_id: str | None = None,
+     *,
+     account_root: Path | None = None,
+-    allow_legacy_default: bool = True,
++    allow_legacy_default: bool = False,
+     create: bool = False,
+ ) -> PaperAccountPaths:
+     resolved_account_id = _resolve_account_id(account_id)
+@@ -154,3 +172,7 @@ def _resolve_account_id(account_id: str | None) -> str:
+     if account_id is None:
+         return resolve_paper_account_profile(None).account_id
+     return validate_account_id(account_id)
++
++
++def _is_legacy_root(root: Path) -> bool:
++    return Path(root).resolve(strict=False) == LEGACY_PAPER_DEFAULT_ROOT.resolve(strict=False)
+diff --git a/tests/test_paper_account_guard.py b/tests/test_paper_account_guard.py
+index cf8794a6f2a9d957cde10c118df7a2f811043b6b..221e50e42daf143deac15073bf3f1b5d5c4385e3 100644
+--- a/tests/test_paper_account_guard.py
++++ b/tests/test_paper_account_guard.py
+@@ -7,41 +7,53 @@ import pytest
+ from core import paper_account_guard
+ 
+ 
+-def test_guard_defaults_to_paper_default(monkeypatch):
++def _paths(account_id: str, root: str, *, legacy_default_used: bool):
++    return type(
++        "Paths",
++        (),
++        {
++            "account_id": account_id,
++            "root": Path(root),
++            "legacy_default_used": legacy_default_used,
++        },
++    )()
++
++
++def test_guard_rejects_omitted_direct_write_account():
++    with pytest.raises(ValueError, match="account_id is required for a direct write"):
++        paper_account_guard.guard_paper_writer_account(command_name="paper.py commit")
++
++
++def test_guard_allows_paper_default(monkeypatch):
+     monkeypatch.setattr(
+         paper_account_guard,
+         "build_paper_account_paths",
+-        lambda account_id=None, create=False: type(
+-            "Paths",
+-            (),
+-            {
+-                "account_id": "paper_default",
+-                "root": Path("outputs/paper_test"),
+-                "legacy_default_used": True,
+-            },
+-        )(),
++        lambda account_id=None, allow_legacy_default=False, create=False: _paths(
++            "paper_default",
++            "outputs/paper_accounts/paper_default",
++            legacy_default_used=False,
++        ),
+     )
+ 
+-    context = paper_account_guard.guard_paper_writer_account(command_name="paper.py commit")
++    context = paper_account_guard.guard_paper_writer_account(
++        account_id="paper_default",
++        command_name="paper.py plan",
++    )
+ 
+-    assert context["account_id"] == "paper_default"
+     assert context["write_allowed"] is True
+-    assert context["legacy_default_used"] is True
++    assert context["legacy_default_used"] is False
++    assert "allowing paper.py plan" in context["message"]
+ 
+ 
+-def test_guard_allows_paper_default(monkeypatch):
++def test_guard_blocks_legacy_default_writer(monkeypatch):
+     monkeypatch.setattr(
+         paper_account_guard,
+         "build_paper_account_paths",
+-        lambda account_id=None, create=False: type(
+-            "Paths",
+-            (),
+-            {
+-                "account_id": "paper_default",
+-                "root": Path("outputs/paper_test"),
+-                "legacy_default_used": True,
+-            },
+-        )(),
++        lambda account_id=None, allow_legacy_default=False, create=False: _paths(
++            "paper_default",
++            "outputs/paper_test",
++            legacy_default_used=True,
++        ),
+     )
+ 
+     context = paper_account_guard.guard_paper_writer_account(
+@@ -49,8 +61,8 @@ def test_guard_allows_paper_default(monkeypatch):
+         command_name="paper.py plan",
+     )
+ 
+-    assert context["write_allowed"] is True
+-    assert "allowing paper.py plan" in context["message"]
++    assert context["write_allowed"] is False
++    assert "read-only" in context["message"]
+ 
+ 
+ def test_guard_rejects_invalid_account_id():
+@@ -65,15 +77,11 @@ def test_guard_blocks_non_default_by_default(monkeypatch):
+     monkeypatch.setattr(
+         paper_account_guard,
+         "build_paper_account_paths",
+-        lambda account_id=None, create=False: type(
+-            "Paths",
+-            (),
+-            {
+-                "account_id": "paper_growth",
+-                "root": Path("outputs/paper_accounts/paper_growth"),
+-                "legacy_default_used": False,
+-            },
+-        )(),
++        lambda account_id=None, allow_legacy_default=False, create=False: _paths(
++            "paper_growth",
++            "outputs/paper_accounts/paper_growth",
++            legacy_default_used=False,
++        ),
+     )
+ 
+     context = paper_account_guard.guard_paper_writer_account(
+@@ -85,41 +93,53 @@ def test_guard_blocks_non_default_by_default(monkeypatch):
+     assert "non-default account_id=paper_growth" in context["message"]
+ 
+ 
++def test_guard_allows_explicit_non_default_when_command_opts_in(monkeypatch):
++    monkeypatch.setattr(
++        paper_account_guard,
++        "build_paper_account_paths",
++        lambda account_id=None, allow_legacy_default=False, create=False: _paths(
++            "paper_growth",
++            "outputs/paper_accounts/paper_growth",
++            legacy_default_used=False,
++        ),
++    )
++
++    context = paper_account_guard.guard_paper_writer_account(
++        account_id="paper_growth",
++        command_name="paper.py review-append",
++        allow_non_default=True,
++    )
++
++    assert context["write_allowed"] is True
++
++
+ def test_guard_context_includes_account_fields(monkeypatch):
+     monkeypatch.setattr(
+         paper_account_guard,
+         "build_paper_account_paths",
+-        lambda account_id=None, create=False: type(
+-            "Paths",
+-            (),
+-            {
+-                "account_id": "paper_default",
+-                "root": Path("outputs/paper_test"),
+-                "legacy_default_used": True,
+-            },
+-        )(),
++        lambda account_id=None, allow_legacy_default=False, create=False: _paths(
++            "paper_default",
++            "outputs/paper_accounts/paper_default",
++            legacy_default_used=False,
++        ),
+     )
+ 
+     context = paper_account_guard.resolve_writer_account_context("paper_default")
+ 
+     assert context["account_id"] == "paper_default"
+-    assert Path(context["account_root"]) == Path("outputs/paper_test")
+-    assert context["legacy_default_used"] is True
++    assert Path(context["account_root"]) == Path("outputs/paper_accounts/paper_default")
++    assert context["legacy_default_used"] is False
+ 
+ 
+ def test_format_writer_account_guard_message_returns_message(monkeypatch):
+     monkeypatch.setattr(
+         paper_account_guard,
+         "build_paper_account_paths",
+-        lambda account_id=None, create=False: type(
+-            "Paths",
+-            (),
+-            {
+-                "account_id": "paper_default",
+-                "root": Path("outputs/paper_test"),
+-                "legacy_default_used": True,
+-            },
+-        )(),
++        lambda account_id=None, allow_legacy_default=False, create=False: _paths(
++            "paper_default",
++            "outputs/paper_accounts/paper_default",
++            legacy_default_used=False,
++        ),
+     )
+     context = paper_account_guard.guard_paper_writer_account(
+         account_id="paper_default",
+@@ -127,3 +147,24 @@ def test_format_writer_account_guard_message_returns_message(monkeypatch):
+     )
+ 
+     assert paper_account_guard.format_writer_account_guard_message(context) == context["message"]
++
++
++def test_path_containment_accepts_child_and_rejects_sibling(tmp_path: Path):
++    root = tmp_path / "paper_accounts" / "paper_growth"
++    child = root / "reports" / "report.json"
++
++    assert paper_account_guard.assert_path_under_account_root(child, root) == child.resolve()
++    with pytest.raises(ValueError, match="under account root"):
++        paper_account_guard.assert_path_under_account_root(tmp_path / "paper_test" / "report.json", root)
++
++
++def test_non_default_writer_rejects_legacy_paper_test_target(tmp_path: Path, monkeypatch):
++    legacy_root = tmp_path / "paper_test"
++    monkeypatch.setattr(paper_account_guard, "PAPER_TEST_DIR", legacy_root)
++
++    with pytest.raises(ValueError, match="legacy paper_test root"):
++        paper_account_guard.assert_non_default_writer_target(
++            legacy_root / "paper_execution_log.csv",
++            account_id="paper_growth",
++            account_root=legacy_root,
++        )
+diff --git a/tests/test_paper_account_paths.py b/tests/test_paper_account_paths.py
+index c48ccf86be65265d0c5d4a164b2c8a07d6f450b7..3356792727056e66e69abb32a7170bb1039822c7 100644
+--- a/tests/test_paper_account_paths.py
++++ b/tests/test_paper_account_paths.py
+@@ -4,13 +4,42 @@ from pathlib import Path
+ 
+ import pytest
+ 
+-from core.paths import PAPER_TEST_DIR
++from core.paper_account_profile import PaperAccountProfile
+ from core.paper_account_paths import build_paper_account_paths, resolve_paper_account_root
+ 
+ 
+-def test_none_account_id_resolves_to_paper_default_legacy_root():
+-    root = resolve_paper_account_root(None, allow_legacy_default=True, create=False)
+-    assert root == PAPER_TEST_DIR
++def test_none_account_id_uses_configured_default_canonical_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    accounts_root = tmp_path / "paper_accounts"
++    monkeypatch.setattr("core.paper_account_paths.PAPER_ACCOUNTS_ROOT", accounts_root)
++    monkeypatch.setattr(
++        "core.paper_account_paths.resolve_paper_account_profile",
++        lambda account_id: PaperAccountProfile(
++            account_id="paper_growth",
++            display_name="Paper Growth",
++            currency="USD",
++            initial_cash=100000,
++            account_type="paper",
++            is_default=True,
++        ),
++    )
++
++    root = resolve_paper_account_root(None, create=False)
++
++    assert root == accounts_root / "paper_growth"
++    assert not root.exists()
++
++
++def test_explicit_paper_default_uses_canonical_root_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    legacy_root = tmp_path / "paper_test"
++    accounts_root = tmp_path / "paper_accounts"
++    legacy_root.mkdir()
++    monkeypatch.setattr("core.paper_account_paths.LEGACY_PAPER_DEFAULT_ROOT", legacy_root)
++    monkeypatch.setattr("core.paper_account_paths.PAPER_ACCOUNTS_ROOT", accounts_root)
++
++    root = resolve_paper_account_root("paper_default", create=False)
++
++    assert root == accounts_root / "paper_default"
++    assert not root.exists()
+ 
+ 
+ def test_paper_default_uses_legacy_root_when_new_root_missing_and_legacy_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@@ -25,6 +54,23 @@ def test_paper_default_uses_legacy_root_when_new_root_missing_and_legacy_allowed
+     assert not (new_accounts_root / "paper_default").exists()
+ 
+ 
++def test_explicit_legacy_compatibility_is_reported_by_account_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    legacy_root = tmp_path / "paper_test"
++    accounts_root = tmp_path / "paper_accounts"
++    legacy_root.mkdir()
++    monkeypatch.setattr("core.paper_account_paths.LEGACY_PAPER_DEFAULT_ROOT", legacy_root)
++    monkeypatch.setattr("core.paper_account_paths.PAPER_ACCOUNTS_ROOT", accounts_root)
++
++    paths = build_paper_account_paths(
++        "paper_default",
++        allow_legacy_default=True,
++        create=False,
++    )
++
++    assert paths.root == legacy_root
++    assert paths.legacy_default_used is True
++
++
+ def test_paper_default_prefers_new_root_when_it_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+     legacy_root = tmp_path / "paper_test"
+     new_accounts_root = tmp_path / "paper_accounts"
+@@ -71,7 +117,10 @@ def test_create_false_does_not_create_root(tmp_path: Path, monkeypatch: pytest.M
+     assert not root.exists()
+ 
+ 
+-def test_create_true_creates_root_and_required_subdirectories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++def test_create_true_temporary_compatibility_creates_canonical_subdirectories_pending_acct_01b(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++):
+     new_accounts_root = tmp_path / "paper_accounts"
+     monkeypatch.setattr("core.paper_account_paths.PAPER_ACCOUNTS_ROOT", new_accounts_root)
+ 
+@@ -85,6 +134,68 @@ def test_create_true_creates_root_and_required_subdirectories(tmp_path: Path, mo
+     assert paths.replay_diff_config_snapshot_archive_dir.exists()
+ 
+ 
++def test_create_true_rejects_explicit_legacy_compatibility(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    legacy_root = tmp_path / "paper_test"
++    accounts_root = tmp_path / "paper_accounts"
++    legacy_root.mkdir()
++    monkeypatch.setattr("core.paper_account_paths.LEGACY_PAPER_DEFAULT_ROOT", legacy_root)
++    monkeypatch.setattr("core.paper_account_paths.PAPER_ACCOUNTS_ROOT", accounts_root)
++
++    with pytest.raises(ValueError, match="read-only"):
++        build_paper_account_paths(
++            "paper_default",
++            allow_legacy_default=True,
++            create=True,
++        )
++
++
++def test_explicit_legacy_account_root_requires_compatibility_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    legacy_root = tmp_path / "paper_test"
++    monkeypatch.setattr("core.paper_account_paths.LEGACY_PAPER_DEFAULT_ROOT", legacy_root)
++
++    with pytest.raises(ValueError, match="explicit allow_legacy_default=True"):
++        build_paper_account_paths(
++            "paper_default",
++            account_root=legacy_root,
++            create=False,
++        )
++
++
++def test_explicit_legacy_account_root_is_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    legacy_root = tmp_path / "paper_test"
++    monkeypatch.setattr("core.paper_account_paths.LEGACY_PAPER_DEFAULT_ROOT", legacy_root)
++
++    paths = build_paper_account_paths(
++        "paper_default",
++        account_root=legacy_root,
++        allow_legacy_default=True,
++        create=False,
++    )
++    assert paths.root == legacy_root
++    assert paths.legacy_default_used is True
++
++    with pytest.raises(ValueError, match="read-only"):
++        build_paper_account_paths(
++            "paper_default",
++            account_root=legacy_root,
++            allow_legacy_default=True,
++            create=True,
++        )
++
++
++def test_non_default_account_cannot_use_legacy_account_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
++    legacy_root = tmp_path / "paper_test"
++    monkeypatch.setattr("core.paper_account_paths.LEGACY_PAPER_DEFAULT_ROOT", legacy_root)
++
++    with pytest.raises(ValueError, match="only available for paper_default"):
++        build_paper_account_paths(
++            "paper_growth",
++            account_root=legacy_root,
++            allow_legacy_default=True,
++            create=False,
++        )
++
++
+ @pytest.mark.parametrize("date_str,expected", [("20260530", "20260530"), ("2026-05-30", "20260530")])
+ def test_date_based_paths_support_multiple_date_formats(
+     tmp_path: Path,
+diff --git a/tests/test_paper_status_account_scope.py b/tests/test_paper_status_account_scope.py
+index 6e96f5d2d7e692531015d0a21a00fc7276807d0d..92de08ce156fb8a0cc13ac20579896007274b9bf 100644
+--- a/tests/test_paper_status_account_scope.py
++++ b/tests/test_paper_status_account_scope.py
+@@ -11,7 +11,7 @@ def _write(path: Path, text: str) -> None:
+     path.write_text(text, encoding="utf-8")
+ 
+ 
+-def test_run_paper_status_includes_account_metadata_for_account_paths(tmp_path, monkeypatch):
++def test_run_paper_status_uses_canonical_default_account_metadata(tmp_path, monkeypatch):
+     legacy_root = tmp_path / "paper_test"
+     new_accounts_root = tmp_path / "paper_accounts"
+     legacy_root.mkdir()
+@@ -21,8 +21,8 @@ def test_run_paper_status_includes_account_metadata_for_account_paths(tmp_path,
+     account_paths = build_paper_account_paths("paper_default", create=False)
+     status = run_paper_status("20260520", account_paths=account_paths)
+     assert status["account_id"] == "paper_default"
+-    assert status["account_root"] == str(legacy_root)
+-    assert status["legacy_default_used"] is True
++    assert status["account_root"] == str(new_accounts_root / "paper_default")
++    assert status["legacy_default_used"] is False
+ 
+ 
+ def test_run_paper_status_next_command_includes_non_default_account_id(tmp_path, monkeypatch):

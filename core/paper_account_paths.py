@@ -74,13 +74,27 @@ def resolve_paper_account_root(
     account_id: str | None = None,
     *,
     account_root: Path | None = None,
-    allow_legacy_default: bool = True,
+    allow_legacy_default: bool = False,
     create: bool = False,
 ) -> Path:
+    """Resolve an account root without silently selecting the legacy default root.
+
+    ``allow_legacy_default`` is an explicit read-only compatibility switch.  Root
+    creation through ``create=True`` remains temporarily available to existing
+    callers until ACCT-01B closes them, but it may never target the legacy root.
+    New account initialization is owned by ``init-account --confirm-create``.
+    """
     resolved_account_id = _resolve_account_id(account_id)
 
     if account_root is not None:
         root = Path(account_root)
+        if _is_legacy_root(root):
+            if resolved_account_id != "paper_default":
+                raise ValueError("Legacy paper root compatibility is only available for paper_default.")
+            if not allow_legacy_default:
+                raise ValueError(
+                    "Legacy paper_default root requires explicit allow_legacy_default=True read compatibility."
+                )
     else:
         new_root = PAPER_ACCOUNTS_ROOT / resolved_account_id
         if resolved_account_id != "paper_default":
@@ -93,6 +107,10 @@ def resolve_paper_account_root(
             root = new_root
 
     if create:
+        if allow_legacy_default or _is_legacy_root(root):
+            raise ValueError(
+                "Legacy paper_default compatibility is read-only and cannot be used with create=True."
+            )
         root.mkdir(parents=True, exist_ok=True)
 
     return root
@@ -102,7 +120,7 @@ def build_paper_account_paths(
     account_id: str | None = None,
     *,
     account_root: Path | None = None,
-    allow_legacy_default: bool = True,
+    allow_legacy_default: bool = False,
     create: bool = False,
 ) -> PaperAccountPaths:
     resolved_account_id = _resolve_account_id(account_id)
@@ -154,3 +172,7 @@ def _resolve_account_id(account_id: str | None) -> str:
     if account_id is None:
         return resolve_paper_account_profile(None).account_id
     return validate_account_id(account_id)
+
+
+def _is_legacy_root(root: Path) -> bool:
+    return Path(root).resolve(strict=False) == LEGACY_PAPER_DEFAULT_ROOT.resolve(strict=False)

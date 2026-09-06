@@ -11,7 +11,7 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def test_run_paper_status_includes_account_metadata_for_account_paths(tmp_path, monkeypatch):
+def test_run_paper_status_uses_canonical_default_account_metadata(tmp_path, monkeypatch):
     legacy_root = tmp_path / "paper_test"
     new_accounts_root = tmp_path / "paper_accounts"
     legacy_root.mkdir()
@@ -21,8 +21,8 @@ def test_run_paper_status_includes_account_metadata_for_account_paths(tmp_path, 
     account_paths = build_paper_account_paths("paper_default", create=False)
     status = run_paper_status("20260520", account_paths=account_paths)
     assert status["account_id"] == "paper_default"
-    assert status["account_root"] == str(legacy_root)
-    assert status["legacy_default_used"] is True
+    assert status["account_root"] == str(new_accounts_root / "paper_default")
+    assert status["legacy_default_used"] is False
 
 
 def test_run_paper_status_next_command_includes_non_default_account_id(tmp_path, monkeypatch):
