@@ -1,6 +1,8 @@
 # Agent Working Rules (AGENTS.md)
 
-이 프로젝트(StockScreener)에서 작업할 때 반드시 준수해야 하는 규칙입니다.
+이 프로젝트(StockScreener)에서 작업할 때 반드시 준수해야 하는 **저장소 불변 규칙**입니다.
+
+MFU 분할, Phase 진행, 테스트 확대, 리뷰 번들, commit/closeout 같은 개발 실행 절차는 `docs/DEVELOPMENT_WORKFLOW.md`를 따른다. 이 파일은 실행 절차보다 우선하는 안전·무결성·아키텍처 규칙을 정의한다.
 
 ## 1. Development Environment
 
@@ -29,11 +31,7 @@
 - 한 번의 작업은 하나의 기능, 하나의 버그 수정, 또는 하나의 리팩토링 목표에 집중한다.
 - 관련된 여러 파일 수정은 허용되지만, 하나의 변경에 기능 추가와 구조 개편을 섞지 않는다.
 - 대규모 구조 변경, 파일 대량 이동, 광범위한 리네이밍은 사용자 승인 없이 진행하지 않는다.
-- 작업 순서는 가능한 한 아래를 따른다.
-  1. 현재 구조 및 영향 범위 파악
-  2. 수정 전략 수립
-  3. 필요한 파일만 단계적으로 수정
-  4. 검증 수행
+- 조사·구현·검증의 단계적 실행 방식은 `docs/DEVELOPMENT_WORKFLOW.md`를 따른다.
 
 ## 4. Configuration and Secrets
 
@@ -157,20 +155,18 @@
   3. 아키텍처 보존
   4. 문서 동기화
   5. 개발 편의
+- 문서/지시 간 우선순위는 다음과 같다.
+  1. `AGENTS.md`
+  2. 사용자와 합의된 현재 작업의 확정 정책 및 작업지시문
+  3. `docs/DEVELOPMENT_WORKFLOW.md`
+  4. 공통 실행 프롬프트와 일반 관례
+- 상위 규칙을 하위 문서가 임의로 완화하거나 우회하지 않는다.
 
-## 13. Default Agent Workflow
+## 13. Development Workflow Reference
 
-Unless the user explicitly asks for immediate editing, the agent must follow this order:
-
-1. Inspect relevant files.
-2. Summarize current behavior.
-3. Identify the minimal safe change.
-4. List files that may need modification.
-5. Edit only the necessary files.
-6. Validate the change.
-7. Report results, risks, and remaining limitations.
-
-For high-risk areas such as DB schema, strategy logic, backtest metrics, market regime logic, hedge mode, optimizer behavior, and live trading logic, the agent must first provide an analysis before editing.
+- MFU 정의, Phase 1/2/3, 중단 후 재개, 테스트 escalation, failure classification, review bundle, reviewed commit, initiative closeout 절차는 `docs/DEVELOPMENT_WORKFLOW.md`를 따른다.
+- 고위험 영역(DB schema, 전략 로직, backtest metric, market regime, hedge mode, optimizer behavior, live trading)은 편집 전에 현재 구조와 영향 범위를 먼저 분석한다.
+- 실제 blocking condition이 없는 경우 단순 구현 선택지나 예상 가능한 dirty 상태만으로 작업을 중단하지 않는다.
 
 ## 14. Protected Files and Directories
 
@@ -246,33 +242,30 @@ Before editing, check the current git status when possible.
 
 Rules:
 
+- 기본 integration/upstream branch는 `gemini_cli_update`이며, 사용자 승인 없이 `main`에서 작업하지 않는다.
 - Do not overwrite unrelated user changes.
-- Do not commit automatically unless explicitly requested.
-- Do not create, delete, or rename branches unless explicitly requested.
-- If there are pre-existing uncommitted changes, report them before editing.
+- 기존 dirty 변경을 임의로 `stash`, `reset`, `clean`, checkout 복구 등으로 제거하지 않는다.
+- Do not commit automatically unless the current task/workflow explicitly allows it.
+- Do not create, delete, or rename branches/worktrees unless the current task explicitly allows it.
+- If there are pre-existing uncommitted changes, preserve them and report them before editing.
+- stage할 때는 필요한 파일을 명시적으로 선택하고, unrelated 변경을 함께 담을 수 있는 `git add .` / `git add -A`를 기본적으로 사용하지 않는다.
 - Keep diffs small and reviewable.
+- push/merge/force/rebase의 허용 시점은 `docs/DEVELOPMENT_WORKFLOW.md`와 현재 작업지시문을 따른다.
 
 ## 20. Test Reporting Rule
 
-The agent must clearly distinguish between:
-
-- Tests actually run
-- Tests only recommended
-- Tests that could not be run
-
-If a test was not run, the agent must state the reason.
+- 테스트 실행 범위와 escalation 순서는 `docs/DEVELOPMENT_WORKFLOW.md`를 따른다.
+- 보고 시에는 반드시 아래를 구분한다.
+  - 실제 실행한 테스트
+  - 권장만 한 테스트
+  - 실행하지 못했거나 의도적으로 생략한 테스트와 그 이유
+- 실패한 테스트를 숨기지 않으며, 현재 작업 범위와의 관계를 분류한 뒤 처리한다.
 
 ## 21. Required Final Report Format
 
-After every task, report:
-
-1. Summary
-2. Changed files
-3. Behavior changes
-4. Tests run
-5. Tests not run and why
-6. Risks and limitations
-7. Suggested next step
+- 표준 완료 보고와 최종 review bundle 형식은 `docs/DEVELOPMENT_WORKFLOW.md`를 따른다.
+- 현재 작업지시문이 추가 보고 항목이나 별도 형식을 요구하면 그 작업에 한해 추가한다.
+- 완료 여부, 실제 변경 파일, 실행한 검증, 미실행 검증, 남은 위험을 구분해서 보고한다.
 
 ## 22. Legacy Code Handling
 
