@@ -38,6 +38,7 @@ def test_reports_passes_non_default_account_paths(monkeypatch):
         return account_paths
 
     monkeypatch.setattr(paper, "build_paper_account_paths", fake_build_paper_account_paths)
+    monkeypatch.setattr(paper, "require_initialized_output_account_paths", lambda paths, **kwargs: paths)
 
     def fake_run_report_chain(account_paths=None):
         captured["account_id"] = account_paths.account_id
@@ -46,7 +47,7 @@ def test_reports_passes_non_default_account_paths(monkeypatch):
     monkeypatch.setattr(paper, "run_report_chain", fake_run_report_chain)
     exit_code = paper.main(["reports", "--account-id", "paper_growth"])
     assert exit_code == 0
-    assert captured["built"] == ("paper_growth", True)
+    assert captured["built"] == ("paper_growth", False)
     assert captured["preflight_account_id"] == "paper_growth"
     assert captured["account_id"] == "paper_growth"
 
@@ -61,6 +62,7 @@ def test_review_template_and_validate_use_non_default_account_paths(monkeypatch)
         "build_paper_account_paths",
         lambda account_id=None, *, create=False: account_paths,
     )
+    monkeypatch.setattr(paper, "require_initialized_output_account_paths", lambda paths, **kwargs: paths)
     def fake_run_preflight(**kwargs):
         captured["preflight_account_id"] = kwargs["account_paths"].account_id
         return {"result": "PASS"}

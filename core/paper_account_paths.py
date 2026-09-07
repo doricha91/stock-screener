@@ -168,6 +168,30 @@ def build_paper_account_paths(
     )
 
 
+def resolve_paper_read_account_paths(
+    account_id: str | None = None,
+    *,
+    legacy_read: bool = False,
+) -> PaperAccountPaths:
+    """Resolve a read context without silently falling back to legacy storage.
+
+    Legacy compatibility is deliberately narrow: callers must opt in, the
+    resolved account must be ``paper_default``, and the returned context is
+    always read-only because ``create`` is never enabled here.
+    """
+    resolved_account_id = _resolve_account_id(account_id)
+    if not legacy_read:
+        return build_paper_account_paths(resolved_account_id, create=False)
+    if resolved_account_id != "paper_default":
+        raise ValueError("Legacy read compatibility is only available for paper_default.")
+    return build_paper_account_paths(
+        resolved_account_id,
+        account_root=LEGACY_PAPER_DEFAULT_ROOT,
+        allow_legacy_default=True,
+        create=False,
+    )
+
+
 def _resolve_account_id(account_id: str | None) -> str:
     if account_id is None:
         return resolve_paper_account_profile(None).account_id

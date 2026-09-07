@@ -7,7 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.paper_account_paths import PaperAccountPaths
+from core.paper_account_guard import require_initialized_output_account_paths
+from core.paper_account_paths import PaperAccountPaths, resolve_paper_read_account_paths
 from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
 from core.paper_snapshot_identity import validate_snapshot_account_identity
 from core.paths import market_db_path, paper_account_snapshot_path, paper_reports_dir
@@ -150,7 +151,9 @@ def build_paper_benchmark_comparison_summary(
     market_db: Path | None = None,
     account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
-    root = account_paths.root if account_paths is not None else (Path(paper_root) if paper_root is not None else paper_account_snapshot_path().parent)
+    if account_paths is None and paper_root is None:
+        account_paths = resolve_paper_read_account_paths()
+    root = account_paths.root if account_paths is not None else Path(paper_root)
     account_path = root / paper_account_snapshot_path().name
     db_path = Path(market_db) if market_db is not None else Path(market_db_path())
 
@@ -507,15 +510,19 @@ def generate_paper_benchmark_comparison(
     market_db: Path | None = None,
     account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
-    root = account_paths.root if account_paths is not None else (Path(paper_root) if paper_root is not None else paper_account_snapshot_path().parent)
+    context = require_initialized_output_account_paths(
+        account_paths,
+        command_name="generate_paper_benchmark_comparison",
+    )
+    if paper_root is not None and Path(paper_root).resolve(strict=False) != context.root.resolve(strict=False):
+        raise ValueError("paper_root does not match account_paths.root.")
+    root = context.root
     summary = build_paper_benchmark_comparison_summary(
         paper_root=root,
         market_db=market_db,
-        account_paths=account_paths,
+        account_paths=context,
     )
-    reports_dir = root / "reports" if paper_root is not None else paper_reports_dir()
-    if account_paths is not None:
-        reports_dir = root / "reports"
+    reports_dir = context.reports_dir
     reports_dir.mkdir(parents=True, exist_ok=True)
     markdown_path = reports_dir / BENCHMARK_MARKDOWN
     json_path = reports_dir / BENCHMARK_JSON

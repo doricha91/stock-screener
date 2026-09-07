@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from core import paper_replay_diff
+from tests.paper_account_test_support import create_initialized_account_paths
+
 from core.paper_replay_diff import (
     CATEGORY_ACTION_DIFF,
     CATEGORY_CONFIG_OR_UNIVERSE_DIFF,
@@ -23,6 +28,12 @@ from core.paper_replay_diff import (
     write_daily_plan_diff_report,
 )
 from scripts.dev.diff_daily_plan import main as diff_daily_plan_cli_main
+
+
+@pytest.fixture(autouse=True)
+def _initialized_replay_account(monkeypatch, tmp_path):
+    paths = create_initialized_account_paths(tmp_path, account_id="paper_sandbox")
+    monkeypatch.setattr(paper_replay_diff, "build_paper_account_paths", lambda *args, **kwargs: paths)
 
 
 def _plan(**overrides) -> dict:

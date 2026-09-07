@@ -25,7 +25,7 @@ def create_initialized_account_paths(
     initial_cash: float = 100000.0,
     currency: str = "USD",
 ) -> PaperAccountPaths:
-    if account_id != "paper_default":
+    if account_id != "paper_default" and not root.exists():
         initialize_paper_account(
             account_id=account_id,
             initial_cash=initial_cash,

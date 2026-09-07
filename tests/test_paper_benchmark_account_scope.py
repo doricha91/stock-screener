@@ -11,6 +11,7 @@ from core.paper_account_paths import build_paper_account_paths
 from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
 from core.paper_benchmark_comparison import generate_paper_benchmark_comparison
 from core.paper_snapshot_identity import PaperSnapshotIdentityError
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _write(path: Path, text: str) -> None:
@@ -73,6 +74,7 @@ def test_benchmark_accepts_account_paths_and_writes_under_account_root(tmp_path,
         "paper_growth,2026-05-09,100000,100000,100000,success,2026-05-09\n"
         "paper_growth,2026-05-20,100000,102000,102000,success,2026-05-20\n",
     )
+    ensure_initialized_account_paths(root, account_id="paper_growth")
     db_path = tmp_path / "market_data.db"
     _seed_market_db(db_path)
 
@@ -106,6 +108,7 @@ def test_benchmark_fails_closed_on_invalid_snapshot_identity(
         f"{account_values[0]},2026-05-09,100000,100000\n"
         f"{account_values[1]},2026-05-20,100000,102000\n",
     )
+    ensure_initialized_account_paths(root, account_id="paper_growth")
 
     with pytest.raises(PaperSnapshotIdentityError, match=reason):
         generate_paper_benchmark_comparison(

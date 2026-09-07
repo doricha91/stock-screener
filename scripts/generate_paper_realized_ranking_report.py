@@ -8,6 +8,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.paper_account_paths import PaperAccountPaths  # noqa: E402
+from core.paper_account_guard import require_initialized_output_account_paths  # noqa: E402
 from core.paper_realized_ranking_report import (  # noqa: E402
     build_paper_realized_rankings,
     load_paper_symbol_realized_performance_rows,
@@ -20,12 +21,11 @@ from core.paths import paper_reports_dir  # noqa: E402
 
 
 def generate_paper_realized_ranking_report(account_paths: PaperAccountPaths | None = None) -> dict:
-    if account_paths is not None and account_paths.account_id != "paper_default":
-        reports_dir = account_paths.reports_dir
-        allowed_root = account_paths.root
-    else:
-        reports_dir = paper_reports_dir()
-        allowed_root = None
+    account_paths = require_initialized_output_account_paths(
+        account_paths, command_name="generate_paper_realized_ranking_report"
+    )
+    reports_dir = account_paths.reports_dir
+    allowed_root = account_paths.root
     input_path = reports_dir / "paper_symbol_realized_performance.csv"
     output_markdown_path = reports_dir / "paper_realized_ranking_report.md"
     output_csv_path = reports_dir / "paper_realized_ranking.csv"

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.paper_account_paths import PaperAccountPaths
+from core.paper_account_paths import PaperAccountPaths, resolve_paper_read_account_paths
 from core.paths import PAPER_TEST_DIR, paper_account_snapshot_path, paper_execution_log_path, paper_position_snapshot_path
 
 
@@ -32,7 +32,11 @@ class PaperStatusPaths:
 
 
 def build_paper_status_paths(paper_root: Path | None = None) -> PaperStatusPaths:
-    root = Path(paper_root) if paper_root is not None else PAPER_TEST_DIR
+    root = (
+        Path(paper_root)
+        if paper_root is not None
+        else resolve_paper_read_account_paths().root
+    )
     return PaperStatusPaths(
         paper_root=root,
         reports_dir=root / "reports",

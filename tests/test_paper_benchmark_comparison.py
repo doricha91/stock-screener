@@ -14,6 +14,7 @@ from core.paper_benchmark_comparison import (
 )
 from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
 from core.paper_snapshot_identity import PaperSnapshotIdentityError
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _write(path: Path, text: str) -> None:
@@ -105,11 +106,13 @@ def test_benchmark_rejects_missing_required_snapshot_columns_without_output_muta
     _write(json_path, '{"existing": true}\n')
     before_markdown = markdown_path.read_bytes()
     before_json = json_path.read_bytes()
+    account_paths = ensure_initialized_account_paths(root, account_id="paper_sandbox")
 
     with pytest.raises(PaperSnapshotIdentityError, match="reason=missing_columns") as exc_info:
         generate_paper_benchmark_comparison(
             paper_root=root,
             market_db=tmp_path / "missing.db",
+            account_paths=account_paths,
         )
 
     assert "currency" in str(exc_info.value)
@@ -278,7 +281,11 @@ def test_markdown_and_json_outputs_are_generated(tmp_path):
         "2026-05-09,100000,100000,100000,success,2026-05-09\n"
         "2026-05-20,100000,102000,102000,success,2026-05-20\n",
     )
-    result = generate_paper_benchmark_comparison(paper_root=root, market_db=db_path)
+    result = generate_paper_benchmark_comparison(
+        paper_root=root,
+        market_db=db_path,
+        account_paths=ensure_initialized_account_paths(root, account_id="paper_default"),
+    )
     assert result["markdown_path"].exists()
     assert result["json_path"].exists()
     payload = json.loads(result["json_path"].read_text(encoding="utf-8"))

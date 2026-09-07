@@ -6,6 +6,13 @@ from pathlib import Path
 import pytest
 
 import scripts.dev.capture_daily_plan_baseline as capture_cli
+from tests.paper_account_test_support import create_initialized_account_paths
+
+
+@pytest.fixture(autouse=True)
+def _initialized_capture_account(monkeypatch, tmp_path):
+    paths = create_initialized_account_paths(tmp_path, account_id="paper_sandbox")
+    monkeypatch.setattr(capture_cli, "build_paper_account_paths", lambda *args, **kwargs: paths)
 
 
 def _sidecar(**overrides) -> dict:
@@ -54,7 +61,7 @@ def test_capture_writes_only_under_tmp_output_dir_and_reports_safety(monkeypatch
     monkeypatch.setattr(
         capture_cli,
         "load_official_paper_state_for_daily_plan",
-        lambda plan_date: {"cash": 100000},
+        lambda plan_date, **kwargs: {"cash": 100000},
     )
 
     def _fake_generate_daily_plan(**kwargs):

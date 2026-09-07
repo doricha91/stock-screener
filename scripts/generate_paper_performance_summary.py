@@ -6,6 +6,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.paper_account_paths import PaperAccountPaths  # noqa: E402
+from core.paper_account_guard import require_initialized_output_account_paths  # noqa: E402
 from core.paper_performance_summary import (  # noqa: E402
     build_paper_performance_summary,
     load_latest_position_snapshot_rows,
@@ -24,18 +25,14 @@ from core.paths import (  # noqa: E402
 
 
 def generate_paper_performance_summary(account_paths: PaperAccountPaths | None = None) -> dict:
-    allowed_root = None
-    if account_paths is not None and account_paths.account_id != "paper_default":
-        account_snapshot_path = account_paths.account_snapshot_path
-        position_snapshot_path = account_paths.position_snapshot_path
-        reports_dir = account_paths.reports_dir
-        output_path = reports_dir / "paper_performance_summary.md"
-        allowed_root = account_paths.root
-    else:
-        account_snapshot_path = paper_account_snapshot_path()
-        position_snapshot_path = paper_position_snapshot_path()
-        reports_dir = paper_reports_dir()
-        output_path = paper_performance_summary_path()
+    account_paths = require_initialized_output_account_paths(
+        account_paths, command_name="generate_paper_performance_summary"
+    )
+    account_snapshot_path = account_paths.account_snapshot_path
+    position_snapshot_path = account_paths.position_snapshot_path
+    reports_dir = account_paths.reports_dir
+    output_path = reports_dir / "paper_performance_summary.md"
+    allowed_root = account_paths.root
     equity_curve_path = reports_dir / "paper_equity_curve.csv"
     drawdown_path = reports_dir / "paper_drawdown.csv"
 

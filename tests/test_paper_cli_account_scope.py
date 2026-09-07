@@ -137,11 +137,15 @@ def _fake_valuation(state, snapshot_date: str, db_path: Path) -> PaperAccountVal
 
 def test_status_uses_account_paths_and_defaults_to_paper_default(monkeypatch):
     captured: dict[str, object] = {}
-    paths = _account_paths("paper_default", Path("outputs/paper_test"), legacy_default_used=True)
+    paths = _account_paths(
+        "paper_default",
+        Path("outputs/paper_accounts/paper_default"),
+        legacy_default_used=False,
+    )
 
-    def fake_build_paper_account_paths(account_id=None, *, create: bool = False):
+    def fake_resolve_paper_read_account_paths(account_id=None, *, legacy_read: bool = False):
         captured["account_id"] = account_id
-        captured["create"] = create
+        captured["legacy_read"] = legacy_read
         return paths
 
     def fake_run_paper_status(date_str=None, *, account_paths=None, paper_root=None):
@@ -169,20 +173,19 @@ def test_status_uses_account_paths_and_defaults_to_paper_default(monkeypatch):
             "errors": [],
         }
 
-    monkeypatch.setattr(paper, "build_paper_account_paths", fake_build_paper_account_paths)
+    monkeypatch.setattr(paper, "resolve_paper_read_account_paths", fake_resolve_paper_read_account_paths)
     monkeypatch.setattr(paper, "run_paper_status", fake_run_paper_status)
 
     exit_code = paper.main(["status", "--json"])
     assert exit_code == 0
     assert captured["account_id"] is None
-    assert captured["create"] is False
+    assert captured["legacy_read"] is False
     assert captured["status_account_id"] == "paper_default"
     assert captured["paper_root"] is None
 
 
-def test_status_invalid_account_id_raises():
-    with pytest.raises(ValueError):
-        paper.main(["status", "--account-id", "Paper Default"])
+def test_status_invalid_account_id_fails_closed():
+    assert paper.main(["status", "--account-id", "Paper Default"]) == 1
 
 
 def test_weekly_status_passes_account_paths(monkeypatch):
@@ -191,7 +194,9 @@ def test_weekly_status_passes_account_paths(monkeypatch):
     paths = _account_paths("paper_growth", root)
 
     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id=None, *, create=False: paths)
-    monkeypatch.setattr(Path, "exists", lambda self: True if self == root else Path.__dict__["exists"](self))
+    monkeypatch.setattr(paper, "require_initialized_output_account_paths", lambda paths, **kwargs: paths)
+    original_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self: True if self == root else original_exists(self))
 
     def fake_generate_paper_weekly_status(*, days, start, end, account_paths=None, paper_root=None):
         captured["days"] = days
@@ -222,7 +227,9 @@ def test_benchmark_passes_account_paths(monkeypatch):
     paths = _account_paths("paper_growth", root)
 
     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id=None, *, create=False: paths)
-    monkeypatch.setattr(Path, "exists", lambda self: True if self == root else Path.__dict__["exists"](self))
+    monkeypatch.setattr(paper, "require_initialized_output_account_paths", lambda paths, **kwargs: paths)
+    original_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self: True if self == root else original_exists(self))
 
     def fake_generate_paper_benchmark_comparison(*, account_paths=None, paper_root=None, market_db=None):
         captured["account_id"] = account_paths.account_id
@@ -248,16 +255,17 @@ def test_benchmark_passes_account_paths(monkeypatch):
     assert captured == {"account_id": "paper_growth", "paper_root": None}
 
 
-def test_missing_non_default_root_returns_no_data_without_creation(monkeypatch, capsys):
+def test_missing_non_default_root_fails_closed_without_creation(monkeypatch, capsys):
     root = Path("outputs/paper_accounts/paper_growth")
     paths = _account_paths("paper_growth", root)
     monkeypatch.setattr(paper, "build_paper_account_paths", lambda account_id=None, *, create=False: paths)
-    monkeypatch.setattr(Path, "exists", lambda self: False if self == root else Path.__dict__["exists"](self))
+    original_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self: False if self == root else original_exists(self))
 
     exit_code = paper.main(["benchmark", "--account-id", "paper_growth", "--json"])
     output = capsys.readouterr().out
     assert exit_code == 1
-    assert '"availability_status": "NO_DATA"' in output
+    assert "requires an initialized account root" in output
 
 
 def test_eod_dry_run_preflight_uses_non_default_account_paths(tmp_path, monkeypatch):

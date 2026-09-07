@@ -10,7 +10,7 @@ from scripts import export_paper_to_notion
 
 def test_daily_ops_status_cli_requires_dry_run(capsys):
     with pytest.raises(SystemExit) as excinfo:
-        export_paper_to_notion.main(["--daily-ops-status"])
+        export_paper_to_notion.main(["--daily-ops-status", "--account-id", "paper_sandbox"])
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
     assert "--dry-run or --confirm-actual is required for --daily-ops-status" in err

@@ -35,7 +35,11 @@ load_dotenv()
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Export selected paper reports to Notion")
-    parser.add_argument("--account-id", help="Paper account id for account-aware External Key and Account ID payload")
+    parser.add_argument(
+        "--account-id",
+        required=True,
+        help="Explicit paper account id for source and export identity",
+    )
     parser.add_argument("--weekly", action="store_true", help="Export weekly status report")
     parser.add_argument("--benchmark", action="store_true", help="Export benchmark report")
     parser.add_argument("--account-snapshot", action="store_true", help="Export latest account snapshot")

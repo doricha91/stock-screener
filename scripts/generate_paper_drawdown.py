@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import csv
+import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.paper_account_paths import PaperAccountPaths
-from core.paths import PAPER_TEST_DIR
-
-
-REPORTS_DIR = PAPER_TEST_DIR / "reports"
-EQUITY_CURVE_PATH = REPORTS_DIR / "paper_equity_curve.csv"
-PAPER_DRAWDOWN_PATH = REPORTS_DIR / "paper_drawdown.csv"
-PAPER_DRAWDOWN_SUMMARY_PATH = REPORTS_DIR / "paper_drawdown_summary.md"
+from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
+from core.paper_account_guard import require_initialized_output_account_paths
 
 REQUIRED_EQUITY_COLUMNS = [
     "snapshot_date",
@@ -69,7 +64,7 @@ def to_float(value: Any, column_name: str) -> float:
         raise ValueError(f"invalid numeric in {column_name}: {value}") from exc
 
 
-def load_equity_curve(path: Path = EQUITY_CURVE_PATH) -> list[dict[str, str]]:
+def load_equity_curve(path: Path) -> list[dict[str, str]]:
     rows = read_csv_rows(path)
     if not rows:
         raise ValueError("paper_equity_curve.csv is empty")
@@ -165,7 +160,7 @@ def summarize_drawdown(drawdown_rows: list[dict[str, Any]], warnings: list[str])
     }
 
 
-def save_drawdown(rows: list[dict[str, Any]], output_path: Path = PAPER_DRAWDOWN_PATH) -> None:
+def save_drawdown(rows: list[dict[str, Any]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=PAPER_DRAWDOWN_COLUMNS)
@@ -184,7 +179,7 @@ def save_drawdown(rows: list[dict[str, Any]], output_path: Path = PAPER_DRAWDOWN
             writer.writerow(serialized)
 
 
-def save_drawdown_summary(summary: dict[str, Any], output_path: Path = PAPER_DRAWDOWN_SUMMARY_PATH) -> None:
+def save_drawdown_summary(summary: dict[str, Any], output_path: Path) -> None:
     lines = [
         "# Paper Drawdown Summary",
         "",
@@ -211,9 +206,9 @@ def save_drawdown_summary(summary: dict[str, Any], output_path: Path = PAPER_DRA
 
 
 def generate_paper_drawdown(
-    equity_curve_path: Path = EQUITY_CURVE_PATH,
-    output_path: Path = PAPER_DRAWDOWN_PATH,
-    summary_path: Path = PAPER_DRAWDOWN_SUMMARY_PATH,
+    equity_curve_path: Path,
+    output_path: Path,
+    summary_path: Path,
 ) -> dict[str, Any]:
     equity_rows = load_equity_curve(equity_curve_path)
     drawdown_rows, warnings = build_paper_drawdown(equity_rows)
@@ -232,18 +227,25 @@ def generate_paper_drawdown(
 def generate_paper_drawdown_for_account(
     account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
-    if account_paths is not None and account_paths.account_id != "paper_default":
-        reports_dir = account_paths.reports_dir
-        return generate_paper_drawdown(
-            equity_curve_path=reports_dir / "paper_equity_curve.csv",
-            output_path=reports_dir / "paper_drawdown.csv",
-            summary_path=reports_dir / "paper_drawdown_summary.md",
-        )
-    return generate_paper_drawdown()
+    account_paths = require_initialized_output_account_paths(
+        account_paths,
+        command_name="generate_paper_drawdown_for_account",
+    )
+    reports_dir = account_paths.reports_dir
+    return generate_paper_drawdown(
+        equity_curve_path=reports_dir / "paper_equity_curve.csv",
+        output_path=reports_dir / "paper_drawdown.csv",
+        summary_path=reports_dir / "paper_drawdown_summary.md",
+    )
 
 
-def main() -> int:
-    result = generate_paper_drawdown()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate a paper-account drawdown report.")
+    parser.add_argument("--account-id", required=True)
+    args = parser.parse_args(argv)
+    result = generate_paper_drawdown_for_account(
+        build_paper_account_paths(args.account_id, create=False)
+    )
     print("Paper drawdown generated")
     print(f"  output_path: {result['output_path']}")
     print(f"  summary_path: {result['summary_path']}")

@@ -9,6 +9,7 @@ from core.paper_state_provider import (
     load_official_paper_state_for_daily_plan,
     load_paper_execution_rows_for_state,
 )
+from core.paper_account_paths import build_paper_account_paths
 
 
 @pytest.fixture
@@ -34,6 +35,7 @@ def _write_execution_log(path: Path, rows: list[dict]) -> None:
 
 def test_load_paper_execution_rows_for_state_reads_csv(tmp_path: Path):
     log_path = tmp_path / "paper_execution_log.csv"
+    account_paths = build_paper_account_paths("paper_sandbox", account_root=tmp_path, create=False)
     _write_execution_log(
         log_path,
         [
@@ -49,7 +51,7 @@ def test_load_paper_execution_rows_for_state_reads_csv(tmp_path: Path):
         ],
     )
 
-    rows = load_paper_execution_rows_for_state(log_path=log_path)
+    rows = load_paper_execution_rows_for_state(log_path=log_path, account_paths=account_paths)
 
     assert len(rows) == 1
     assert rows[0]["symbol"] == "CPAY"
@@ -57,6 +59,7 @@ def test_load_paper_execution_rows_for_state_reads_csv(tmp_path: Path):
 
 def test_load_official_paper_state_for_daily_plan_maps_cash_and_holdings_from_prior_trades(tmp_path: Path):
     log_path = tmp_path / "paper_execution_log.csv"
+    account_paths = build_paper_account_paths("paper_sandbox", account_root=tmp_path, create=False)
     _write_execution_log(
         log_path,
         [
@@ -81,7 +84,9 @@ def test_load_official_paper_state_for_daily_plan_maps_cash_and_holdings_from_pr
         ],
     )
 
-    state = load_official_paper_state_for_daily_plan("20260510", log_path=log_path)
+    state = load_official_paper_state_for_daily_plan(
+        "20260510", log_path=log_path, account_paths=account_paths
+    )
 
     assert state.absolute_cash == 98000.0
     assert state.current_symbols == ["CPAY", "GEN"]

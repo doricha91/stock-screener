@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import scripts.dev.replay_daily_plan_diff as replay_wrapper
+from core import paper_replay_diff
 from core.paper_replay_diff import (
     CATEGORY_ACCOUNT_DATE_MISMATCH,
     CATEGORY_CONFIG_OR_UNIVERSE_DIFF,
@@ -15,6 +16,14 @@ from core.paper_replay_diff import (
     STATUS_PASS,
     STATUS_WARNING,
 )
+from tests.paper_account_test_support import create_initialized_account_paths
+
+
+@pytest.fixture(autouse=True)
+def _initialized_replay_account(monkeypatch, tmp_path):
+    paths = create_initialized_account_paths(tmp_path, account_id="paper_sandbox")
+    monkeypatch.setattr(replay_wrapper, "build_paper_account_paths", lambda *args, **kwargs: paths)
+    monkeypatch.setattr(paper_replay_diff, "build_paper_account_paths", lambda *args, **kwargs: paths)
 
 
 def _sidecar(**overrides) -> dict:
@@ -55,7 +64,7 @@ def _patch_replay_generation(monkeypatch: pytest.MonkeyPatch, regenerated_payloa
     monkeypatch.setattr(
         replay_wrapper,
         "load_official_paper_state_for_daily_plan",
-        lambda plan_date: {"cash": 100000},
+        lambda plan_date, **kwargs: {"cash": 100000},
     )
 
     def _fake_generate_daily_plan(**kwargs):

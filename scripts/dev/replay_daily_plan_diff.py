@@ -13,6 +13,10 @@ if str(ROOT) not in sys.path:
 
 from core.daily_plan_generator import generate_daily_plan  # noqa: E402
 from core.paper_account_paths import build_paper_account_paths  # noqa: E402
+from core.paper_account_guard import (  # noqa: E402
+    assert_path_under_account_root,
+    require_initialized_output_account_paths,
+)
 from core.paper_replay_diff import (  # noqa: E402
     CATEGORY_ACCOUNT_DATE_MISMATCH,
     CATEGORY_MISSING_INPUT,
@@ -56,7 +60,13 @@ def run_replay_daily_plan_diff(
     plan_date = normalize_replay_diff_date(date)
     compact_date = compact_replay_diff_date(plan_date)
     baseline_path = Path(baseline_plan)
-    output_root = Path(output_dir) if output_dir is not None else build_paper_account_paths(account_id, create=True).replay_diff_dir
+    account_paths = build_paper_account_paths(account_id, create=False)
+    require_initialized_output_account_paths(
+        account_paths,
+        command_name="replay_daily_plan_diff",
+    )
+    output_root = Path(output_dir) if output_dir is not None else account_paths.replay_diff_dir
+    assert_path_under_account_root(output_root, account_paths.root)
     resolved_run_id = run_id or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     run_dir = output_root / "runs" / resolved_run_id
 
@@ -91,9 +101,12 @@ def run_replay_daily_plan_diff(
     run_dir.mkdir(parents=True, exist_ok=True)
     regenerated_markdown_path = run_dir / f"regenerated_daily_action_plan_{compact_date}.md"
     regenerated_config_path = run_dir / f"regenerated_paper_config_snapshot_{compact_date}.json"
-    regenerated_state_path = build_paper_account_paths(account_id, create=False).current_state_snapshot_path(plan_date)
+    regenerated_state_path = account_paths.current_state_snapshot_path(plan_date)
 
-    paper_state = load_official_paper_state_for_daily_plan(plan_date)
+    paper_state = load_official_paper_state_for_daily_plan(
+        plan_date,
+        account_paths=account_paths,
+    )
     generate_daily_plan(
         date_str=plan_date,
         current_state=paper_state,

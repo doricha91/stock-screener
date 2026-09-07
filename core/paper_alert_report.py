@@ -7,7 +7,10 @@ from pathlib import Path
 import re
 from typing import Any
 
-from core.paper_account_guard import assert_path_under_account_root
+from core.paper_account_guard import (
+    assert_path_under_account_root,
+    require_initialized_output_account_paths,
+)
 from core.paper_account_paths import build_paper_account_paths
 from core.paper_account_profile import validate_account_id
 
@@ -209,10 +212,13 @@ def build_paper_alert_report(
 def write_paper_alert_report(report: dict[str, Any], output_dir: str | Path | None = None) -> dict[str, str]:
     account_id = validate_account_id(str(report["account_id"]))
     report_date = normalize_alert_report_date(str(report["report_date"]))
-    target_dir = Path(output_dir) if output_dir is not None else default_alert_output_dir(account_id)
-    if output_dir is None:
-        account_root = build_paper_account_paths(account_id, create=False).root
-        assert_path_under_account_root(target_dir, account_root)
+    account_paths = build_paper_account_paths(account_id, create=False)
+    require_initialized_output_account_paths(
+        account_paths,
+        command_name="write_paper_alert_report",
+    )
+    target_dir = Path(output_dir) if output_dir is not None else account_paths.reports_dir / "alerts"
+    assert_path_under_account_root(target_dir, account_paths.root)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     date_key = compact_alert_report_date(report_date)

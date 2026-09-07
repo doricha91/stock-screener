@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from core.paper_weekly_status import build_paper_weekly_status_summary, generate_paper_weekly_status
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _write(path: Path, text: str) -> None:
@@ -157,7 +158,11 @@ def test_added_and_removed_symbols_are_computed(tmp_path):
 def test_markdown_and_json_files_are_generated(tmp_path):
     root = _build_root(tmp_path)
     _seed_base_dataset(root)
-    result = generate_paper_weekly_status(days=2, paper_root=root)
+    result = generate_paper_weekly_status(
+        days=2,
+        paper_root=root,
+        account_paths=ensure_initialized_account_paths(root, account_id="paper_sandbox"),
+    )
     assert result["markdown_path"].exists()
     assert result["json_path"].exists()
     payload = json.loads(result["json_path"].read_text(encoding="utf-8"))
@@ -205,7 +210,11 @@ def test_source_files_metadata_is_present(tmp_path):
 def test_markdown_mentions_schema_version_and_coverage_status(tmp_path):
     root = _build_root(tmp_path)
     _seed_base_dataset(root)
-    result = generate_paper_weekly_status(days=2, paper_root=root)
+    result = generate_paper_weekly_status(
+        days=2,
+        paper_root=root,
+        account_paths=ensure_initialized_account_paths(root, account_id="paper_sandbox"),
+    )
     text = result["markdown_path"].read_text(encoding="utf-8")
     assert "Schema version: paper_weekly_status.v1" in text
     assert "Coverage status: FULL" in text

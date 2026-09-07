@@ -15,6 +15,11 @@ def _allow_initialized_writer_context_for_cli_orchestration(monkeypatch):
         "require_initialized_writer_account_paths",
         lambda account_paths, **kwargs: account_paths,
     )
+    monkeypatch.setattr(
+        paper,
+        "require_initialized_output_account_paths",
+        lambda account_paths, **kwargs: account_paths,
+    )
 
 
 def test_help_shows_subcommands(capsys):
@@ -323,7 +328,7 @@ def test_weekly_status_calls_generator(monkeypatch):
         }
 
     monkeypatch.setattr(paper, "generate_paper_weekly_status", fake_generate_paper_weekly_status)
-    exit_code = paper.main(["weekly-status", "--days", "2"])
+    exit_code = paper.main(["weekly-status", "--account-id", "paper_cli_test", "--days", "2"])
     assert exit_code == 0
     assert captured == {"days": 2, "start": None, "end": None}
 
@@ -349,7 +354,7 @@ def test_weekly_status_does_not_call_writers(monkeypatch):
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", lambda *args, **kwargs: called.__setitem__("eod", True) or 0)
     monkeypatch.setattr(paper, "run_report_chain", lambda: called.__setitem__("reports", True) or [])
     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", lambda: called.__setitem__("review_append", True) or {})
-    exit_code = paper.main(["weekly-status"])
+    exit_code = paper.main(["weekly-status", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert called == {"prepare": False, "plan": False, "eod": False, "reports": False, "review_append": False}
 
@@ -372,7 +377,7 @@ def test_benchmark_calls_generator(monkeypatch):
         }
 
     monkeypatch.setattr(paper, "generate_paper_benchmark_comparison", fake_generate_paper_benchmark_comparison)
-    exit_code = paper.main(["benchmark"])
+    exit_code = paper.main(["benchmark", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert called["benchmark"] is True
 
@@ -393,7 +398,7 @@ def test_benchmark_json_prints_payload(monkeypatch, capsys):
             },
         },
     )
-    exit_code = paper.main(["benchmark", "--json"])
+    exit_code = paper.main(["benchmark", "--account-id", "paper_cli_test", "--json"])
     output = capsys.readouterr().out
     assert exit_code == 0
     assert '"schema_version": "paper_benchmark_comparison.v1"' in output
@@ -424,7 +429,7 @@ def test_benchmark_does_not_call_writers(monkeypatch):
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", lambda *args, **kwargs: called.__setitem__("eod", True) or 0)
     monkeypatch.setattr(paper, "run_report_chain", lambda: called.__setitem__("reports", True) or [])
     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", lambda: called.__setitem__("review_append", True) or {})
-    exit_code = paper.main(["benchmark"])
+    exit_code = paper.main(["benchmark", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert called == {"prepare": False, "plan": False, "eod": False, "reports": False, "review_append": False}
 
@@ -1205,7 +1210,7 @@ def test_reports_runs_preflight_first(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_report_chain", fake_run_report_chain)
-    exit_code = paper.main(["reports"])
+    exit_code = paper.main(["reports", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert order == ["preflight", "reports"]
 
@@ -1230,7 +1235,7 @@ def test_reports_aborts_when_preflight_fails(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_report_chain", fake_run_report_chain)
-    exit_code = paper.main(["reports"])
+    exit_code = paper.main(["reports", "--account-id", "paper_cli_test"])
     assert exit_code == 1
     assert called["reports"] is False
 
@@ -1255,7 +1260,7 @@ def test_reports_runs_on_pass_with_warnings_in_non_strict(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_report_chain", fake_run_report_chain)
-    exit_code = paper.main(["reports"])
+    exit_code = paper.main(["reports", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert called["reports"] is True
 
@@ -1280,7 +1285,7 @@ def test_reports_strict_blocks_on_warnings(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_report_chain", fake_run_report_chain)
-    exit_code = paper.main(["reports", "--strict"])
+    exit_code = paper.main(["reports", "--strict", "--account-id", "paper_cli_test"])
     assert exit_code == 1
     assert called["reports"] is False
 
@@ -1306,7 +1311,7 @@ def test_report_step_failure_stops_chain(monkeypatch):
             {"step_name": "drawdown", "status": "failed", "exit_code": 1, "message": "boom"},
         ],
     )
-    exit_code = paper.main(["reports"])
+    exit_code = paper.main(["reports", "--account-id", "paper_cli_test"])
     assert exit_code == 1
 
 
@@ -1351,7 +1356,7 @@ def test_reports_does_not_call_eod_commit(monkeypatch):
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_report_chain", fake_run_report_chain)
     monkeypatch.setattr(paper, "run_paper_eod_dry_run", fake_run_paper_eod_dry_run)
-    exit_code = paper.main(["reports"])
+    exit_code = paper.main(["reports", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert called["eod"] is False
 
@@ -1380,7 +1385,7 @@ def test_reports_does_not_call_review_append(monkeypatch):
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "run_report_chain", fake_run_report_chain)
     monkeypatch.setattr(paper, "append_paper_manual_review_log_from_template", fake_append)
-    exit_code = paper.main(["reports"])
+    exit_code = paper.main(["reports", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert called["append"] is False
 
@@ -1410,7 +1415,7 @@ def test_review_template_runs_preflight_first(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "generate_paper_manual_review_log_template", fake_generate_template)
-    exit_code = paper.main(["review-template"])
+    exit_code = paper.main(["review-template", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert order == ["preflight", "template"]
 
@@ -1435,7 +1440,7 @@ def test_review_template_aborts_when_preflight_fails(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "generate_paper_manual_review_log_template", fake_generate_template)
-    exit_code = paper.main(["review-template"])
+    exit_code = paper.main(["review-template", "--account-id", "paper_cli_test"])
     assert exit_code == 1
     assert called["template"] is False
 
@@ -1464,7 +1469,7 @@ def test_review_template_calls_existing_generator_on_pass(monkeypatch):
 
     monkeypatch.setattr(paper, "run_paper_preflight_check", fake_run_preflight_check)
     monkeypatch.setattr(paper, "generate_paper_manual_review_log_template", fake_generate_template)
-    exit_code = paper.main(["review-template"])
+    exit_code = paper.main(["review-template", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert called["template"] is True
 
@@ -1486,7 +1491,7 @@ def test_review_validate_calls_existing_validator(monkeypatch):
         }
 
     monkeypatch.setattr(paper, "validate_paper_manual_review_log", fake_validate)
-    exit_code = paper.main(["review-validate"])
+    exit_code = paper.main(["review-validate", "--account-id", "paper_cli_test"])
     assert exit_code == 0
     assert called["validate"] is True
 
@@ -1505,7 +1510,7 @@ def test_review_validate_returns_one_on_errors(monkeypatch):
         }
 
     monkeypatch.setattr(paper, "validate_paper_manual_review_log", fake_validate)
-    exit_code = paper.main(["review-validate"])
+    exit_code = paper.main(["review-validate", "--account-id", "paper_cli_test"])
     assert exit_code == 1
 
 

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from core import paper_alert_report
+from tests.paper_account_test_support import create_initialized_account_paths
+
 from core.paper_alert_report import (
     ALERT_REPORT_SCHEMA_VERSION,
     SEVERITY_BLOCKING,
@@ -13,6 +18,12 @@ from core.paper_alert_report import (
     write_paper_alert_report,
 )
 from scripts.dev.generate_paper_alert_report import main as alert_report_cli_main
+
+
+@pytest.fixture(autouse=True)
+def _initialized_alert_account(monkeypatch, tmp_path):
+    paths = create_initialized_account_paths(tmp_path, account_id="paper_sandbox")
+    monkeypatch.setattr(paper_alert_report, "build_paper_account_paths", lambda *args, **kwargs: paths)
 
 
 def _preflight_payload(

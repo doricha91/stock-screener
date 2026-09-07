@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 import csv
+import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.paper_account_paths import PaperAccountPaths
-from core.paths import PAPER_TEST_DIR
-
-
-ACCOUNT_SNAPSHOT_PATH = PAPER_TEST_DIR / "paper_account_snapshot.csv"
-POSITION_SNAPSHOT_PATH = PAPER_TEST_DIR / "paper_position_snapshot.csv"
-REPORTS_DIR = PAPER_TEST_DIR / "reports"
-EQUITY_CURVE_PATH = REPORTS_DIR / "paper_equity_curve.csv"
-EQUITY_CURVE_SUMMARY_PATH = REPORTS_DIR / "paper_equity_curve_summary.md"
+from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
+from core.paper_account_guard import require_initialized_output_account_paths
 TOLERANCE = 0.05
 
 REQUIRED_ACCOUNT_COLUMNS = [
@@ -78,7 +72,7 @@ def to_float(value: Any, column_name: str) -> float:
         raise ValueError(f"invalid numeric in {column_name}: {value}") from exc
 
 
-def load_account_snapshot(path: Path = ACCOUNT_SNAPSHOT_PATH) -> list[dict[str, str]]:
+def load_account_snapshot(path: Path) -> list[dict[str, str]]:
     rows = read_csv_rows(path)
     if not rows:
         raise ValueError("paper_account_snapshot.csv is empty")
@@ -99,7 +93,7 @@ def load_account_snapshot(path: Path = ACCOUNT_SNAPSHOT_PATH) -> list[dict[str, 
     return sorted(rows, key=lambda row: row["snapshot_date"])
 
 
-def load_open_position_counts(path: Path = POSITION_SNAPSHOT_PATH) -> dict[str, int]:
+def load_open_position_counts(path: Path) -> dict[str, int]:
     if not path.exists():
         return {}
     rows = read_csv_rows(path)
@@ -196,7 +190,7 @@ def build_paper_equity_curve(
     return curve_rows, warnings
 
 
-def save_equity_curve(rows: list[dict[str, Any]], output_path: Path = EQUITY_CURVE_PATH) -> None:
+def save_equity_curve(rows: list[dict[str, Any]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=EQUITY_CURVE_COLUMNS)
@@ -215,7 +209,7 @@ def save_equity_curve(rows: list[dict[str, Any]], output_path: Path = EQUITY_CUR
 def save_equity_curve_summary(
     curve_rows: list[dict[str, Any]],
     warnings: list[str],
-    output_path: Path = EQUITY_CURVE_SUMMARY_PATH,
+    output_path: Path,
 ) -> None:
     latest = curve_rows[-1]
     lines = [
@@ -239,10 +233,10 @@ def save_equity_curve_summary(
 
 
 def generate_paper_equity_curve(
-    account_snapshot_path: Path = ACCOUNT_SNAPSHOT_PATH,
-    position_snapshot_path: Path = POSITION_SNAPSHOT_PATH,
-    output_path: Path = EQUITY_CURVE_PATH,
-    summary_path: Path = EQUITY_CURVE_SUMMARY_PATH,
+    account_snapshot_path: Path,
+    position_snapshot_path: Path,
+    output_path: Path,
+    summary_path: Path,
 ) -> dict[str, Any]:
     account_rows = load_account_snapshot(account_snapshot_path)
     position_open_counts = load_open_position_counts(position_snapshot_path)
@@ -261,18 +255,25 @@ def generate_paper_equity_curve(
 def generate_paper_equity_curve_for_account(
     account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
-    if account_paths is not None and account_paths.account_id != "paper_default":
-        return generate_paper_equity_curve(
-            account_snapshot_path=account_paths.account_snapshot_path,
-            position_snapshot_path=account_paths.position_snapshot_path,
-            output_path=account_paths.reports_dir / "paper_equity_curve.csv",
-            summary_path=account_paths.reports_dir / "paper_equity_curve_summary.md",
-        )
-    return generate_paper_equity_curve()
+    account_paths = require_initialized_output_account_paths(
+        account_paths,
+        command_name="generate_paper_equity_curve_for_account",
+    )
+    return generate_paper_equity_curve(
+        account_snapshot_path=account_paths.account_snapshot_path,
+        position_snapshot_path=account_paths.position_snapshot_path,
+        output_path=account_paths.reports_dir / "paper_equity_curve.csv",
+        summary_path=account_paths.reports_dir / "paper_equity_curve_summary.md",
+    )
 
 
-def main() -> int:
-    result = generate_paper_equity_curve()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate a paper-account equity curve.")
+    parser.add_argument("--account-id", required=True)
+    args = parser.parse_args(argv)
+    result = generate_paper_equity_curve_for_account(
+        build_paper_account_paths(args.account_id, create=False)
+    )
     print("Paper equity curve generated")
     print(f"  output_path: {result['output_path']}")
     print(f"  summary_path: {result['summary_path']}")

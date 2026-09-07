@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import argparse
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -8,15 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.paper_account_guard import require_initialized_output_account_paths
+from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
 from core.paper_account_state import build_paper_state_from_trades
-from core.paths import PAPER_TEST_DIR
-
-
-REPORTS_DIR = PAPER_TEST_DIR / "reports"
-ACCOUNT_SNAPSHOT_PATH = PAPER_TEST_DIR / "paper_account_snapshot.csv"
-POSITION_SNAPSHOT_PATH = PAPER_TEST_DIR / "paper_position_snapshot.csv"
-EXECUTION_LOG_PATH = PAPER_TEST_DIR / "paper_execution_log.csv"
-AUDIT_REPORT_PATH = REPORTS_DIR / "paper_performance_input_audit.md"
 TOLERANCE = 0.05
 
 REQUIRED_ACCOUNT_COLUMNS = [
@@ -437,11 +432,28 @@ def render_report(
 
 
 def run_audit(
-    account_snapshot_path: Path = ACCOUNT_SNAPSHOT_PATH,
-    position_snapshot_path: Path = POSITION_SNAPSHOT_PATH,
-    execution_log_path: Path = EXECUTION_LOG_PATH,
-    report_path: Path = AUDIT_REPORT_PATH,
+    account_snapshot_path: Path | None = None,
+    position_snapshot_path: Path | None = None,
+    execution_log_path: Path | None = None,
+    report_path: Path | None = None,
+    *,
+    account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
+    if account_paths is not None:
+        account_paths = require_initialized_output_account_paths(
+            account_paths,
+            command_name="audit_paper_performance_inputs",
+        )
+        account_snapshot_path = account_snapshot_path or account_paths.account_snapshot_path
+        position_snapshot_path = position_snapshot_path or account_paths.position_snapshot_path
+        execution_log_path = execution_log_path or account_paths.execution_log_path
+        report_path = report_path or account_paths.reports_dir / "paper_performance_input_audit.md"
+    if None in (account_snapshot_path, position_snapshot_path, execution_log_path, report_path):
+        raise ValueError("run_audit requires explicit artifact paths or initialized account_paths.")
+    assert account_snapshot_path is not None
+    assert position_snapshot_path is not None
+    assert execution_log_path is not None
+    assert report_path is not None
     account_rows = read_csv_rows(account_snapshot_path)
     position_rows = read_csv_rows(position_snapshot_path)
     execution_rows = read_csv_rows(execution_log_path)
@@ -476,8 +488,13 @@ def run_audit(
     }
 
 
-def main() -> None:
-    result = run_audit()
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Audit paper-account performance inputs.")
+    parser.add_argument("--account-id", required=True)
+    args = parser.parse_args(argv)
+    result = run_audit(
+        account_paths=build_paper_account_paths(args.account_id, create=False),
+    )
     print(f"Audit report written: {result['report_path']}")
     print(f"Issue count: {len(result['issues'])}")
 

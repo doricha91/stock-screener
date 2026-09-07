@@ -27,10 +27,14 @@ from core.paper_commit_guard import PaperCommitGuardPaths, check_same_date_commi
 from core.paper_status import format_paper_status, paper_status_to_json, run_paper_status  # noqa: E402
 from core.paper_weekly_status import generate_paper_weekly_status  # noqa: E402
 from core.paper_benchmark_comparison import generate_paper_benchmark_comparison  # noqa: E402
-from core.paper_account_paths import build_paper_account_paths  # noqa: E402
+from core.paper_account_paths import (  # noqa: E402
+    build_paper_account_paths,
+    resolve_paper_read_account_paths,
+)
 from core.paper_account_guard import (  # noqa: E402
     format_writer_account_guard_message,
     guard_paper_writer_account,
+    require_initialized_output_account_paths,
     require_initialized_writer_account_paths,
 )
 from core.paper_account_bootstrap import (  # noqa: E402
@@ -42,7 +46,6 @@ from core.paper_prepare_data import (  # noqa: E402
     run_paper_prepare_data,
 )
 from core.stage_a_asof_contract import StageAAsOfContractError  # noqa: E402
-from core.paths import PAPER_TEST_DIR  # noqa: E402
 from scripts.generate_paper_daily_review_summary import generate_paper_daily_review_summary  # noqa: E402
 from scripts.generate_paper_drawdown import generate_paper_drawdown_for_account  # noqa: E402
 from scripts.generate_paper_manual_review_log_template import generate_paper_manual_review_log_template  # noqa: E402
@@ -167,10 +170,14 @@ def _print_preflight_summary(summary: dict) -> None:
         print("  issues: none")
 
 
-def _maybe_write_preflight_report(summary: dict, write_report: bool) -> None:
+def _maybe_write_preflight_report(summary: dict, write_report: bool, *, account_paths=None) -> None:
     if not write_report:
         return
-    reports_dir = PAPER_TEST_DIR / "reports"
+    account_paths = require_initialized_output_account_paths(
+        account_paths,
+        command_name="paper.py preflight --write-report",
+    )
+    reports_dir = account_paths.reports_dir
     markdown_path = reports_dir / REPORT_PATH_NAMES["markdown"]
     issues_path = reports_dir / REPORT_PATH_NAMES["issues"]
     write_markdown(markdown_path, render_paper_preflight_report(summary))
@@ -192,24 +199,45 @@ def run_preflight(
             date_str=date_str,
             strict=strict,
         )
-    else:
+    elif "account_paths" in inspect.signature(run_paper_preflight_check).parameters:
         summary = run_paper_preflight_check(
             stage=stage,
             date_str=date_str,
             strict=strict,
             account_paths=account_paths,
         )
+    else:
+        summary = run_paper_preflight_check(
+            stage=stage,
+            date_str=date_str,
+            strict=strict,
+        )
     _print_preflight_summary(summary)
-    _maybe_write_preflight_report(summary, write_report)
+    _maybe_write_preflight_report(summary, write_report, account_paths=account_paths)
     return summary
 
 
 def handle_preflight(args: argparse.Namespace) -> int:
+    account_paths = None
+    if args.write_report:
+        if not args.account_id:
+            print("Paper preflight report requires --account-id.")
+            return 2
+        try:
+            account_paths = build_paper_account_paths(args.account_id, create=False)
+            require_initialized_output_account_paths(
+                account_paths,
+                command_name="paper.py preflight --write-report",
+            )
+        except ValueError as exc:
+            print(f"Paper preflight aborted: {exc}")
+            return 1
     summary = run_preflight(
         stage=args.stage,
         date_str=args.date,
         strict=args.strict,
         write_report=args.write_report,
+        account_paths=account_paths,
     )
     return 1 if summary["result"] == "FAIL" else 0
 
@@ -470,7 +498,14 @@ def _review_shortcut_json_summary(
 
 
 def handle_status(args: argparse.Namespace) -> int:
-    account_paths = build_paper_account_paths(args.account_id, create=False)
+    try:
+        account_paths = resolve_paper_read_account_paths(
+            args.account_id,
+            legacy_read=bool(getattr(args, "legacy_read", False)),
+        )
+    except ValueError as exc:
+        print(f"Paper status aborted: {exc}")
+        return 1
     status = _call_with_optional_account_paths(
         run_paper_status,
         args.date,
@@ -511,22 +546,14 @@ def handle_init_account(args: argparse.Namespace) -> int:
 
 
 def handle_weekly_status(args: argparse.Namespace) -> int:
-    account_paths = build_paper_account_paths(args.account_id, create=False)
-    if not account_paths.root.exists():
-        summary = {
-            "account_id": account_paths.account_id,
-            "account_root": str(account_paths.root),
-            "legacy_default_used": account_paths.legacy_default_used,
-            "status": "NO_DATA",
-            "message": f"Account root does not exist: {account_paths.root}",
-        }
-        print("PAPER WEEKLY STATUS")
-        print(f"  account_id: {summary['account_id']}")
-        print(f"  account_root: {summary['account_root']}")
-        print(f"  status: {summary['status']}")
-        print(f"  message: {summary['message']}")
-        if args.json:
-            print(json.dumps(summary, ensure_ascii=False, indent=2))
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        require_initialized_output_account_paths(
+            account_paths,
+            command_name="paper.py weekly-status",
+        )
+    except ValueError as exc:
+        print(f"Paper weekly-status aborted: {exc}")
         return 1
     result = _call_with_optional_account_paths(
         generate_paper_weekly_status,
@@ -554,22 +581,14 @@ def handle_weekly_status(args: argparse.Namespace) -> int:
 
 
 def handle_benchmark(args: argparse.Namespace) -> int:
-    account_paths = build_paper_account_paths(args.account_id, create=False)
-    if not account_paths.root.exists():
-        summary = {
-            "account_id": account_paths.account_id,
-            "account_root": str(account_paths.root),
-            "legacy_default_used": account_paths.legacy_default_used,
-            "availability_status": "NO_DATA",
-            "message": f"Account root does not exist: {account_paths.root}",
-        }
-        print("PAPER BENCHMARK COMPARISON")
-        print(f"  account_id: {summary['account_id']}")
-        print(f"  account_root: {summary['account_root']}")
-        print(f"  availability_status: {summary['availability_status']}")
-        print(f"  message: {summary['message']}")
-        if args.json:
-            print(json.dumps(summary, ensure_ascii=False, indent=2))
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        require_initialized_output_account_paths(
+            account_paths,
+            command_name="paper.py benchmark",
+        )
+    except ValueError as exc:
+        print(f"Paper benchmark aborted: {exc}")
         return 1
     result = _call_with_optional_account_paths(
         generate_paper_benchmark_comparison,
@@ -807,9 +826,12 @@ def run_report_chain(account_paths=None) -> list[dict[str, object]]:
 
 
 def handle_reports(args: argparse.Namespace) -> int:
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=True)
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        require_initialized_output_account_paths(account_paths, command_name="paper.py reports")
+    except ValueError as exc:
+        print(f"Paper reports aborted: {exc}")
+        return 1
     summary = run_preflight(
         stage="reports",
         date_str=None,
@@ -841,9 +863,15 @@ def handle_review_template(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Paper review-template aborted: {exc}")
         return 1
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=True)
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        require_initialized_output_account_paths(
+            account_paths,
+            command_name="paper.py review-template",
+        )
+    except ValueError as exc:
+        print(f"Paper review-template aborted: {exc}")
+        return 1
     summary = run_preflight(
         stage="review-template",
         date_str=review_date,
@@ -870,9 +898,15 @@ def handle_review_template(args: argparse.Namespace) -> int:
 
 
 def handle_review_validate(args: argparse.Namespace) -> int:
-    account_paths = None
-    if args.account_id and args.account_id != "paper_default":
-        account_paths = build_paper_account_paths(args.account_id, create=True)
+    try:
+        account_paths = build_paper_account_paths(args.account_id, create=False)
+        require_initialized_output_account_paths(
+            account_paths,
+            command_name="paper.py review-validate",
+        )
+    except ValueError as exc:
+        print(f"Paper review-validate aborted: {exc}")
+        return 1
     result = _call_with_optional_account_paths(validate_paper_manual_review_log, account_paths=account_paths)
     summary = result["summary"]
     print("PAPER REVIEW VALIDATE")
@@ -965,6 +999,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status_parser.add_argument("--date", help="Target date (YYYYMMDD or YYYY-MM-DD)")
     status_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    status_parser.add_argument(
+        "--legacy-read",
+        action="store_true",
+        help="Read legacy outputs/paper_test explicitly; paper_default and read-only status only.",
+    )
     status_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON output")
     status_parser.add_argument("--verbose", action="store_true", help="Print extra status details")
     status_parser.set_defaults(handler=handle_status)
@@ -990,7 +1029,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_status_parser.add_argument("--days", type=int, default=5, help="Use the latest N snapshot_date rows")
     weekly_status_parser.add_argument("--start", help="Inclusive snapshot_date start (YYYYMMDD or YYYY-MM-DD)")
     weekly_status_parser.add_argument("--end", help="Inclusive snapshot_date end (YYYYMMDD or YYYY-MM-DD)")
-    weekly_status_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    weekly_status_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     weekly_status_parser.add_argument("--json", action="store_true", help="Print JSON summary to stdout after writing files")
     weekly_status_parser.set_defaults(handler=handle_weekly_status)
 
@@ -998,7 +1037,7 @@ def build_parser() -> argparse.ArgumentParser:
         "benchmark",
         help="Generate exploratory paper benchmark comparison markdown/json report",
     )
-    benchmark_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    benchmark_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     benchmark_parser.add_argument("--json", action="store_true", help="Print JSON summary to stdout after writing files")
     benchmark_parser.set_defaults(handler=handle_benchmark)
 
@@ -1031,7 +1070,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Paper workflow stage to validate",
     )
     preflight_parser.add_argument("--strict", action="store_true", help="Escalate warnings to errors")
-    preflight_parser.add_argument("--write-report", action="store_true", help="Write preflight report under outputs/paper_test/reports")
+    preflight_parser.add_argument("--write-report", action="store_true", help="Write a preflight report under the explicit account root")
+    preflight_parser.add_argument("--account-id", help="Initialized paper account id; required with --write-report")
     preflight_parser.set_defaults(handler=handle_preflight)
 
     plan_parser = subparsers.add_parser(
@@ -1070,7 +1110,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run paper report generator chain after automatic paper preflight",
     )
     reports_parser.add_argument("--strict", action="store_true", help="Treat preflight warnings as failures")
-    reports_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    reports_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     reports_parser.set_defaults(handler=handle_reports)
 
     review_parser = subparsers.add_parser(
@@ -1088,7 +1128,7 @@ def build_parser() -> argparse.ArgumentParser:
         "review-template",
         help="Run manual review log template generator after automatic paper preflight",
     )
-    review_template_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    review_template_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     review_template_parser.add_argument("--date", help="Review date / trade date (YYYYMMDD or YYYY-MM-DD)")
     review_template_parser.add_argument("--scope-manifest", help="Pinned canonical Daily Manual Review scope JSON")
     review_template_parser.set_defaults(handler=handle_review_template)
@@ -1097,7 +1137,7 @@ def build_parser() -> argparse.ArgumentParser:
         "review-validate",
         help="Run manual review log validator",
     )
-    review_validate_parser.add_argument("--account-id", help="Paper account id. Defaults to paper_default.")
+    review_validate_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     review_validate_parser.set_defaults(handler=handle_review_validate)
 
     review_append_parser = subparsers.add_parser(

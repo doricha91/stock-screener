@@ -7,6 +7,10 @@ from pathlib import Path
 import re
 from typing import Any
 
+from core.paper_account_guard import (
+    assert_path_under_account_root,
+    require_initialized_output_account_paths,
+)
 from core.paper_account_paths import build_paper_account_paths
 from core.paper_account_profile import validate_account_id
 
@@ -229,11 +233,17 @@ def compare_daily_plan_payloads(
 def write_daily_plan_diff_report(report: dict[str, Any], output_dir: str | Path | None = None) -> dict[str, str]:
     account_id = validate_account_id(str(report["account_id"]))
     plan_date = normalize_replay_diff_date(str(report["plan_date"]))
+    account_paths = build_paper_account_paths(account_id, create=False)
+    require_initialized_output_account_paths(
+        account_paths,
+        command_name="write_daily_plan_diff_report",
+    )
     if output_dir is None:
-        target_dir = build_paper_account_paths(account_id, create=True).replay_diff_dir
+        target_dir = account_paths.replay_diff_dir
     else:
         target_dir = Path(output_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
+    assert_path_under_account_root(target_dir, account_paths.root)
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     date_key = compact_replay_diff_date(plan_date)
     json_path = target_dir / f"paper_daily_plan_diff_{date_key}.json"

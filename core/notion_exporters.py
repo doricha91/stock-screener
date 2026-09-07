@@ -171,8 +171,6 @@ def _resolve_daily_plan_export_root(
 ) -> Path:
     if paper_root is not None:
         return Path(paper_root)
-    if account_id == "paper_default":
-        return paper_daily_action_plan_path("1970-01-01").parent
     return build_paper_account_paths(
         account_id,
         allow_legacy_default=False,
@@ -187,8 +185,6 @@ def _resolve_manual_review_template_root(
 ) -> Path:
     if paper_root is not None:
         return Path(paper_root)
-    if account_id == "paper_default":
-        return paper_reports_dir().parent
     return build_paper_account_paths(
         account_id,
         allow_legacy_default=False,
@@ -203,12 +199,6 @@ def _resolve_snapshot_export_root(
 ) -> Path:
     if paper_root is not None:
         return Path(paper_root)
-    if account_id == "paper_default":
-        return build_paper_account_paths(
-            account_id,
-            account_root=PAPER_TEST_DIR,
-            create=False,
-        ).root
     return build_paper_account_paths(
         account_id,
         allow_legacy_default=False,
@@ -1440,7 +1430,10 @@ def export_weekly_report_to_notion(
     dry_run: bool = False,
 ) -> ExportResult:
     resolved_account_id = normalize_notion_account_id(account_id)
-    root = Path(paper_root) if paper_root is not None else paper_reports_dir().parent
+    root = _resolve_snapshot_export_root(
+        account_id=resolved_account_id,
+        paper_root=paper_root,
+    )
     reports_dir = root / "reports"
     json_path = reports_dir / "paper_weekly_status_summary.json"
     markdown_path = reports_dir / "paper_weekly_status_summary.md"
@@ -1717,7 +1710,10 @@ def export_daily_review_summary_to_notion(
     dry_run: bool = False,
 ) -> ExportResult:
     resolved_account_id = normalize_notion_account_id(account_id)
-    root = Path(paper_root) if paper_root is not None else paper_reports_dir().parent
+    root = _resolve_manual_review_template_root(
+        account_id=resolved_account_id,
+        paper_root=paper_root,
+    )
     summary = build_daily_review_summary(review_date=review_date, paper_root=root)
     mapping = get_mapping_section(mapping_root, "daily_review_summaries")
     synced_at = datetime.now(timezone.utc).isoformat()

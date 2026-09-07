@@ -16,6 +16,7 @@ from scripts.generate_paper_symbol_review_buckets import generate_paper_symbol_r
 from scripts.generate_paper_symbol_review_worksheet import generate_paper_symbol_review_worksheet
 from scripts.generate_paper_symbol_side_by_side_performance import generate_paper_symbol_side_by_side_performance
 from scripts.generate_paper_symbol_unrealized_performance import generate_paper_symbol_unrealized_performance
+from tests.paper_account_test_support import ensure_initialized_account_paths
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:
@@ -92,6 +93,7 @@ def test_non_default_reports_chain_writes_only_under_account_root(tmp_path: Path
         ],
     )
     _write_csv(account_paths.execution_log_path, PAPER_EXECUTION_LOG_COLUMNS, [])
+    ensure_initialized_account_paths(account_paths.root, account_id="paper_growth")
 
     eq = generate_paper_equity_curve_for_account(account_paths=account_paths)
     dd = generate_paper_drawdown_for_account(account_paths=account_paths)

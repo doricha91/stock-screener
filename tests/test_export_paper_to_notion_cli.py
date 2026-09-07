@@ -57,31 +57,10 @@ def test_cli_passes_account_id_and_prints_account_aware_summary(monkeypatch, cap
     assert captured["daily_plan_date"] is None
 
 
-def test_cli_defaults_account_id_to_paper_default(monkeypatch):
-    captured: dict[str, object] = {}
-
-    def fake_load_settings(allow_missing=True):
-        return object()
-
-    def fake_load_mapping():
-        return {"weekly_reports": {}}
-
-    def fake_export_selected_paper_reports_to_notion(**kwargs):
-        captured.update(kwargs)
-        return []
-
-    monkeypatch.setattr(export_paper_to_notion, "load_notion_settings", fake_load_settings)
-    monkeypatch.setattr(export_paper_to_notion, "load_notion_property_mapping", fake_load_mapping)
-    monkeypatch.setattr(
-        export_paper_to_notion,
-        "export_selected_paper_reports_to_notion",
-        fake_export_selected_paper_reports_to_notion,
-    )
-
-    rc = export_paper_to_notion.main(["--weekly", "--dry-run"])
-
-    assert rc == 0
-    assert captured["account_id"] is None
+def test_cli_requires_account_id_for_output_export():
+    with pytest.raises(SystemExit) as excinfo:
+        export_paper_to_notion.main(["--weekly", "--dry-run"])
+    assert excinfo.value.code == 2
 
 
 def test_cli_passes_date_to_daily_plan_export(monkeypatch):
@@ -137,7 +116,10 @@ def test_cli_passes_expected_date_to_snapshot_export(monkeypatch):
     )
 
     rc = export_paper_to_notion.main(
-        ["--benchmark", "--account-snapshot", "--expected-date", "2026-06-15", "--dry-run"]
+        [
+            "--benchmark", "--account-snapshot", "--account-id", "paper_pilot_202606",
+            "--expected-date", "2026-06-15", "--dry-run",
+        ]
     )
 
     assert rc == 0

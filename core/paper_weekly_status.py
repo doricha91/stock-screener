@@ -7,7 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.paper_account_paths import PaperAccountPaths
+from core.paper_account_guard import require_initialized_output_account_paths
+from core.paper_account_paths import PaperAccountPaths, resolve_paper_read_account_paths
 from core.paths import PAPER_TEST_DIR, paper_account_snapshot_path, paper_execution_log_path, paper_position_snapshot_path, paper_reports_dir
 from core.paper_status import (
     WORKFLOW_COMMITTED,
@@ -659,7 +660,9 @@ def build_paper_weekly_status_summary(
     paper_root: Path | None = None,
     account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
-    root = account_paths.root if account_paths is not None else (Path(paper_root) if paper_root is not None else PAPER_TEST_DIR)
+    if account_paths is None and paper_root is None:
+        account_paths = resolve_paper_read_account_paths()
+    root = account_paths.root if account_paths is not None else Path(paper_root)
     reports_dir = root / "reports"
     reviews_dir = root / "reviews"
     account_rows = _read_csv_rows(root / paper_account_snapshot_path().name)
@@ -807,13 +810,19 @@ def generate_paper_weekly_status(
     paper_root: Path | None = None,
     account_paths: PaperAccountPaths | None = None,
 ) -> dict[str, Any]:
-    root = account_paths.root if account_paths is not None else (Path(paper_root) if paper_root is not None else PAPER_TEST_DIR)
+    context = require_initialized_output_account_paths(
+        account_paths,
+        command_name="generate_paper_weekly_status",
+    )
+    if paper_root is not None and Path(paper_root).resolve(strict=False) != context.root.resolve(strict=False):
+        raise ValueError("paper_root does not match account_paths.root.")
+    root = context.root
     summary = build_paper_weekly_status_summary(
         days=days,
         start=start,
         end=end,
         paper_root=paper_root,
-        account_paths=account_paths,
+        account_paths=context,
     )
     reports_dir = root / "reports"
     markdown_path, json_path = write_paper_weekly_status_outputs(summary, reports_dir=reports_dir)

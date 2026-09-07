@@ -125,6 +125,18 @@ def require_initialized_writer_account_paths(
     return account_paths
 
 
+def require_initialized_output_account_paths(
+    account_paths: PaperAccountPaths | None,
+    *,
+    command_name: str,
+) -> PaperAccountPaths:
+    """Require an explicit initialized canonical namespace for derived output."""
+    return require_initialized_writer_account_paths(
+        account_paths,
+        command_name=command_name,
+    )
+
+
 def _missing_bootstrap_core_artifacts(account_paths: PaperAccountPaths) -> list[str]:
     missing = [
         path.name

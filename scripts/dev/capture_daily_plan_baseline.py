@@ -13,6 +13,10 @@ if str(ROOT) not in sys.path:
 
 from core.daily_plan_generator import DAILY_PLAN_JSON_SCHEMA_VERSION, generate_daily_plan  # noqa: E402
 from core.paper_account_paths import build_paper_account_paths  # noqa: E402
+from core.paper_account_guard import (  # noqa: E402
+    assert_path_under_account_root,
+    require_initialized_output_account_paths,
+)
 from core.paper_state_provider import load_official_paper_state_for_daily_plan  # noqa: E402
 
 
@@ -50,16 +54,25 @@ def run_capture_daily_plan_baseline(
 ) -> tuple[dict[str, Any], int]:
     plan_date = _normalize_plan_date(date)
     compact_date = plan_date.replace("-", "")
+    account_paths = build_paper_account_paths(account_id, create=False)
+    require_initialized_output_account_paths(
+        account_paths,
+        command_name="capture_daily_plan_baseline",
+    )
     output_root = Path(output_dir)
+    assert_path_under_account_root(output_root, account_paths.root)
     output_root.mkdir(parents=True, exist_ok=True)
 
     markdown_path = output_root / f"daily_action_plan_{compact_date}.md"
     sidecar_json_path = markdown_path.with_suffix(".json")
     config_snapshot_path = output_root / "config_snapshots" / f"paper_config_snapshot_{compact_date}.json"
     config_snapshot_archive_dir = output_root / "archive" / "config_snapshots"
-    state_snapshot_path = build_paper_account_paths(account_id, create=False).current_state_snapshot_path(plan_date)
+    state_snapshot_path = account_paths.current_state_snapshot_path(plan_date)
 
-    paper_state = load_official_paper_state_for_daily_plan(plan_date)
+    paper_state = load_official_paper_state_for_daily_plan(
+        plan_date,
+        account_paths=account_paths,
+    )
     report_path = generate_daily_plan(
         date_str=plan_date,
         current_state=paper_state,
