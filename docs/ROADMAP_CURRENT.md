@@ -171,30 +171,29 @@ D:\n8n\workspace\stock_screener_ops\completion_manifests\paper_pilot_202606_2026
 
 ### P1
 
-기존 공식 P1인 `ACCT-01`, `REPLAY-01`, `NOTION-02`의 순서를 보존한다.
+`ACCT-01`은 closeout 완료로 현재 P1 실행 항목에서 제외한다. 기존 공식 P1의 다음 순서인 `REPLAY-01`, `NOTION-02`는 보존한다.
 
 ### 후속 단계
 
 | 순서 | Band | Initiative | 다음 종료 조건 / 의존성 |
 |---:|---|---|---|
-| 1 | P1 신뢰성 | `ACCT-01` | 모든 writer/reader/export/replay가 명시적 account root를 검증하고 조용한 legacy `paper_test` fallback을 제거한다. 다계좌 확대 blocker다. |
-| 2 | P1 신뢰성 | `REPLAY-01` | stable action identity와 동일 symbol/action 중복을 포함한 non-empty replay corpus로 순서 독립 matching을 입증한다. replay 기반 자동화 blocker다. |
-| 3 | P1 신뢰성 | `NOTION-02` | read-only schema/options/mapping preflight와 문서화된 view-drift 점검·FAIL/WARNING 대응을 운영 주기에 고정한다. Notion 의존 확대 blocker다. |
-| 4 | P2 운영 품질 | `OPS-04` -> `OBS-01` | retention/run index와 SLO/관측성을 먼저 고정해 실패·복구 evidence를 검색 가능하게 한다. |
-| 5 | P2 회귀 방지 | `TEST-01` | side-effect 분류와 격리가 입증된 suite부터 안전한 CI에 올린다. |
-| 6 | P2 read-only 자동화 | `AUTO-03` -> `AUTO-01` | read-only scheduling과 deployment/run evidence만 자동화한다. write stage 승인은 유지한다. |
-| 7 | P3 사용자 비교 | `BENCH-02` | cash-flow, dividend, fee, fractional-share 정책 승인 후 월적립식 SPY 비교를 설계·구현한다. |
-| 8 | P4 연구 기반 | `RG-01` -> `BT-01` | executable Research Gate를 만들고 IS/OOS를 walk-forward, plateau, cost/slippage/delay stress까지 확장한다. |
-| 9 | P4 데이터/설명 | `DQ-01` -> `PA-01` | 전체 데이터 lineage 계약을 좁은 MFU로 확장한 뒤 attribution 합계와 총손익 reconciliation을 구현한다. |
-| 10 | P5 확장 모델 | `PF-01` -> `RS-01` | `strategy_id` 귀속과 strategy-account ledger를 먼저 고정한 뒤 strategy/account HWM·drawdown을 영속화한다. |
-| 11 | P6 소비 계층 | `EV-01` -> `UI-01` | 공통 event/read model을 먼저 정의하고 read-only 운영 화면을 확장한다. |
-| 12 | P7 선택/장기 | `RF-01` -> `DA-01` -> `FA-01` | 검증 가능한 source와 Research Gate가 생긴 뒤 독립 MFU로 재평가한다. 현재 운영 blocker가 아니다. |
+| 1 | P1 신뢰성 | `REPLAY-01` | stable action identity와 동일 symbol/action 중복을 포함한 non-empty replay corpus로 순서 독립 matching을 입증한다. replay 기반 자동화 blocker다. |
+| 2 | P1 신뢰성 | `NOTION-02` | read-only schema/options/mapping preflight와 문서화된 view-drift 점검·FAIL/WARNING 대응을 운영 주기에 고정한다. Notion 의존 확대 blocker다. |
+| 3 | P2 운영 품질 | `OPS-04` -> `OBS-01` | retention/run index와 SLO/관측성을 먼저 고정해 실패·복구 evidence를 검색 가능하게 한다. |
+| 4 | P2 회귀 방지 | `TEST-01` | side-effect 분류와 격리가 입증된 suite부터 안전한 CI에 올린다. |
+| 5 | P2 read-only 자동화 | `AUTO-03` -> `AUTO-01` | read-only scheduling과 deployment/run evidence만 자동화한다. write stage 승인은 유지한다. |
+| 6 | P3 사용자 비교 | `BENCH-02` | cash-flow, dividend, fee, fractional-share 정책 승인 후 월적립식 SPY 비교를 설계·구현한다. |
+| 7 | P4 연구 기반 | `RG-01` -> `BT-01` | executable Research Gate를 만들고 IS/OOS를 walk-forward, plateau, cost/slippage/delay stress까지 확장한다. |
+| 8 | P4 데이터/설명 | `DQ-01` -> `PA-01` | 전체 데이터 lineage 계약을 좁은 MFU로 확장한 뒤 attribution 합계와 총손익 reconciliation을 구현한다. |
+| 9 | P5 확장 모델 | `PF-01` -> `RS-01` | `strategy_id` 귀속과 strategy-account ledger를 먼저 고정한 뒤 strategy/account HWM·drawdown을 영속화한다. |
+| 10 | P6 소비 계층 | `EV-01` -> `UI-01` | 공통 event/read model을 먼저 정의하고 read-only 운영 화면을 확장한다. |
+| 11 | P7 선택/장기 | `RF-01` -> `DA-01` -> `FA-01` | 검증 가능한 source와 Research Gate가 생긴 뒤 독립 MFU로 재평가한다. 현재 운영 blocker가 아니다. |
 
 `VA-01`과 `MR-01`은 별도 신규 계층으로 실행 순서에 넣지 않는다. 각각 기존 validation owner와 market-regime core가 목적을 담당한다. 확인된 좁은 누락만 기존 owner에서 보완한다.
 
 ### 확장 차단 조건
 
-- 다계좌/profile 확대 전 `ACCT-01`
+- `ACCT-01`은 완료됐다. 실제 `paper_default` migration은 별도 승인·후속 작업이며 미수행 상태다.
 - replay 의존 write 자동화 전 `REPLAY-01`
 - Notion 의존 범위 확대 전 `NOTION-02`
 - write scheduler 또는 Telegram execution 검토 전 retention, observability, safe CI와 별도 threat model
@@ -203,7 +202,7 @@ D:\n8n\workspace\stock_screener_ops\completion_manifests\paper_pilot_202606_2026
 
 | 코드 | 기능 | 현재 판정 | 확인된 subset과 남은 경계 |
 |---|---|---|---|
-| `ACCT-01` | Multi-account vertical slice | PARTIAL | account profile/path/guard와 account-scoped Stage F는 있음. 기본 계좌의 legacy root fallback과 전 경로 closure가 남음. |
+| `ACCT-01` | Multi-account vertical slice | COMPLETE | A/B/C/D 계약과 isolation regression이 PASS했다. 명시적 legacy read-only compatibility만 남기고 writer/reader/export/replay의 silent fallback을 폐쇄했다. `paper_default` migration은 별도 미수행 작업이다. |
 | `REPLAY-01` | Stable action replay | PARTIAL | plan diff, fingerprint, account/date validation은 있음. `symbol\|action` 중복의 고유 identity와 non-empty corpus가 남음. |
 | `NOTION-02` | Schema/view drift guard | PARTIAL | 여러 data source의 property/type/select option validator와 Daily Plan semantic count guard는 있음. 실제 Notion page/view drift는 API 검증이 아닌 수동 spec/checklist 범위. |
 | `RG-01` | Research Gate | DOCUMENTED_ONLY | MFU 계약/Result/Review 관행은 있으나 executable 판정기와 공통 KEEP/REFINE/OVERFIT/REJECT 증거가 없음. |
@@ -240,7 +239,7 @@ D:\n8n\workspace\stock_screener_ops\completion_manifests\paper_pilot_202606_2026
 | MFU-EO2 | 있음 | 완료 | 있음 | v2 state 적용, 최신 NO_ACTION run은 Finalize 불필요 | invalid-context fail-closed |
 | Stage A AS-OF | 있음 | 완료 | 있음 | 2026-09-08 plan `PASS` | cutoff/provenance fail-closed |
 | Recovery | 있음 | 완료 | 있음 | 기존 activation evidence 있음, 반복 Recovery 운영 재실행은 미확인 | 승인·context·state guard와 consumed/unconsumed 분류 |
-| `ACCT-01` | 있음 | 부분 | 있음 | account-scoped paper ops 사용 | path/context guard, legacy fallback 잔존 |
+| `ACCT-01` | 있음 | 완료 | 있음 | A/B/C/D contract 및 isolation regression PASS | explicit `paper_default` legacy read-only compatibility; migration은 별도 미수행 |
 | `REPLAY-01` | 있음 | 부분 | 있음 | empty/limited replay evidence | duplicate key WARNING 및 auto-match 제외, stable identity 미완료 |
 | `NOTION-02` | 있음 | 부분 | 있음 | Notion 흐름 사용 | schema fail/warning, view는 수동 |
 | `UX-01` | 있음 | 부분 | Primary/gate/wrapper 관련 테스트 있음 | 최신 NO_ACTION run 완료, Primary `.cmd` 사용 여부는 미확인 | stage evidence 손상 시 fail-closed/recovery 안내 |
@@ -256,7 +255,7 @@ D:\n8n\workspace\stock_screener_ops\completion_manifests\paper_pilot_202606_2026
 
 ### ACCT-01
 
-`PARTIAL`, P1. account profile/path/guard와 account-scoped evidence는 목적의 일부를 충족한다. 모든 plan/report/replay/alert/export/write가 같은 명시적 account context를 검증하고 조용한 legacy root fallback을 제거해야 완료다. 범위는 paper account 격리이며 무승인 DB migration은 포함하지 않는다.
+`COMPLETE`, closed. account profile/path/guard, writer/read/report/replay/alert/export closure와 A/B canonical isolation regression이 PASS했다. normal path의 silent legacy root fallback은 제거됐고 legacy는 `paper_default` explicit read-only compatibility로만 허용된다. 실제 `paper_default` migration은 별도 승인 후속 작업으로 미수행이며, 범위는 paper account 격리이고 무승인 DB migration은 포함하지 않는다.
 
 ### REPLAY-01
 
