@@ -1,0 +1,726 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from core.paper_account_paths import build_paper_account_paths
+from scripts import runbook_state
+
+
+SCHEMA_VERSION = "failed_no_trade_closure.v1"
+TERMINAL_CLASSIFICATION = "FAILED_NO_TRADE_CLOSED"
+CLOSURE_DIRNAME = "failed_no_trade_closures"
+RECOVERY_DIRNAME = "runbook_recoveries"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_json_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def closure_path(workspace: Path, runbook_day_id: str) -> Path:
+    return Path(workspace) / CLOSURE_DIRNAME / f"{runbook_day_id}.json"
+
+
+def _blocked(reason: str, blockers: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "runner_result": "BLOCKED",
+        "reason": reason,
+        "blockers": blockers or [reason],
+        "closed": False,
+        "terminal_classification": None,
+    }
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError("json_root_must_be_object")
+    return payload
+
+
+def _workspace_ref(workspace: Path, path: Path) -> str:
+    resolved_workspace = Path(workspace).resolve(strict=False)
+    resolved_path = Path(path).resolve(strict=False)
+    try:
+        return resolved_path.relative_to(resolved_workspace).as_posix()
+    except ValueError:
+        return str(resolved_path)
+
+
+def _resolve_ref(workspace: Path, ref: str) -> Path:
+    path = Path(str(ref or "").strip())
+    return path.resolve(strict=False) if path.is_absolute() else (workspace / path).resolve(strict=False)
+
+
+def _state_context(state: runbook_state.RunbookState) -> dict[str, str]:
+    return {
+        "account_id": state.frozen_context.account_id,
+        "data_date": state.frozen_context.data_date,
+        "trade_date": state.frozen_context.trade_date,
+    }
+
+
+def _failed_record(
+    state: runbook_state.RunbookState,
+    failed_idempotency_key: str,
+) -> tuple[dict[str, Any], list[str]]:
+    record = state.idempotency_records.get(failed_idempotency_key)
+    if not isinstance(record, dict):
+        return {}, ["failed_idempotency_record_required"]
+    blockers: list[str] = []
+    expected = {
+        "command_key": "execution_commit",
+        "step_id": 8,
+        "stage_id": "B",
+        "status": "FAILED",
+    }
+    for field, value in expected.items():
+        if record.get(field) != value:
+            blockers.append(f"failed_idempotency_{field}_mismatch")
+    if record.get("idempotency_key") != failed_idempotency_key:
+        blockers.append("failed_idempotency_key_mismatch")
+    logical_operation_id = str(record.get("logical_operation_id") or "")
+    attempt_id = str(record.get("attempt_id") or "")
+    if not logical_operation_id.startswith("sha256:") or len(logical_operation_id) != 71:
+        blockers.append("failed_logical_operation_id_invalid")
+    if not attempt_id:
+        blockers.append("failed_attempt_id_required")
+    return record, blockers
+
+
+def _read_rows(path: Path, required_column: str) -> tuple[list[dict[str, str]], list[str]]:
+    if not path.is_file():
+        return [], [f"domain_file_missing:{path.name}"]
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or required_column not in reader.fieldnames:
+                return [], [f"domain_column_missing:{path.name}:{required_column}"]
+            return [dict(row) for row in reader], []
+    except (OSError, UnicodeError, csv.Error) as exc:
+        return [], [f"domain_file_invalid:{path.name}:{type(exc).__name__}"]
+
+
+def _domain_status(
+    *,
+    account_id: str,
+    account_root: Path,
+    trade_date: str,
+    expected_trade_ids: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    paths = build_paper_account_paths(
+        account_root=Path(account_root),
+        account_id=account_id,
+        create=False,
+    )
+    files = {
+        "execution": (paths.execution_log_path, "trade_id", "date"),
+        "account": (paths.account_snapshot_path, "snapshot_date", "snapshot_date"),
+        "position": (paths.position_snapshot_path, "snapshot_date", "snapshot_date"),
+    }
+    blockers: list[str] = []
+    result: dict[str, Any] = {}
+    for name, (path, required_column, date_column) in files.items():
+        rows, row_blockers = _read_rows(path, required_column)
+        blockers.extend(row_blockers)
+        date_count = sum(
+            str(row.get(date_column) or "").strip() == trade_date for row in rows
+        )
+        evidence = {
+            "path": str(path.resolve(strict=False)),
+            "exists": path.is_file(),
+            "sha256": sha256_file(path) if path.is_file() else None,
+            "target_date_row_count": date_count,
+        }
+        if date_count:
+            blockers.append(f"target_date_{name}_rows_present")
+        if name == "execution":
+            ledger_ids = {str(row.get("trade_id") or "").strip() for row in rows}
+            present_ids = [trade_id for trade_id in expected_trade_ids if trade_id in ledger_ids]
+            evidence["expected_trade_ids_present"] = present_ids
+            if present_ids:
+                blockers.append("expected_trade_ids_present")
+        result[name] = evidence
+    current_state = paths.current_state_snapshot_path(trade_date)
+    result["target_current_state"] = {
+        "path": str(current_state.resolve(strict=False)),
+        "exists": current_state.is_file(),
+    }
+    if current_state.exists():
+        blockers.append("target_current_state_present")
+    return result, blockers
+
+
+def _validate_preseal(
+    *,
+    workspace: Path,
+    state_path: Path,
+    state: runbook_state.RunbookState,
+    record: dict[str, Any],
+    logical: dict[str, Any],
+    require_current_operational_hashes: bool,
+    account_root: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    refs = record.get("artifact_refs") if isinstance(record.get("artifact_refs"), dict) else {}
+    ref = str(refs.get("precommit_evidence_json") or "").strip()
+    blockers: list[str] = []
+    if not ref:
+        return {}, ["precommit_evidence_ref_required"]
+    path = _resolve_ref(workspace, ref)
+    if not path.is_file():
+        return {}, ["precommit_evidence_missing"]
+    try:
+        payload = _load_json(path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        return {}, [f"precommit_evidence_invalid:{type(exc).__name__}"]
+
+    expected = {
+        "schema_version": "stage_b_execution_commit_preseal.v1",
+        "runbook_day_id": state.runbook_day_id,
+        "frozen_context": _state_context(state),
+        "logical_operation_id": record.get("logical_operation_id"),
+        "attempt_id": record.get("attempt_id"),
+        "daily_plan_sha256": logical.get("daily_plan_sha256"),
+        "candidate_sequence_sha256": logical.get("candidate_sequence_sha256"),
+        "reconciliation_content_sha256": logical.get("reconciliation_content_sha256"),
+        "expected_trade_ids": logical.get("expected_trade_ids"),
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            blockers.append(f"precommit_{field}_mismatch")
+    logical_sha = str(record.get("logical_operation_id") or "").removeprefix("sha256:")
+    if refs.get("logical_operation_sha256") != logical_sha:
+        blockers.append("failed_record_logical_operation_sha256_mismatch")
+    pinned_preseal_ref = state.artifacts.get("stage_b_execution_commit_preseal_json")
+    if not pinned_preseal_ref or _resolve_ref(workspace, str(pinned_preseal_ref)) != path:
+        blockers.append("state_precommit_evidence_ref_mismatch")
+    if Path(str(payload.get("state_path") or "")).resolve(strict=False) != state_path.resolve(strict=False):
+        blockers.append("precommit_state_path_mismatch")
+    state_before = str(payload.get("state_sha256_before_attempt") or "")
+    if len(state_before) != 64 or any(char not in "0123456789abcdef" for char in state_before.lower()):
+        blockers.append("precommit_state_sha256_invalid")
+
+    for name, logical_path_key, logical_hash_key in (
+        ("execution_preview", "execution_preview_path", "execution_preview_sha256"),
+        ("reconciliation_preview", "reconciliation_preview_path", "reconciliation_preview_sha256"),
+    ):
+        item = payload.get(name) if isinstance(payload.get(name), dict) else {}
+        if _resolve_ref(workspace, str(item.get("path") or "")) != Path(
+            str(logical.get(logical_path_key) or "")
+        ).resolve(strict=False):
+            blockers.append(f"precommit_{name}_path_mismatch")
+        if item.get("sha256") != logical.get(logical_hash_key):
+            blockers.append(f"precommit_{name}_sha256_mismatch")
+
+    operational = payload.get("operational_files") if isinstance(payload.get("operational_files"), dict) else {}
+    paths = build_paper_account_paths(
+        account_id=state.frozen_context.account_id,
+        account_root=account_root,
+        create=False,
+    )
+    current_paths = {
+        "execution": paths.execution_log_path,
+        "account": paths.account_snapshot_path,
+        "position": paths.position_snapshot_path,
+    }
+    for name, current_path in current_paths.items():
+        item = operational.get(name) if isinstance(operational.get(name), dict) else {}
+        if Path(str(item.get("path") or "")).resolve(strict=False) != current_path.resolve(strict=False):
+            blockers.append(f"precommit_{name}_path_mismatch")
+        digest = str(item.get("sha256") or "")
+        if item.get("exists") is not True or len(digest) != 64:
+            blockers.append(f"precommit_{name}_hash_required")
+        elif require_current_operational_hashes and (
+            not current_path.is_file() or sha256_file(current_path) != digest
+        ):
+            blockers.append(f"{name}_hash_changed_since_precommit")
+    target = payload.get("target_current_state") if isinstance(payload.get("target_current_state"), dict) else {}
+    expected_target = paths.current_state_snapshot_path(state.frozen_context.trade_date)
+    if (
+        Path(str(target.get("path") or "")).resolve(strict=False) != expected_target.resolve(strict=False)
+        or target.get("exists") is not False
+        or target.get("sha256") is not None
+    ):
+        blockers.append("precommit_target_current_state_mismatch")
+
+    return {
+        "path": _workspace_ref(workspace, path),
+        "sha256": sha256_file(path),
+        "payload": payload,
+    }, blockers
+
+
+def assess_failed_no_trade_closure(
+    *,
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    failed_idempotency_key: str,
+    account_root: Path | None = None,
+) -> dict[str, Any]:
+    from scripts import runbook_stage_b_recovery
+
+    workspace = Path(workspace).resolve(strict=False)
+    state_path = runbook_state.get_state_path_for_context(
+        workspace, account_id, data_date, trade_date
+    )
+    try:
+        state = runbook_state.load_state(state_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        return _blocked("closure_assessment_failed", [f"runbook_state_invalid:{type(exc).__name__}"])
+    resolved_account_root = (
+        Path(account_root).resolve(strict=False)
+        if account_root is not None
+        else build_paper_account_paths(account_id, create=False).root.resolve(strict=False)
+    )
+    blockers: list[str] = []
+    if not runbook_state.context_matches_state(state, account_id, data_date, trade_date):
+        blockers.append("state_context_mismatch")
+    if not (
+        state.current_stage == "B"
+        and state.current_status == "FAILED"
+        and state.stage_status.get("B") == "FAILED"
+    ):
+        blockers.append("stage_b_failed_state_required")
+    if any(state.stage_status.get(stage) != "PENDING" for stage in ("C", "GATE2", "D", "E", "F")):
+        blockers.append("downstream_stage_must_be_unexecuted")
+    if state.last_completed_step is not None and state.last_completed_step > 7:
+        blockers.append("downstream_step_evidence_present")
+    if state.recovery_authorizations:
+        blockers.append("stage_b_recovery_authorization_present")
+    if (workspace / RECOVERY_DIRNAME / f"{state.runbook_day_id}.json").exists():
+        blockers.append("runbook_recovery_authorization_present")
+
+    record, record_blockers = _failed_record(state, failed_idempotency_key)
+    blockers.extend(record_blockers)
+    try:
+        assessment = runbook_stage_b_recovery.assess_stage_b_recovery(
+            workspace=workspace,
+            account_id=account_id,
+            data_date=data_date,
+            trade_date=trade_date,
+            failed_idempotency_key=failed_idempotency_key,
+            account_root=resolved_account_root,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        assessment = {}
+        blockers.append(f"stage_b_assessment_invalid:{type(exc).__name__}")
+    if not assessment.get("human_retry_eligible"):
+        blockers.extend(str(item) for item in assessment.get("blockers", []))
+        blockers.append("zero_domain_write_not_proven")
+
+    command_path_text = str((assessment.get("failed_command") or {}).get("result_path") or "")
+    try:
+        command_payload = _load_json(Path(command_path_text))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        command_payload = {}
+        blockers.append(f"failed_command_result_invalid:{type(exc).__name__}")
+    command_expected = {
+        "schema_version": "runbook_command_result.v1",
+        "runner_result": "FAILED",
+        "runbook_day_id": state.runbook_day_id,
+        "frozen_context": _state_context(state),
+        "stage_id": "B",
+        "step_id": 8,
+        "command_key": "execution_commit",
+    }
+    for field, value in command_expected.items():
+        if command_payload.get(field) != value:
+            blockers.append(f"failed_command_result_{field}_mismatch")
+
+    logical: dict[str, Any] = {}
+    try:
+        logical = runbook_stage_b_recovery.build_stage_b_logical_operation(state, workspace)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        blockers.append(f"logical_operation_evidence_invalid:{type(exc).__name__}")
+    preseal, preseal_blockers = _validate_preseal(
+        workspace=workspace,
+        state_path=state_path,
+        state=state,
+        record=record,
+        logical=logical,
+        require_current_operational_hashes=True,
+        account_root=resolved_account_root,
+    )
+    blockers.extend(preseal_blockers)
+    expected_trade_ids = [str(item) for item in logical.get("expected_trade_ids", [])]
+    if not expected_trade_ids:
+        blockers.append("expected_trade_ids_required")
+    domain, domain_blockers = _domain_status(
+        account_id=account_id,
+        account_root=resolved_account_root,
+        trade_date=trade_date,
+        expected_trade_ids=expected_trade_ids,
+    )
+    blockers.extend(domain_blockers)
+    blockers = list(dict.fromkeys(blockers))
+    return {
+        "runner_result": "PASS" if not blockers else "BLOCKED",
+        "eligible": not blockers,
+        "schema_version": SCHEMA_VERSION,
+        "terminal_classification": TERMINAL_CLASSIFICATION,
+        "runbook_day_id": state.runbook_day_id,
+        "frozen_context": _state_context(state),
+        "source_state": {
+            "path": _workspace_ref(workspace, state_path),
+            "sha256": sha256_file(state_path),
+        },
+        "execution_contract": dict(state.execution_contract),
+        "failed_attempt": {
+            "idempotency_key": failed_idempotency_key,
+            "status": record.get("status"),
+            "logical_operation_id": record.get("logical_operation_id"),
+            "attempt_id": record.get("attempt_id"),
+        },
+        "failed_command_result": {
+            "path": _workspace_ref(
+                workspace, Path(str((assessment.get("failed_command") or {}).get("result_path") or ""))
+            ),
+            "sha256": (assessment.get("failed_command") or {}).get("result_sha256"),
+        },
+        "precommit_evidence": {
+            "path": preseal.get("path"),
+            "sha256": preseal.get("sha256"),
+        },
+        "execution_preview": {
+            "path": _workspace_ref(workspace, Path(str(logical.get("execution_preview_path") or ""))),
+            "sha256": logical.get("execution_preview_sha256"),
+        },
+        "reconciliation_preview": {
+            "path": _workspace_ref(workspace, Path(str(logical.get("reconciliation_preview_path") or ""))),
+            "sha256": logical.get("reconciliation_preview_sha256"),
+        },
+        "expected_trade_ids": expected_trade_ids,
+        "domain_no_write": domain,
+        "account_root": str(resolved_account_root),
+        "blockers": blockers,
+    }
+
+
+def _evidence_from_assessment(
+    assessment: dict[str, Any],
+    *,
+    operator: str,
+    reason: str,
+    closed_at: str,
+) -> dict[str, Any]:
+    domain = json.loads(json.dumps(assessment["domain_no_write"]))
+    for name in ("execution", "account", "position"):
+        domain[name]["sha256_at_closure"] = domain[name].pop("sha256")
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "CLOSED",
+        "terminal_classification": TERMINAL_CLASSIFICATION,
+        "closed_at": closed_at,
+        "runbook_day_id": assessment["runbook_day_id"],
+        "frozen_context": assessment["frozen_context"],
+        "source_state": assessment["source_state"],
+        "execution_contract": assessment["execution_contract"],
+        "failed_attempt": assessment["failed_attempt"],
+        "failed_command_result": assessment["failed_command_result"],
+        "precommit_evidence": assessment["precommit_evidence"],
+        "execution_preview": assessment["execution_preview"],
+        "reconciliation_preview": assessment["reconciliation_preview"],
+        "expected_trade_ids": assessment["expected_trade_ids"],
+        "domain_no_write": domain,
+        "account_root": assessment["account_root"],
+        "operator": operator,
+        "reason": reason,
+        "operator_confirmations": {
+            "no_actual_trades": True,
+            "no_reexecution": True,
+        },
+    }
+    payload["content_sha256"] = canonical_json_sha256(payload)
+    return payload
+
+
+def validate_closure_evidence(
+    workspace: Path,
+    state_path: Path,
+    state: runbook_state.RunbookState,
+) -> dict[str, Any]:
+    from scripts import runbook_stage_b_recovery
+
+    workspace = Path(workspace).resolve(strict=False)
+    path = closure_path(workspace, state.runbook_day_id)
+    if not path.is_file():
+        return {"exists": False, "valid": False, "path": path, "blockers": []}
+    try:
+        payload = _load_json(path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        return {
+            "exists": True,
+            "valid": False,
+            "path": path,
+            "payload": None,
+            "blockers": [f"closure_evidence_invalid:{type(exc).__name__}"],
+        }
+    blockers: list[str] = []
+    sealed = dict(payload)
+    content_sha256 = str(sealed.pop("content_sha256", ""))
+    if content_sha256 != canonical_json_sha256(sealed):
+        blockers.append("closure_content_sha256_mismatch")
+    expected_static = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "CLOSED",
+        "terminal_classification": TERMINAL_CLASSIFICATION,
+        "runbook_day_id": state.runbook_day_id,
+        "frozen_context": _state_context(state),
+        "execution_contract": dict(state.execution_contract),
+    }
+    for field, value in expected_static.items():
+        if payload.get(field) != value:
+            blockers.append(f"closure_{field}_mismatch")
+    source = payload.get("source_state") if isinstance(payload.get("source_state"), dict) else {}
+    if _resolve_ref(workspace, str(source.get("path") or "")) != Path(state_path).resolve(strict=False):
+        blockers.append("closure_source_state_path_mismatch")
+    if source.get("sha256") != sha256_file(state_path):
+        blockers.append("closure_source_state_sha256_mismatch")
+    if not (
+        state.current_stage == "B"
+        and state.current_status == "FAILED"
+        and state.stage_status.get("B") == "FAILED"
+        and all(state.stage_status.get(stage) == "PENDING" for stage in ("C", "GATE2", "D", "E", "F"))
+    ):
+        blockers.append("closure_historical_state_mismatch")
+    if state.recovery_authorizations:
+        blockers.append("closure_recovery_authorization_contradiction")
+    if (workspace / RECOVERY_DIRNAME / f"{state.runbook_day_id}.json").exists():
+        blockers.append("closure_runbook_recovery_contradiction")
+
+    failed = payload.get("failed_attempt") if isinstance(payload.get("failed_attempt"), dict) else {}
+    record, record_blockers = _failed_record(state, str(failed.get("idempotency_key") or ""))
+    blockers.extend(record_blockers)
+    for field in ("status", "logical_operation_id", "attempt_id"):
+        if failed.get(field) != record.get(field):
+            blockers.append(f"closure_failed_attempt_{field}_mismatch")
+    try:
+        logical = runbook_stage_b_recovery.build_stage_b_logical_operation(state, workspace)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        logical = {}
+        blockers.append(f"closure_logical_operation_invalid:{type(exc).__name__}")
+    expected_ids = [str(item) for item in logical.get("expected_trade_ids", [])]
+    if payload.get("expected_trade_ids") != expected_ids or not expected_ids:
+        blockers.append("closure_expected_trade_ids_mismatch")
+
+    account_root = Path(str(payload.get("account_root") or "")).resolve(strict=False)
+    preseal, preseal_blockers = _validate_preseal(
+        workspace=workspace,
+        state_path=Path(state_path),
+        state=state,
+        record=record,
+        logical=logical,
+        require_current_operational_hashes=False,
+        account_root=account_root,
+    )
+    blockers.extend(preseal_blockers)
+    pinned = payload.get("precommit_evidence") if isinstance(payload.get("precommit_evidence"), dict) else {}
+    if pinned.get("path") != preseal.get("path") or pinned.get("sha256") != preseal.get("sha256"):
+        blockers.append("closure_precommit_evidence_mismatch")
+
+    for name, path_key, hash_key in (
+        ("execution_preview", "execution_preview_path", "execution_preview_sha256"),
+        ("reconciliation_preview", "reconciliation_preview_path", "reconciliation_preview_sha256"),
+    ):
+        item = payload.get(name) if isinstance(payload.get(name), dict) else {}
+        expected_path = _workspace_ref(workspace, Path(str(logical.get(path_key) or "")))
+        if item.get("path") != expected_path or item.get("sha256") != logical.get(hash_key):
+            blockers.append(f"closure_{name}_mismatch")
+
+    command = payload.get("failed_command_result") if isinstance(payload.get("failed_command_result"), dict) else {}
+    last_error = state.last_error if isinstance(state.last_error, dict) else {}
+    error = last_error.get("error") if isinstance(last_error.get("error"), dict) else {}
+    command_path = _resolve_ref(workspace, str(error.get("command_result_json") or ""))
+    if (
+        command.get("path") != _workspace_ref(workspace, command_path)
+        or not command_path.is_file()
+        or command.get("sha256") != sha256_file(command_path)
+    ):
+        blockers.append("closure_failed_command_result_mismatch")
+
+    domain, domain_blockers = _domain_status(
+        account_id=state.frozen_context.account_id,
+        account_root=account_root,
+        trade_date=state.frozen_context.trade_date,
+        expected_trade_ids=expected_ids,
+    )
+    blockers.extend(domain_blockers)
+    stored_domain = payload.get("domain_no_write") if isinstance(payload.get("domain_no_write"), dict) else {}
+    preseal_payload = preseal.get("payload") if isinstance(preseal.get("payload"), dict) else {}
+    sealed_operational = (
+        preseal_payload.get("operational_files")
+        if isinstance(preseal_payload.get("operational_files"), dict)
+        else {}
+    )
+    for name in ("execution", "account", "position"):
+        stored = stored_domain.get(name) if isinstance(stored_domain.get(name), dict) else {}
+        current = domain.get(name) if isinstance(domain.get(name), dict) else {}
+        sealed_file = sealed_operational.get(name) if isinstance(sealed_operational.get(name), dict) else {}
+        if (
+            stored.get("path") != current.get("path")
+            or stored.get("exists") is not True
+            or stored.get("target_date_row_count") != 0
+            or stored.get("sha256_at_closure") != sealed_file.get("sha256")
+        ):
+            blockers.append(f"closure_{name}_evidence_mismatch")
+        if name == "execution" and stored.get("expected_trade_ids_present") != []:
+            blockers.append("closure_execution_expected_ids_not_absent")
+    stored_target = stored_domain.get("target_current_state")
+    if stored_target != domain.get("target_current_state") or domain.get("target_current_state", {}).get("exists"):
+        blockers.append("closure_target_current_state_evidence_mismatch")
+
+    confirmations = payload.get("operator_confirmations")
+    if confirmations != {"no_actual_trades": True, "no_reexecution": True}:
+        blockers.append("closure_operator_confirmations_invalid")
+    if not str(payload.get("operator") or "").strip():
+        blockers.append("closure_operator_required")
+    if not str(payload.get("reason") or "").strip():
+        blockers.append("closure_reason_required")
+    try:
+        closed_at = datetime.fromisoformat(str(payload.get("closed_at") or ""))
+        if closed_at.tzinfo is None:
+            raise ValueError
+    except ValueError:
+        blockers.append("closure_closed_at_invalid")
+    blockers = list(dict.fromkeys(blockers))
+    return {
+        "exists": True,
+        "valid": not blockers,
+        "path": path,
+        "payload": payload,
+        "blockers": blockers,
+    }
+
+
+def close_failed_no_trade(
+    *,
+    workspace: Path,
+    account_id: str,
+    data_date: str,
+    trade_date: str,
+    failed_idempotency_key: str,
+    operator: str,
+    reason: str,
+    confirm_no_actual_trades: bool,
+    confirm_no_reexecution: bool,
+    account_root: Path | None = None,
+) -> dict[str, Any]:
+    workspace = Path(workspace).resolve(strict=False)
+    operator = str(operator or "").strip()
+    reason = str(reason or "").strip()
+    confirmation_blockers = []
+    if not operator:
+        confirmation_blockers.append("operator_required")
+    if not reason:
+        confirmation_blockers.append("closure_reason_required")
+    if not confirm_no_actual_trades:
+        confirmation_blockers.append("no_actual_trades_confirmation_required")
+    if not confirm_no_reexecution:
+        confirmation_blockers.append("no_reexecution_confirmation_required")
+    if confirmation_blockers:
+        return _blocked("closure_confirmation_invalid", confirmation_blockers)
+
+    state_path = runbook_state.get_state_path_for_context(
+        workspace, account_id, data_date, trade_date
+    )
+    try:
+        state = runbook_state.load_state(state_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        return _blocked("closure_state_invalid", [f"{type(exc).__name__}:{exc}"])
+    path = closure_path(workspace, state.runbook_day_id)
+    if path.exists():
+        validation = validate_closure_evidence(workspace, state_path, state)
+        if not validation["valid"]:
+            return _blocked("existing_closure_evidence_invalid", validation["blockers"])
+        existing = validation["payload"]
+        if existing.get("operator") != operator or existing.get("reason") != reason:
+            return _blocked("existing_closure_evidence_conflict")
+        return {
+            "runner_result": "PASS",
+            "closed": True,
+            "already_closed": True,
+            "terminal_classification": TERMINAL_CLASSIFICATION,
+            "evidence_path": str(path),
+            "evidence_sha256": sha256_file(path),
+        }
+
+    assessment = assess_failed_no_trade_closure(
+        workspace=workspace,
+        account_id=account_id,
+        data_date=data_date,
+        trade_date=trade_date,
+        failed_idempotency_key=failed_idempotency_key,
+        account_root=account_root,
+    )
+    if not assessment.get("eligible"):
+        return _blocked("failed_no_trade_closure_not_eligible", assessment.get("blockers"))
+    payload = _evidence_from_assessment(
+        assessment,
+        operator=operator,
+        reason=reason,
+        closed_at=datetime.now().astimezone().isoformat(timespec="microseconds"),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        return _blocked("closure_evidence_created_concurrently")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    validation = validate_closure_evidence(workspace, state_path, state)
+    if not validation["valid"]:
+        return _blocked("created_closure_evidence_invalid", validation["blockers"])
+    return {
+        "runner_result": "PASS",
+        "closed": True,
+        "already_closed": False,
+        "terminal_classification": TERMINAL_CLASSIFICATION,
+        "evidence_path": str(path),
+        "evidence_sha256": sha256_file(path),
+    }
+
+
+def closure_guard(
+    workspace: Path,
+    state_path: Path,
+    state: runbook_state.RunbookState,
+) -> str | None:
+    validation = validate_closure_evidence(workspace, state_path, state)
+    if not validation["exists"]:
+        return None
+    return (
+        "failed_no_trade_closure_terminal"
+        if validation["valid"]
+        else "failed_no_trade_closure_invalid"
+    )

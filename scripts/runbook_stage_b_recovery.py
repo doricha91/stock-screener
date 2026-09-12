@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.paper_account_paths import build_paper_account_paths
+from core import failed_no_trade_closure
 from core.paper_execution_log import paper_trade_preview_to_row
 from core.paper_manual_execution_commit import _candidate_to_trade_preview
 from scripts import runbook_state
@@ -505,6 +506,9 @@ def authorize_stage_b_recovery(
         raise ValueError("assessment_evidence_drift")
     assessment_sha = sha256_file(assessment_path).lower()
     state = runbook_state.load_state(state_path)
+    closure_error = failed_no_trade_closure.closure_guard(workspace, state_path, state)
+    if closure_error:
+        raise ValueError(closure_error)
     authorization_id = f"stage_b_retry_{uuid.uuid4().hex}"
     next_state = runbook_state.authorize_stage_b_retry(
         state,

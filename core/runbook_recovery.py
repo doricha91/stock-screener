@@ -17,7 +17,7 @@ from core.runbook_calendar import (
     MarketCalendar,
     load_market_calendar,
 )
-from core import runbook_retirement
+from core import failed_no_trade_closure, runbook_retirement
 from scripts import runbook_state
 
 
@@ -186,6 +186,11 @@ def _restart_policy_violations(
 def _base_classification(workspace: Path, record: Any) -> str:
     from core import runbook_day_rollover
 
+    closure = failed_no_trade_closure.validate_closure_evidence(
+        workspace, record.path, record.state
+    )
+    if closure["valid"]:
+        return failed_no_trade_closure.TERMINAL_CLASSIFICATION
     if runbook_day_rollover._is_standard_completed(workspace, record.state):
         return "STANDARD_COMPLETED"
     if runbook_day_rollover._is_legacy_completed(workspace, record):
@@ -236,7 +241,12 @@ def _load_recovery_context(
     completed = [
         record
         for record, classification in raw
-        if classification in {"STANDARD_COMPLETED", "LEGACY_COMPLETED"}
+        if classification
+        in {
+            "STANDARD_COMPLETED",
+            "LEGACY_COMPLETED",
+            failed_no_trade_closure.TERMINAL_CLASSIFICATION,
+        }
     ]
     return source, active, completed, []
 
@@ -304,6 +314,16 @@ def preview_recovery(
     blockers.extend(state_blockers)
     if source is None:
         blockers.append("source_runbook_not_found")
+    else:
+        closure = failed_no_trade_closure.validate_closure_evidence(
+            workspace_path, source.path, source.state
+        )
+        if closure["exists"]:
+            blockers.append(
+                "failed_no_trade_closure_terminal"
+                if closure["valid"]
+                else "failed_no_trade_closure_invalid"
+            )
     if len(active) != 1:
         blockers.append("active_runbook_day_count_must_equal_one")
     elif source is not None and active[0].state.runbook_day_id != source_runbook_day_id:
@@ -728,6 +748,17 @@ def recovery_status(
     )
     if source is None:
         return _blocked("source_runbook_not_found", blockers or None, mode="RECOVERY_STATUS")
+    closure = failed_no_trade_closure.validate_closure_evidence(
+        workspace_path, source.path, source.state
+    )
+    if closure["exists"]:
+        return _blocked(
+            "failed_no_trade_closure_terminal"
+            if closure["valid"]
+            else "failed_no_trade_closure_invalid",
+            closure["blockers"] or None,
+            mode="RECOVERY_STATUS",
+        )
     validation = validate_recovery_evidence(
         workspace_path, source.path, source.state, calendar
     )

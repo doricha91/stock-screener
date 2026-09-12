@@ -192,6 +192,17 @@ def retire_runbook(
     if not runbook_state.context_matches_state(state, account_id, data_date, trade_date):
         return _blocked("runbook_state_context_mismatch")
 
+    from core import failed_no_trade_closure
+
+    closure = failed_no_trade_closure.validate_closure_evidence(workspace, state_path, state)
+    if closure["exists"]:
+        return _blocked(
+            "failed_no_trade_closure_terminal"
+            if closure["valid"]
+            else "failed_no_trade_closure_invalid",
+            closure["blockers"] or None,
+        )
+
     existing = validate_retirement_evidence(workspace, state_path, state)
     if existing["exists"]:
         if not existing["valid"]:
@@ -266,6 +277,20 @@ def retirement_status(
         return _blocked("runbook_state_invalid", [f"{type(exc).__name__}:{exc}"])
     if not runbook_state.context_matches_state(state, account_id, data_date, trade_date):
         return _blocked("runbook_state_context_mismatch")
+
+    from core import failed_no_trade_closure
+
+    closure = failed_no_trade_closure.validate_closure_evidence(workspace, state_path, state)
+    if closure["exists"]:
+        if not closure["valid"]:
+            return _blocked("failed_no_trade_closure_invalid", closure["blockers"])
+        return {
+            "runner_result": "PASS",
+            "retired": False,
+            "retirement_status": failed_no_trade_closure.TERMINAL_CLASSIFICATION,
+            "runbook_day_id": runbook_day_id,
+            "evidence_path": str(closure["path"]),
+        }
     validation = validate_retirement_evidence(workspace, state_path, state)
     if not validation["exists"]:
         assessment = assess_zero_progress(workspace, state_path, state)

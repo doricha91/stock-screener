@@ -9,7 +9,7 @@ from typing import Any
 
 from core.paper_account_paths import build_paper_account_paths
 from core.runbook_calendar import CalendarCoverageError, MarketCalendar
-from core import runbook_recovery, runbook_retirement
+from core import failed_no_trade_closure, runbook_recovery, runbook_retirement
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
@@ -109,7 +109,17 @@ def classify_state(
     record: StateRecord,
     calendar: MarketCalendar | None = None,
 ) -> dict[str, Any]:
-    if _is_standard_completed(workspace, record.state):
+    closure = failed_no_trade_closure.validate_closure_evidence(
+        workspace, record.path, record.state
+    )
+    if closure["exists"]:
+        if closure["valid"]:
+            classification = failed_no_trade_closure.TERMINAL_CLASSIFICATION
+            blockers = []
+        else:
+            classification = "ACTIVE_INCOMPLETE"
+            blockers = closure["blockers"]
+    elif _is_standard_completed(workspace, record.state):
         classification = "STANDARD_COMPLETED"
         blockers: list[str] = []
     elif _is_legacy_completed(workspace, record):
@@ -286,7 +296,12 @@ def preview_rollover(
     completed = [
         record
         for record, item in classified
-        if item["classification"] in {"STANDARD_COMPLETED", "LEGACY_COMPLETED"}
+        if item["classification"]
+        in {
+            "STANDARD_COMPLETED",
+            "LEGACY_COMPLETED",
+            failed_no_trade_closure.TERMINAL_CLASSIFICATION,
+        }
     ]
     if not completed:
         return _blocked("completed_runbook_day_not_found")

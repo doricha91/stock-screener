@@ -39,6 +39,7 @@ from scripts.runbook_no_action import (
 from scripts.runbook_command_registry import RunbookCommand
 from scripts.runbook_state import RunbookState
 from core.paper_account_paths import build_paper_account_paths, latest_current_state_snapshot_path
+from core import failed_no_trade_closure
 from core.paper_daily_review_scope import (
     DailyReviewScopeError,
     build_daily_manual_review_scope,
@@ -544,6 +545,15 @@ def run_stage_b(
         )
     except ValueError as exc:
         return _blocked_stage_b_payload(str(exc), dry_run, confirm_paper_test)
+
+    closure_error = failed_no_trade_closure.closure_guard(workspace, state_path, state)
+    if closure_error:
+        return {
+            **_blocked_stage_b_payload(closure_error, dry_run, confirm_paper_test),
+            "runbook_day_id": state.runbook_day_id,
+            "state_path": str(state_path),
+            "rendered_commands": [],
+        }
 
     if _stage_b_sync_resume_candidate(state):
         proof = runbook_stage_b_recovery.validate_stage_b_commit_proof(state=state, workspace=workspace)
