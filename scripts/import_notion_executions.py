@@ -22,6 +22,7 @@ from core.execution_reconciliation import (  # noqa: E402
 )
 from core.execution_outcome_flow import (  # noqa: E402
     RECONCILIATION_CONTRACT_V2,
+    RECONCILIATION_CONTRACT_V3,
     build_execution_commit_plan,
 )
 from core.paper_manual_execution_commit import (  # noqa: E402
@@ -74,6 +75,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.preview:
         try:
+            execution_contract_version = None
+            if args.workspace and args.data_date:
+                state_path = runbook_state.get_state_path_for_context(
+                    Path(args.workspace), resolved_account_id, args.data_date, args.date
+                )
+                if state_path.exists():
+                    state = runbook_state.load_state(state_path)
+                    execution_contract_version = runbook_state.get_execution_contract(state).get("version")
             account_paths = build_paper_account_paths(resolved_account_id, create=False)
             require_initialized_writer_account_paths(
                 account_paths, command_name="import_notion_executions preview"
@@ -88,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
                 execution_date=args.date,
                 account_id=resolved_account_id,
                 account_paths=account_paths,
+                execution_contract_version=execution_contract_version,
             )
         except (ManualExecutionImportError, NotionAPIError, NotionSettingsError, ValueError) as exc:
             if args.json:
@@ -97,16 +107,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         payload = preview.to_dict()
-        if args.workspace and args.data_date:
-            state_path = runbook_state.get_state_path_for_context(
-                Path(args.workspace),
-                resolved_account_id,
-                args.data_date,
-                args.date,
-            )
-            if state_path.exists():
-                state = runbook_state.load_state(state_path)
-                payload["execution_contract_version"] = runbook_state.get_execution_contract(state).get("version")
+        if execution_contract_version is not None:
+            payload["execution_contract_version"] = execution_contract_version
         print("MANUAL EXECUTION IMPORT PREVIEW")
         print(
             f"  account_id={preview.account_id} date={preview.execution_date} candidates={preview.candidate_count} "
@@ -154,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         or reconciliation_preview.get("reconciliation_contract_version")
     )
     commit_plan = build_execution_commit_plan(reconciliation_preview)
-    if reconciliation_version == RECONCILIATION_CONTRACT_V2:
+    if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
         context_ok = (
             reconciliation_preview.get("account_id") == resolved_account_id
             and reconciliation_preview.get("data_date") == args.data_date
@@ -191,21 +193,21 @@ def main(argv: list[str] | None = None) -> int:
             account_paths=account_paths,
             eligible_candidate_keys=(
                 set(commit_plan.get("candidate_keys") or [])
-                if reconciliation_version == RECONCILIATION_CONTRACT_V2
+                if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}
                 else None
             ),
             expected_outcome_rows=(
                 list(commit_plan.get("rows") or [])
-                if reconciliation_version == RECONCILIATION_CONTRACT_V2
+                if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}
                 else None
             ),
-            allow_zero_write=reconciliation_version == RECONCILIATION_CONTRACT_V2,
-            data_date=args.data_date if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None,
+            allow_zero_write=reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3},
+            data_date=args.data_date if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None,
             reconciliation_preview_json_path=(
-                reconciliation_preview_path if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
+                reconciliation_preview_path if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None
             ),
             reconciliation_preview_sha256=(
-                reconciliation_preview_sha256 if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
+                reconciliation_preview_sha256 if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None
             ),
         )
     except (ManualExecutionCommitError, ValueError) as exc:

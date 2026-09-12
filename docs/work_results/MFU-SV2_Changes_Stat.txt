@@ -1,0 +1,51 @@
+﻿MFU-SV2 Changes Stat
+Implementation base: 0b3ac87816439cff546641986847c48ad5ad526b
+
+BASE + SV1 + SV2 changed files and stat:
+ config/notion_property_mapping.example.json        |   1 +
+ core/execution_outcome_flow.py                     | 152 ++++++++++++++++--
+ core/execution_reconciliation.py                   |   1 +
+ core/notion_exporters.py                           |   2 +
+ core/notion_manual_execution_importer.py           |   3 +
+ core/notion_schema_validator.py                    |   1 +
+ core/paper_manual_execution_commit.py              |  77 +++-------
+ scripts/import_notion_executions.py                |  15 +-
+ .../runbook_execution_reconciliation_preview.py    |   9 +-
+ scripts/runbook_stage_b_verifier.py                |  15 +-
+ scripts/runbook_stage_runner.py                    |  29 +++-
+ scripts/runbook_state.py                           |  34 ++++-
+ tests/test_execution_outcome_flow.py               |  49 +++++-
+ tests/test_paper_manual_execution_commit.py        |  22 ++-
+ tests/test_runbook_stage_runner_stage_b.py         | 169 ++++++++++++++++++++-
+ tests/test_runbook_state.py                        |  12 +-
+ 16 files changed, 485 insertions(+), 106 deletions(-)
+ 16 files changed, 485 insertions(+), 106 deletions(-)
+
+SV1 inherited files (approved source/test diff):
+core/execution_outcome_flow.py
+core/paper_manual_execution_commit.py
+scripts/runbook_stage_runner.py
+tests/test_paper_manual_execution_commit.py
+tests/test_runbook_stage_runner_stage_b.py
+
+SV2 new or additionally modified files:
+config/notion_property_mapping.example.json
+core/execution_reconciliation.py
+core/notion_exporters.py
+core/notion_manual_execution_importer.py
+core/notion_schema_validator.py
+scripts/import_notion_executions.py
+scripts/runbook_execution_reconciliation_preview.py
+scripts/runbook_stage_b_verifier.py
+scripts/runbook_state.py
+tests/test_execution_outcome_flow.py
+tests/test_runbook_state.py
+docs/work_results/MFU-SV2_Result.md
+docs/work_results/MFU-SV2_Review_Evidence.md
+
+SV1-inherited files additionally modified by SV2:
+core/execution_outcome_flow.py
+core/paper_manual_execution_commit.py
+scripts/runbook_stage_runner.py
+tests/test_paper_manual_execution_commit.py
+tests/test_runbook_stage_runner_stage_b.py

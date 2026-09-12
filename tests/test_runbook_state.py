@@ -79,7 +79,7 @@ def test_initial_state_defaults() -> None:
     assert set(state.stage_status) == {"A", "GATE1", "B", "C", "GATE2", "D", "E", "F"}
     assert all(status == "PENDING" for status in state.stage_status.values())
     assert state.execution_contract == {
-        "version": runbook_state.EXECUTION_CONTRACT_V2,
+        "version": runbook_state.EXECUTION_CONTRACT_V3,
         "input_finalized": False,
         "finalized_at": None,
     }
@@ -102,7 +102,7 @@ def test_save_state_then_load_state_round_trips(tmp_path: Path) -> None:
     assert loaded == state
 
 
-def test_new_context_state_file_persists_v2_contract(tmp_path: Path) -> None:
+def test_new_context_state_file_persists_v3_contract(tmp_path: Path) -> None:
     result, path, state = runbook_state.init_state_file_for_context(
         tmp_path,
         ACCOUNT_ID,
@@ -113,18 +113,16 @@ def test_new_context_state_file_persists_v2_contract(tmp_path: Path) -> None:
     loaded = runbook_state.load_state(path)
 
     assert result == "CREATED"
-    assert state.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V2
+    assert state.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V3
     assert loaded.execution_contract == state.execution_contract
 
 
-def test_new_v2_state_finalizes_without_activation_and_activation_is_exact_no_op() -> None:
+def test_new_v3_state_finalizes_without_activation() -> None:
     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
-
-    assert runbook_state.activate_execution_outcome_v2(state) is state
 
     finalized = runbook_state.finalize_execution_input(state)
 
-    assert finalized.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V2
+    assert finalized.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V3
     assert finalized.execution_contract["input_finalized"] is True
     assert finalized.execution_contract["finalized_at"] is not None
 

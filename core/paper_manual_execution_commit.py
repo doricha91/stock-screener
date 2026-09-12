@@ -5,7 +5,6 @@ import json
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +22,9 @@ from core.notion_account_keys import (
 )
 from core.execution_outcome_flow import (
     RECONCILIATION_CONTRACT_V2,
+    RECONCILIATION_CONTRACT_V3,
     build_execution_commit_plan,
+    filter_execution_preview_candidates,
 )
 from core.paper_account_guard import (
     assert_account_writer_target,
@@ -324,57 +325,14 @@ def _filter_preview_for_outcomes(
     *,
     expected_outcome_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    candidates = list(preview_payload.get("candidates") or [])
-    keyed = {
-        str(candidate.get("canonical_key") or candidate.get("notion_external_key") or "").strip(): candidate
-        for candidate in candidates
-    }
-    missing = sorted(eligible_candidate_keys - set(keyed))
-    if missing:
-        raise ManualExecutionCommitError(
-            "Outcome preview candidate keys are missing from the input preview: " + ", ".join(missing)
-        )
-    selected = [keyed[key] for key in sorted(eligible_candidate_keys)]
-    if expected_outcome_rows is not None:
-        expected_by_key = {
-            str(row.get("candidate_key") or "").strip(): row for row in expected_outcome_rows
-        }
-        for key, candidate in zip(sorted(eligible_candidate_keys), selected):
-            expected = expected_by_key.get(key)
-            if expected is None:
-                raise ManualExecutionCommitError(f"Missing outcome row for commit candidate: {key}")
-            if (
-                str(candidate.get("symbol") or "").strip().upper() != str(expected.get("symbol") or "").strip().upper()
-                or str(candidate.get("side") or "").strip().upper() != str(expected.get("side") or "").strip().upper()
-                or not _same_number(candidate.get("quantity"), expected.get("actual_quantity"))
-                or not _same_number(candidate.get("actual_price"), expected.get("actual_price"))
-            ):
-                raise ManualExecutionCommitError(
-                    f"Input preview does not match the pinned outcome row: {key}"
-                )
-    filtered = dict(preview_payload)
-    filtered["candidates"] = selected
-    filtered["candidate_count"] = len(selected)
-    filtered["pass_count"] = sum(item.get("validation_status") == PASS for item in selected)
-    filtered["warning_count"] = sum(item.get("validation_status") == WARNING for item in selected)
-    filtered["fail_count"] = sum(item.get("validation_status") not in {PASS, WARNING} for item in selected)
-    filtered["commit_allowed"] = (
-        "false"
-        if filtered["fail_count"]
-        else "true_with_warnings"
-        if filtered["warning_count"]
-        else "true"
-    )
-    return filtered
-
-
-def _same_number(left: Any, right: Any) -> bool:
     try:
-        left_number = Decimal(str(left))
-        right_number = Decimal(str(right))
-    except (InvalidOperation, ValueError):
-        return False
-    return left_number.is_finite() and right_number.is_finite() and left_number == right_number
+        return filter_execution_preview_candidates(
+            preview_payload,
+            eligible_candidate_keys,
+            expected_outcome_rows=expected_outcome_rows,
+        )
+    except ValueError as exc:
+        raise ManualExecutionCommitError(str(exc)) from exc
 
 
 def _validate_v2_reconciliation_evidence(
@@ -405,8 +363,8 @@ def _validate_v2_reconciliation_evidence(
     if not isinstance(payload, dict):
         raise ManualExecutionCommitError("Pinned reconciliation preview root must be an object.")
     version = payload.get("schema_version") or payload.get("reconciliation_contract_version")
-    if version != RECONCILIATION_CONTRACT_V2:
-        raise ManualExecutionCommitError("Pinned reconciliation preview is not the v2 contract.")
+    if version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+        raise ManualExecutionCommitError("Pinned reconciliation preview is not an outcome contract.")
     expected_context = {
         "account_id": account_id,
         "data_date": str(data_date),
@@ -450,6 +408,7 @@ def _validate_v2_reconciliation_evidence(
         raise ManualExecutionCommitError("Pinned reconciliation preview outcome count invariant failed.")
     return {
         "data_date": str(data_date),
+        "execution_contract_version": version,
         "reconciliation_preview_json_path": str(evidence_path),
         "reconciliation_preview_sha256": actual_sha256,
     }
@@ -725,11 +684,10 @@ def _write_commit_sidecar(
         ],
     }
     if v2_evidence is not None:
-        payload.update(
-            schema_version="execution_commit.v2",
-            execution_contract_version=RECONCILIATION_CONTRACT_V2,
+        payload.update({
             **v2_evidence,
-        )
+            "schema_version": "execution_commit.v3" if v2_evidence.get("execution_contract_version") == RECONCILIATION_CONTRACT_V3 else "execution_commit.v2",
+        })
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     lines = [
@@ -772,9 +730,10 @@ def _write_zero_commit_sidecar(
     json_path = reports_dir / f"manual_execution_import_commit_{compact_date}.json"
     markdown_path = reports_dir / f"manual_execution_import_commit_{compact_date}.md"
     reports_dir.mkdir(parents=True, exist_ok=True)
+    contract_version = v2_evidence.get("execution_contract_version")
     payload = {
-        "schema_version": "execution_commit.v2",
-        "execution_contract_version": "execution_reconciliation_preview.v2",
+        "schema_version": "execution_commit.v3" if contract_version == RECONCILIATION_CONTRACT_V3 else "execution_commit.v2",
+        "execution_contract_version": contract_version,
         "status": "COMMITTED",
         "zero_write": True,
         "account_id": account_id,

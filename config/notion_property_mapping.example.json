@@ -141,6 +141,7 @@
     "side": "Side",
     "quantity": "Quantity",
     "actual_price": "Actual Price",
+    "execution_sequence": "Execution Sequence",
     "commission": "Commission",
     "currency": "Currency",
     "broker": "Broker",

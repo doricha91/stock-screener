@@ -46,6 +46,11 @@ from core.paper_daily_review_scope import (
     write_scope_manifest,
 )
 from core.paper_execution_intent import validate_daily_plan_execution_intent
+from core.execution_outcome_flow import (
+    RECONCILIATION_CONTRACT_V2,
+    RECONCILIATION_CONTRACT_V3,
+    validate_effective_execution_candidates,
+)
 from core.stage_a_asof_contract import (
     StageAAsOfContext,
     StageAAsOfContractError,
@@ -636,6 +641,7 @@ def run_stage_b(
     for command in sequence:
         if command.command_key == "execution_commit" and not dry_run:
             try:
+                _validate_stage_b_effective_candidates(state, workspace)
                 logical = runbook_stage_b_recovery.build_stage_b_logical_operation(state, workspace)
                 attempt_id = uuid.uuid4().hex
                 _, preseal_ref = runbook_stage_b_recovery.write_precommit_evidence(
@@ -657,7 +663,7 @@ def run_stage_b(
                     state,
                     workspace,
                     command,
-                    f"execution_commit idempotency blocked: {exc}",
+                    f"execution_commit precommit blocked: {exc}",
                 )
                 command_json_path, command_txt_path = _write_command_result_and_log(
                     workspace,
@@ -4658,9 +4664,33 @@ def _existing_artifacts_from_payload(payload: dict[str, Any], mapping: dict[str,
     return artifacts
 
 
+def _validate_stage_b_effective_candidates(state: RunbookState, workspace: Path) -> None:
+    reconciliation_ref = state.artifacts.get("execution_reconciliation_preview_json")
+    if not reconciliation_ref:
+        raise ValueError("reconciliation_preview_artifact_required")
+    reconciliation = json.loads(
+        _artifact_ref_path(workspace, reconciliation_ref).read_text(encoding="utf-8")
+    )
+    if not isinstance(reconciliation, dict):
+        raise ValueError("reconciliation_preview_root_must_be_object")
+    version = reconciliation.get("schema_version") or reconciliation.get("reconciliation_contract_version")
+    if version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+        return
+    preview_ref = state.artifacts.get("execution_preview_json")
+    if not preview_ref:
+        raise ValueError("execution_preview_artifact_required")
+    preview = json.loads(_artifact_ref_path(workspace, preview_ref).read_text(encoding="utf-8"))
+    if not isinstance(preview, dict):
+        raise ValueError("execution_preview_root_must_be_object")
+    validate_effective_execution_candidates(preview, reconciliation)
+
+
 def _validate_execution_preview_payload(payload: dict[str, Any]) -> dict[str, Any]:
     blockers = []
-    is_v2 = payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
+    is_v2 = payload.get("execution_contract_version") in {
+        runbook_state.EXECUTION_CONTRACT_V2,
+        runbook_state.EXECUTION_CONTRACT_V3,
+    }
     candidate_count = _int_payload(payload, "candidate_count")
     if not is_v2 and _int_payload(payload, "fail_count") != 0:
         blockers.append("fail_count must be 0")

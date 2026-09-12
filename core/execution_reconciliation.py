@@ -444,6 +444,7 @@ def normalize_execution_row(row: dict[str, Any], account_id: str, trade_date: st
         "actual_quantity": quantity_raw if quantity is None and not _is_blank(quantity_raw) else _json_number(quantity),
         "actual_price": price_raw if price is None and not _is_blank(price_raw) else _json_number(price),
         "actual_notional": _json_number(_multiply(quantity, price)),
+        "execution_sequence": row.get("execution_sequence"),
         "commission": row.get("commission"),
         "status": _none_if_blank(row.get("status")),
         "import_status": str(row.get("import_status") or row.get("import_status_raw") or "").strip().upper(),

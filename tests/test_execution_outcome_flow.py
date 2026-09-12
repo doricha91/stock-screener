@@ -8,6 +8,7 @@ import pytest
 from core.execution_outcome_flow import (
     RECONCILIATION_CONTRACT_V1,
     RECONCILIATION_CONTRACT_V2,
+    RECONCILIATION_CONTRACT_V3,
     build_execution_commit_plan,
     derive_execution_preview,
 )
@@ -18,6 +19,9 @@ from core.paper_manual_execution_commit import commit_manual_execution_preview
 from core.paper_daily_review_scope import sha256_file
 from scripts.runbook_state import (
     EXECUTION_CONTRACT_V1,
+    EXECUTION_CONTRACT_V2,
+    EXECUTION_CONTRACT_V3,
+    activate_execution_order_v3,
     activate_execution_outcome_v2,
     create_initial_state,
     finalize_execution_input,
@@ -138,7 +142,7 @@ def test_explicit_invalid_or_excess_input_is_blocked(quantity: object, price: ob
 
 
 def test_finalize_first_call_succeeds_and_second_is_exact_no_op() -> None:
-    state = activate_execution_outcome_v2(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE))
+    state = create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE)
     finalized = finalize_execution_input(state)
     assert finalized.execution_contract["input_finalized"] is True
     assert finalize_execution_input(finalized) is finalized
@@ -147,7 +151,7 @@ def test_finalize_first_call_succeeds_and_second_is_exact_no_op() -> None:
 def test_runbook_preview_reads_persisted_finalize_state(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     state = finalize_execution_input(
-        activate_execution_outcome_v2(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE))
+        create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE)
     )
     save_state(
         state,
@@ -276,6 +280,14 @@ def test_completed_v1_runbook_cannot_be_upgraded() -> None:
         activate_execution_outcome_v2(state)
 
 
+def test_only_untouched_v2_state_can_activate_to_v3() -> None:
+    state = replace(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE), execution_contract={"version": EXECUTION_CONTRACT_V2, "input_finalized": False, "finalized_at": None})
+    assert activate_execution_order_v3(state).execution_contract["version"] == EXECUTION_CONTRACT_V3
+    started = replace(state, stage_status={**state.stage_status, "B": "PASS"})
+    with pytest.raises(ValueError, match="immutable"):
+        activate_execution_order_v3(started)
+
+
 def test_unsupported_contract_version_fails_closed() -> None:
     preview = derive_execution_preview(
         _plan(), [_execution(10, 100)], account_id=ACCOUNT, data_date=DATA_DATE,
@@ -284,3 +296,36 @@ def test_unsupported_contract_version_fails_closed() -> None:
     )
     assert preview["runner_result"] == BLOCKED
     assert build_execution_commit_plan(preview)["runner_result"] == BLOCKED
+
+
+def test_v3_orders_trade_bearing_rows_by_execution_sequence_and_preserves_identity() -> None:
+    plan = [
+        {"symbol": "AAPL", "action": "BUY", "quantity": 1, "price": 100},
+        {"symbol": "MSFT", "action": "SELL", "quantity": 1, "price": 100},
+    ]
+    rows = [
+        {**_execution(1, 100), "execution_sequence": 20},
+        {**_execution(1, 100), "symbol": "MSFT", "side": "SELL", "page_id": "page-msft", "external_key": build_manual_execution_key(ACCOUNT, TRADE_DATE, "MSFT", "SELL", 1), "execution_sequence": 5},
+    ]
+    preview = derive_execution_preview(plan, rows, account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
+    commit_plan = build_execution_commit_plan(preview)
+    assert preview["runner_result"] == PASS
+    assert [row["symbol"] for row in commit_plan["rows"]] == ["MSFT", "AAPL"]
+    assert [row["execution_sequence"] for row in commit_plan["rows"]] == [5, 20]
+    assert {row["candidate_key"] for row in commit_plan["rows"]} == {row["candidate_key"] for row in preview["rows"]}
+
+
+@pytest.mark.parametrize("sequence", [None, 0, -1, 1.5, "abc"])
+def test_v3_rejects_missing_or_invalid_trade_sequence(sequence: object) -> None:
+    preview = derive_execution_preview(_plan(), [{**_execution(10, 100), "execution_sequence": sequence}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
+    assert preview["runner_result"] == BLOCKED
+
+
+def test_v3_rejects_duplicate_and_not_executed_sequence_but_allows_gaps() -> None:
+    plan = [{"symbol": "AAPL", "action": "BUY", "quantity": 1, "price": 100}, {"symbol": "MSFT", "action": "BUY", "quantity": 1, "price": 100}]
+    duplicate = [{**_execution(1, 100), "execution_sequence": 3}, {**_execution(1, 100), "symbol": "MSFT", "page_id": "page-msft", "external_key": build_manual_execution_key(ACCOUNT, TRADE_DATE, "MSFT", "BUY", 1), "execution_sequence": 3}]
+    assert derive_execution_preview(plan, duplicate, account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)["runner_result"] == BLOCKED
+    gap = derive_execution_preview(plan, [{**duplicate[0], "execution_sequence": 2}, {**duplicate[1], "execution_sequence": 9}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
+    assert gap["runner_result"] == PASS
+    skipped = derive_execution_preview(_plan(), [{**_execution(None, None), "execution_sequence": 1}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
+    assert skipped["runner_result"] == BLOCKED

@@ -72,6 +72,7 @@ class ManualExecutionCandidate:
     import_status_raw: str | None
     imported_at_raw: str | None
     synced_at_raw: str | None
+    execution_sequence: int | float | None = None
     canonical_key: str = ""
     legacy_canonical_key: str | None = None
     legacy_key_compatible: bool = False
@@ -146,6 +147,7 @@ def build_manual_execution_preview(
     env: dict[str, str] | None = None,
     reports_dir: Path | None = None,
     max_long_positions: int = DEFAULT_MAX_LONG_POSITIONS,
+    execution_contract_version: str | None = None,
 ) -> ManualExecutionPreview:
     resolved_account_id = normalize_notion_account_id(account_id)
     if account_paths is not None and account_paths.account_id != resolved_account_id:
@@ -180,9 +182,12 @@ def build_manual_execution_preview(
     _assign_canonical_keys(candidates, account_id=resolved_account_id)
     _validate_duplicate_trade_ids(candidates, existing_trade_ids)
 
+    stateful_candidates = _stateful_validation_candidates(
+        candidates, execution_contract_version=execution_contract_version
+    )
     running_cash = available_cash
     running_holdings = dict(holdings)
-    for candidate in candidates:
+    for candidate in stateful_candidates:
         if (
             candidate.quantity is None
             or not float(candidate.quantity).is_integer()
@@ -240,16 +245,12 @@ def build_manual_execution_preview(
                 action_type=candidate.side,
                 quantity=candidate.quantity,
             )
-            for candidate in candidates
-            if candidate.quantity is not None
-            and math.isfinite(float(candidate.quantity))
-            and float(candidate.quantity).is_integer()
-            and candidate.quantity > 0
+            for candidate in stateful_candidates
         ],
         max_long_positions=max_long_positions,
         hedge_symbols=hedge_symbols,
     )
-    if candidates and not long_position_validation.allowed:
+    if stateful_candidates and not long_position_validation.allowed:
         issue = _long_position_cap_issue(long_position_validation)
         for candidate in candidates:
             candidate.validation_issues.append(issue)
@@ -359,6 +360,7 @@ def normalize_manual_execution_pages(
         side = _extract_select(properties, resolve_notion_property_name(mapping, "side")).upper().strip()
         quantity_value = _extract_number(properties, resolve_notion_property_name(mapping, "quantity"))
         actual_price = _extract_number(properties, resolve_notion_property_name(mapping, "actual_price"))
+        execution_sequence = _extract_optional_number(properties, mapping.get("execution_sequence"))
         quantity = int(quantity_value) if quantity_value is not None and float(quantity_value).is_integer() else quantity_value
         candidate = ManualExecutionCandidate(
             account_id=resolved_account_id,
@@ -382,6 +384,7 @@ def normalize_manual_execution_pages(
             import_status_raw=_extract_optional_select(properties, mapping.get("import_status")),
             imported_at_raw=_extract_optional_text(properties, mapping.get("imported_at")),
             synced_at_raw=_extract_optional_text(properties, mapping.get("synced_at")),
+            execution_sequence=execution_sequence,
         )
 
         commission_text = _extract_optional_number(properties, mapping.get("commission"))
@@ -466,6 +469,36 @@ def _validate_candidate_shape(candidate: ManualExecutionCandidate) -> None:
         candidate.validation_issues.append(
             ManualExecutionIssue(FAIL, "invalid_actual_price", f"Actual Price must be > 0, got {candidate.actual_price}.")
         )
+
+
+def _stateful_validation_candidates(
+    candidates: list[ManualExecutionCandidate],
+    *,
+    execution_contract_version: str | None = None,
+) -> list[ManualExecutionCandidate]:
+    """Return the actual trade stream; only explicit v3 activates sequence ordering."""
+    trade_bearing = [candidate for candidate in candidates if _is_trade_bearing_candidate(candidate)]
+    if execution_contract_version != "execution_reconciliation_preview.v3":
+        return trade_bearing
+    return sorted(trade_bearing, key=lambda candidate: _execution_sequence_sort_key(candidate.execution_sequence))
+
+
+def _is_trade_bearing_candidate(candidate: ManualExecutionCandidate) -> bool:
+    return (
+        candidate.quantity is not None
+        and math.isfinite(float(candidate.quantity))
+        and float(candidate.quantity).is_integer()
+        and candidate.quantity > 0
+        and candidate.actual_price is not None
+        and math.isfinite(float(candidate.actual_price))
+        and candidate.actual_price > 0
+    )
+
+
+def _execution_sequence_sort_key(value: int | float | None) -> tuple[int, float]:
+    if value is None or not math.isfinite(float(value)):
+        return (1, 0.0)
+    return (0, float(value))
 
 
 def _assign_canonical_keys(

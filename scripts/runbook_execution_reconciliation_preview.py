@@ -137,7 +137,7 @@ def get_workspace_preview_paths(
 
 
 def format_preview_markdown(preview: dict[str, Any]) -> str:
-    if preview.get("schema_version") == "execution_reconciliation_preview.v2":
+    if preview.get("schema_version") in {"execution_reconciliation_preview.v2", "execution_reconciliation_preview.v3"}:
         return _format_outcome_preview_markdown(preview)
     lines = [
         f"# Execution Reconciliation Preview - {preview['runner_result']}",
@@ -189,14 +189,15 @@ def _format_outcome_preview_markdown(preview: dict[str, Any]) -> str:
         f"- Waiting: {preview.get('waiting_count', 0)}",
         f"- Invalid: {preview.get('invalid_count', 0)}",
         "",
-        "| Outcome | Status | Symbol | Side | Planned Qty | Actual Qty | Actual Price | Reason |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+        "| Outcome | Status | Sequence | Symbol | Side | Planned Qty | Actual Qty | Actual Price | Reason |",
+        "| --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |",
     ]
     for row in preview.get("rows", []):
         lines.append(
-            "| {outcome} | {status} | {symbol} | {side} | {planned} | {actual} | {price} | {reason} |".format(
+            "| {outcome} | {status} | {sequence} | {symbol} | {side} | {planned} | {actual} | {price} | {reason} |".format(
                 outcome=row.get("outcome") or "",
                 status=row.get("status") or "",
+                sequence=_md_value(row.get("execution_sequence")),
                 symbol=row.get("symbol") or "",
                 side=row.get("side") or "",
                 planned=_md_value(row.get("planned_quantity")),

@@ -1,0 +1,1829 @@
+﻿# MFU-SV2 review patch
+# Implementation base: 0b3ac87816439cff546641986847c48ad5ad526b
+#
+# SECTION 1: BASE + approved SV1 + SV2 (current worktree diff)
+diff --git a/config/notion_property_mapping.example.json b/config/notion_property_mapping.example.json
+index 8d844d1..b50d963 100644
+--- a/config/notion_property_mapping.example.json
++++ b/config/notion_property_mapping.example.json
+@@ -141,6 +141,7 @@
+     "side": "Side",
+     "quantity": "Quantity",
+     "actual_price": "Actual Price",
++    "execution_sequence": "Execution Sequence",
+     "commission": "Commission",
+     "currency": "Currency",
+     "broker": "Broker",
+diff --git a/core/execution_outcome_flow.py b/core/execution_outcome_flow.py
+index 6e863a2..e7c11a0 100644
+--- a/core/execution_outcome_flow.py
++++ b/core/execution_outcome_flow.py
+@@ -19,10 +19,13 @@ from core.execution_reconciliation import (
+ 
+ RECONCILIATION_CONTRACT_V1 = "execution_reconciliation_preview.v1"
+ RECONCILIATION_CONTRACT_V2 = "execution_reconciliation_preview.v2"
++RECONCILIATION_CONTRACT_V3 = "execution_reconciliation_preview.v3"
+ OUTCOME_CONTRACT_V2 = "execution_outcome.v2"
++OUTCOME_CONTRACT_V3 = "execution_outcome.v3"
+ SUPPORTED_RECONCILIATION_CONTRACTS = {
+     RECONCILIATION_CONTRACT_V1,
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+ }
+ TRADE_BEARING_OUTCOMES = {EXECUTED, PARTIAL}
+ 
+@@ -48,7 +51,7 @@ def derive_execution_preview(
+             trade_date=trade_date,
+             daily_plan_path=daily_plan_path,
+         )
+-    if contract_version != RECONCILIATION_CONTRACT_V2:
++    if contract_version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+         return _unsupported_version_result(contract_version)
+ 
+     plan_rows = normalize_plan_items(daily_plan, account_id, trade_date)
+@@ -59,7 +62,7 @@ def derive_execution_preview(
+         "account_id": account_id,
+         "data_date": data_date,
+         "trade_date": trade_date,
+-        "contract_version": OUTCOME_CONTRACT_V2,
++        "contract_version": OUTCOME_CONTRACT_V3 if contract_version == RECONCILIATION_CONTRACT_V3 else OUTCOME_CONTRACT_V2,
+     }
+     result = derive_execution_outcomes(
+         plan_rows,
+@@ -68,8 +71,8 @@ def derive_execution_preview(
+         plan_context=context,
+         execution_context=context,
+     )
+-    result["schema_version"] = RECONCILIATION_CONTRACT_V2
+-    result["reconciliation_contract_version"] = RECONCILIATION_CONTRACT_V2
++    result["schema_version"] = contract_version
++    result["reconciliation_contract_version"] = contract_version
+     result["account_id"] = account_id
+     result["data_date"] = data_date
+     result["trade_date"] = trade_date
+@@ -95,6 +98,7 @@ def derive_execution_preview(
+             actual_price=execution_row.get("actual_price"),
+             page_id=execution_row.get("page_id"),
+             linked_daily_plan_key=execution_row.get("linked_daily_plan_key"),
++            execution_sequence=execution_row.get("execution_sequence"),
+         )
+         reason = _price_reason(row)
+         if reason is not None:
+@@ -107,10 +111,11 @@ def derive_execution_preview(
+                 }
+             )
+ 
+-    if price_errors:
++    sequence_errors = _validate_v3_execution_sequences(result.get("rows", [])) if contract_version == RECONCILIATION_CONTRACT_V3 else []
++    if price_errors or sequence_errors:
+         result["runner_result"] = BLOCKED
+         result["errors"] = sorted(
+-            [*result.get("errors", []), *price_errors],
++            [*result.get("errors", []), *price_errors, *sequence_errors],
+             key=lambda item: (str(item.get("candidate_key") or ""), str(item.get("reason_code") or "")),
+         )
+         result["invalid_count"] = len(result["errors"])
+@@ -123,7 +128,7 @@ def build_execution_commit_plan(preview: dict[str, Any]) -> dict[str, Any]:
+     version = preview.get("schema_version") or preview.get("reconciliation_contract_version")
+     if version == RECONCILIATION_CONTRACT_V1:
+         return {"runner_result": PASS, "dispatch": "V1", "legacy_preview": preview}
+-    if version != RECONCILIATION_CONTRACT_V2:
++    if version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+         return _unsupported_version_result(version)
+     if preview.get("input_finalized") is not True:
+         return {
+@@ -148,11 +153,13 @@ def build_execution_commit_plan(preview: dict[str, Any]) -> dict[str, Any]:
+             "rows": [],
+         }
+     trade_rows = [row for row in rows if row.get("outcome") in TRADE_BEARING_OUTCOMES]
++    if version == RECONCILIATION_CONTRACT_V3:
++        trade_rows.sort(key=lambda row: int(row["execution_sequence"]))
+     return {
+         "runner_result": PASS,
+-        "dispatch": "V2",
++        "dispatch": "V3" if version == RECONCILIATION_CONTRACT_V3 else "V2",
+         "rows": trade_rows,
+-        "candidate_keys": [row["candidate_key"] for row in trade_rows],
++        "candidate_keys": [row.get("candidate_key") for row in trade_rows],
+         "committed_trade_count": len(trade_rows),
+         "not_executed_count": sum(row.get("outcome") == NOT_EXECUTED for row in rows),
+         "persistent_write": bool(trade_rows),
+@@ -160,6 +167,98 @@ def build_execution_commit_plan(preview: dict[str, Any]) -> dict[str, Any]:
+     }
+ 
+ 
++def filter_execution_preview_candidates(
++    preview_payload: dict[str, Any],
++    eligible_candidate_keys: set[str],
++    *,
++    expected_outcome_rows: list[dict[str, Any]] | None = None,
++) -> dict[str, Any]:
++    """Share writer eligibility/consistency checks without changing its existing order."""
++    candidates = list(preview_payload.get("candidates") or [])
++    keyed = {}
++    for candidate in candidates:
++        key = str(candidate.get("canonical_key") or candidate.get("notion_external_key") or "").strip()
++        if key in eligible_candidate_keys and key in keyed:
++            raise ValueError(f"Duplicate input preview candidate key: {key}")
++        keyed[key] = candidate
++    missing = sorted(eligible_candidate_keys - set(keyed))
++    if missing:
++        raise ValueError(
++            "Outcome preview candidate keys are missing from the input preview: " + ", ".join(missing)
++        )
++    ordered_keys = sorted(eligible_candidate_keys)
++    if expected_outcome_rows is not None:
++        expected_by_key = {}
++        for row in expected_outcome_rows:
++            key = str(row.get("candidate_key") or "").strip()
++            if not key or key in expected_by_key:
++                raise ValueError("Pinned reconciliation preview has invalid trade-bearing candidate keys.")
++            expected_by_key[key] = row
++        if set(expected_by_key) != eligible_candidate_keys:
++            raise ValueError("Pinned reconciliation preview candidate keys changed before commit.")
++        ordered_keys = [str(row.get("candidate_key") or "").strip() for row in expected_outcome_rows]
++        for key in ordered_keys:
++            candidate = keyed[key]
++            expected = expected_by_key.get(key)
++            if expected is None:
++                raise ValueError(f"Missing outcome row for commit candidate: {key}")
++            if (
++                str(candidate.get("symbol") or "").strip().upper() != str(expected.get("symbol") or "").strip().upper()
++                or str(candidate.get("side") or "").strip().upper() != str(expected.get("side") or "").strip().upper()
++                or not _same_number(candidate.get("quantity"), expected.get("actual_quantity"))
++                or not _same_number(candidate.get("actual_price"), expected.get("actual_price"))
++                or (expected.get("execution_sequence") is not None and not _same_number(candidate.get("execution_sequence"), expected.get("execution_sequence")))
++            ):
++                raise ValueError(
++                    f"Input preview does not match the pinned outcome row: {key}"
++                )
++    selected = [keyed[key] for key in ordered_keys]
++    filtered = dict(preview_payload)
++    filtered["candidates"] = selected
++    filtered["candidate_count"] = len(selected)
++    filtered["pass_count"] = sum(item.get("validation_status") == PASS for item in selected)
++    filtered["warning_count"] = sum(item.get("validation_status") == "WARNING" for item in selected)
++    filtered["fail_count"] = sum(item.get("validation_status") not in {PASS, "WARNING"} for item in selected)
++    filtered["commit_allowed"] = (
++        "false"
++        if filtered["fail_count"]
++        else "true_with_warnings"
++        if filtered["warning_count"]
++        else "true"
++    )
++    return filtered
++
++
++def validate_effective_execution_candidates(
++    preview_payload: dict[str, Any],
++    reconciliation: dict[str, Any],
++) -> None:
++    """Reject an invalid v2 write-set before the runner creates a commit attempt."""
++    commit_plan = build_execution_commit_plan(reconciliation)
++    if commit_plan.get("runner_result") != PASS or commit_plan.get("dispatch") not in {"V2", "V3"}:
++        raise ValueError("Pinned reconciliation preview is not outcome commit-eligible.")
++    keys = [str(key or "").strip() for key in commit_plan["candidate_keys"]]
++    if any(not key for key in keys) or len(set(keys)) != len(keys):
++        raise ValueError("Pinned reconciliation preview has invalid trade-bearing candidate keys.")
++    effective_preview = filter_execution_preview_candidates(
++        preview_payload,
++        set(keys),
++        expected_outcome_rows=commit_plan["rows"],
++    )
++    if effective_preview["fail_count"]:
++        raise ValueError("Effective execution preview contains FAIL rows; commit is blocked.")
++    # WARNING policy remains with the existing writer/runbook contract.
++
++
++def _same_number(left: Any, right: Any) -> bool:
++    try:
++        left_number = Decimal(str(left))
++        right_number = Decimal(str(right))
++    except (InvalidOperation, ValueError):
++        return False
++    return left_number.is_finite() and right_number.is_finite() and left_number == right_number
++
++
+ def _price_reason(row: dict[str, Any]) -> str | None:
+     quantity_blank = _blank(row.get("actual_quantity"))
+     price_blank = _blank(row.get("actual_price"))
+@@ -174,6 +273,41 @@ def _price_reason(row: dict[str, Any]) -> str | None:
+     return None
+ 
+ 
++def _validate_v3_execution_sequences(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
++    errors: list[dict[str, Any]] = []
++    seen: dict[int, str] = {}
++    for row in rows:
++        sequence = _positive_integer(row.get("execution_sequence"))
++        outcome = row.get("outcome")
++        key = str(row.get("candidate_key") or "")
++        if outcome in TRADE_BEARING_OUTCOMES:
++            if sequence is None:
++                row.update(status=BLOCKED, outcome=None, reason_code="execution_sequence_required")
++                errors.append({"candidate_key": key, "reason_code": "execution_sequence_required", "message": "EXECUTED/PARTIAL requires a positive integer execution_sequence."})
++            elif sequence in seen:
++                row.update(status=BLOCKED, outcome=None, reason_code="duplicate_execution_sequence")
++                errors.append({"candidate_key": key, "reason_code": "duplicate_execution_sequence", "message": "execution_sequence must be unique within the account and trade date."})
++            else:
++                row["execution_sequence"] = sequence
++                seen[sequence] = key
++        elif outcome == NOT_EXECUTED and not _blank(row.get("execution_sequence")):
++            row.update(status=BLOCKED, outcome=None, reason_code="execution_sequence_not_executed_must_be_blank")
++            errors.append({"candidate_key": key, "reason_code": "execution_sequence_not_executed_must_be_blank", "message": "NOT_EXECUTED requires a blank execution_sequence."})
++    return errors
++
++
++def _positive_integer(value: Any) -> int | None:
++    if isinstance(value, bool) or _blank(value):
++        return None
++    try:
++        number = Decimal(str(value))
++    except (InvalidOperation, ValueError):
++        return None
++    if not number.is_finite() or number <= 0 or number != number.to_integral_value():
++        return None
++    return int(number)
++
++
+ def _positive_finite_decimal(value: Any) -> Decimal | None:
+     try:
+         number = Decimal(str(value))
+diff --git a/core/execution_reconciliation.py b/core/execution_reconciliation.py
+index 95ecf34..f48e61d 100644
+--- a/core/execution_reconciliation.py
++++ b/core/execution_reconciliation.py
+@@ -444,6 +444,7 @@ def normalize_execution_row(row: dict[str, Any], account_id: str, trade_date: st
+         "actual_quantity": quantity_raw if quantity is None and not _is_blank(quantity_raw) else _json_number(quantity),
+         "actual_price": price_raw if price is None and not _is_blank(price_raw) else _json_number(price),
+         "actual_notional": _json_number(_multiply(quantity, price)),
++        "execution_sequence": row.get("execution_sequence"),
+         "commission": row.get("commission"),
+         "status": _none_if_blank(row.get("status")),
+         "import_status": str(row.get("import_status") or row.get("import_status_raw") or "").strip().upper(),
+diff --git a/core/notion_exporters.py b/core/notion_exporters.py
+index 7dcc71b..e8b7c9b 100644
+--- a/core/notion_exporters.py
++++ b/core/notion_exporters.py
+@@ -132,6 +132,7 @@ class ManualExecutionTemplateExportCandidate:
+             "side": self.side,
+             "quantity": self.quantity,
+             "actual_price": None,
++            "execution_sequence": None,
+             "commission": 0,
+             "currency": "USD",
+             "broker": "PAPER",
+@@ -969,6 +970,7 @@ def build_manual_execution_template_properties(
+         resolve_notion_property_name(mapping, "symbol"): notion_rich_text(candidate.symbol),
+         resolve_notion_property_name(mapping, "side"): notion_select(candidate.side),
+         resolve_notion_property_name(mapping, "quantity"): notion_number(candidate.quantity),
++        resolve_notion_property_name(mapping, "execution_sequence"): notion_number(None),
+         resolve_notion_property_name(mapping, "commission"): notion_number(0),
+         resolve_notion_property_name(mapping, "currency"): notion_select("USD"),
+         resolve_notion_property_name(mapping, "broker"): broker_property,
+diff --git a/core/notion_manual_execution_importer.py b/core/notion_manual_execution_importer.py
+index 6c3d06f..7d29ca3 100644
+--- a/core/notion_manual_execution_importer.py
++++ b/core/notion_manual_execution_importer.py
+@@ -72,6 +72,7 @@ class ManualExecutionCandidate:
+     import_status_raw: str | None
+     imported_at_raw: str | None
+     synced_at_raw: str | None
++    execution_sequence: int | float | None = None
+     canonical_key: str = ""
+     legacy_canonical_key: str | None = None
+     legacy_key_compatible: bool = False
+@@ -359,6 +360,7 @@ def normalize_manual_execution_pages(
+         side = _extract_select(properties, resolve_notion_property_name(mapping, "side")).upper().strip()
+         quantity_value = _extract_number(properties, resolve_notion_property_name(mapping, "quantity"))
+         actual_price = _extract_number(properties, resolve_notion_property_name(mapping, "actual_price"))
++        execution_sequence = _extract_optional_number(properties, mapping.get("execution_sequence"))
+         quantity = int(quantity_value) if quantity_value is not None and float(quantity_value).is_integer() else quantity_value
+         candidate = ManualExecutionCandidate(
+             account_id=resolved_account_id,
+@@ -382,6 +384,7 @@ def normalize_manual_execution_pages(
+             import_status_raw=_extract_optional_select(properties, mapping.get("import_status")),
+             imported_at_raw=_extract_optional_text(properties, mapping.get("imported_at")),
+             synced_at_raw=_extract_optional_text(properties, mapping.get("synced_at")),
++            execution_sequence=execution_sequence,
+         )
+ 
+         commission_text = _extract_optional_number(properties, mapping.get("commission"))
+diff --git a/core/notion_schema_validator.py b/core/notion_schema_validator.py
+index 4abafcc..e6973fc 100644
+--- a/core/notion_schema_validator.py
++++ b/core/notion_schema_validator.py
+@@ -140,6 +140,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str,
+             _expected(manual_execution, "side", "select", select_options=("BUY", "SELL"), check_options=True),
+             _expected(manual_execution, "quantity", "number"),
+             _expected(manual_execution, "actual_price", "number"),
++            _expected(manual_execution, "execution_sequence", "number", required=False),
+             _expected(
+                 manual_execution,
+                 "status",
+diff --git a/core/paper_manual_execution_commit.py b/core/paper_manual_execution_commit.py
+index ff46b2b..374d460 100644
+--- a/core/paper_manual_execution_commit.py
++++ b/core/paper_manual_execution_commit.py
+@@ -5,7 +5,6 @@ import json
+ import shutil
+ from dataclasses import dataclass
+ from datetime import datetime
+-from decimal import Decimal, InvalidOperation
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -23,7 +22,9 @@ from core.notion_account_keys import (
+ )
+ from core.execution_outcome_flow import (
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+     build_execution_commit_plan,
++    filter_execution_preview_candidates,
+ )
+ from core.paper_account_guard import (
+     assert_account_writer_target,
+@@ -324,57 +325,14 @@ def _filter_preview_for_outcomes(
+     *,
+     expected_outcome_rows: list[dict[str, Any]] | None = None,
+ ) -> dict[str, Any]:
+-    candidates = list(preview_payload.get("candidates") or [])
+-    keyed = {
+-        str(candidate.get("canonical_key") or candidate.get("notion_external_key") or "").strip(): candidate
+-        for candidate in candidates
+-    }
+-    missing = sorted(eligible_candidate_keys - set(keyed))
+-    if missing:
+-        raise ManualExecutionCommitError(
+-            "Outcome preview candidate keys are missing from the input preview: " + ", ".join(missing)
+-        )
+-    selected = [keyed[key] for key in sorted(eligible_candidate_keys)]
+-    if expected_outcome_rows is not None:
+-        expected_by_key = {
+-            str(row.get("candidate_key") or "").strip(): row for row in expected_outcome_rows
+-        }
+-        for key, candidate in zip(sorted(eligible_candidate_keys), selected):
+-            expected = expected_by_key.get(key)
+-            if expected is None:
+-                raise ManualExecutionCommitError(f"Missing outcome row for commit candidate: {key}")
+-            if (
+-                str(candidate.get("symbol") or "").strip().upper() != str(expected.get("symbol") or "").strip().upper()
+-                or str(candidate.get("side") or "").strip().upper() != str(expected.get("side") or "").strip().upper()
+-                or not _same_number(candidate.get("quantity"), expected.get("actual_quantity"))
+-                or not _same_number(candidate.get("actual_price"), expected.get("actual_price"))
+-            ):
+-                raise ManualExecutionCommitError(
+-                    f"Input preview does not match the pinned outcome row: {key}"
+-                )
+-    filtered = dict(preview_payload)
+-    filtered["candidates"] = selected
+-    filtered["candidate_count"] = len(selected)
+-    filtered["pass_count"] = sum(item.get("validation_status") == PASS for item in selected)
+-    filtered["warning_count"] = sum(item.get("validation_status") == WARNING for item in selected)
+-    filtered["fail_count"] = sum(item.get("validation_status") not in {PASS, WARNING} for item in selected)
+-    filtered["commit_allowed"] = (
+-        "false"
+-        if filtered["fail_count"]
+-        else "true_with_warnings"
+-        if filtered["warning_count"]
+-        else "true"
+-    )
+-    return filtered
+-
+-
+-def _same_number(left: Any, right: Any) -> bool:
+     try:
+-        left_number = Decimal(str(left))
+-        right_number = Decimal(str(right))
+-    except (InvalidOperation, ValueError):
+-        return False
+-    return left_number.is_finite() and right_number.is_finite() and left_number == right_number
++        return filter_execution_preview_candidates(
++            preview_payload,
++            eligible_candidate_keys,
++            expected_outcome_rows=expected_outcome_rows,
++        )
++    except ValueError as exc:
++        raise ManualExecutionCommitError(str(exc)) from exc
+ 
+ 
+ def _validate_v2_reconciliation_evidence(
+@@ -405,8 +363,8 @@ def _validate_v2_reconciliation_evidence(
+     if not isinstance(payload, dict):
+         raise ManualExecutionCommitError("Pinned reconciliation preview root must be an object.")
+     version = payload.get("schema_version") or payload.get("reconciliation_contract_version")
+-    if version != RECONCILIATION_CONTRACT_V2:
+-        raise ManualExecutionCommitError("Pinned reconciliation preview is not the v2 contract.")
++    if version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
++        raise ManualExecutionCommitError("Pinned reconciliation preview is not an outcome contract.")
+     expected_context = {
+         "account_id": account_id,
+         "data_date": str(data_date),
+@@ -450,6 +408,7 @@ def _validate_v2_reconciliation_evidence(
+         raise ManualExecutionCommitError("Pinned reconciliation preview outcome count invariant failed.")
+     return {
+         "data_date": str(data_date),
++        "execution_contract_version": version,
+         "reconciliation_preview_json_path": str(evidence_path),
+         "reconciliation_preview_sha256": actual_sha256,
+     }
+@@ -725,11 +684,10 @@ def _write_commit_sidecar(
+         ],
+     }
+     if v2_evidence is not None:
+-        payload.update(
+-            schema_version="execution_commit.v2",
+-            execution_contract_version=RECONCILIATION_CONTRACT_V2,
++        payload.update({
+             **v2_evidence,
+-        )
++            "schema_version": "execution_commit.v3" if v2_evidence.get("execution_contract_version") == RECONCILIATION_CONTRACT_V3 else "execution_commit.v2",
++        })
+     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+ 
+     lines = [
+@@ -772,9 +730,10 @@ def _write_zero_commit_sidecar(
+     json_path = reports_dir / f"manual_execution_import_commit_{compact_date}.json"
+     markdown_path = reports_dir / f"manual_execution_import_commit_{compact_date}.md"
+     reports_dir.mkdir(parents=True, exist_ok=True)
++    contract_version = v2_evidence.get("execution_contract_version")
+     payload = {
+-        "schema_version": "execution_commit.v2",
+-        "execution_contract_version": "execution_reconciliation_preview.v2",
++        "schema_version": "execution_commit.v3" if contract_version == RECONCILIATION_CONTRACT_V3 else "execution_commit.v2",
++        "execution_contract_version": contract_version,
+         "status": "COMMITTED",
+         "zero_write": True,
+         "account_id": account_id,
+diff --git a/scripts/import_notion_executions.py b/scripts/import_notion_executions.py
+index 763d625..7959bc1 100644
+--- a/scripts/import_notion_executions.py
++++ b/scripts/import_notion_executions.py
+@@ -22,6 +22,7 @@ from core.execution_reconciliation import (  # noqa: E402
+ )
+ from core.execution_outcome_flow import (  # noqa: E402
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+     build_execution_commit_plan,
+ )
+ from core.paper_manual_execution_commit import (  # noqa: E402
+@@ -154,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
+         or reconciliation_preview.get("reconciliation_contract_version")
+     )
+     commit_plan = build_execution_commit_plan(reconciliation_preview)
+-    if reconciliation_version == RECONCILIATION_CONTRACT_V2:
++    if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+         context_ok = (
+             reconciliation_preview.get("account_id") == resolved_account_id
+             and reconciliation_preview.get("data_date") == args.data_date
+@@ -191,21 +192,21 @@ def main(argv: list[str] | None = None) -> int:
+             account_paths=account_paths,
+             eligible_candidate_keys=(
+                 set(commit_plan.get("candidate_keys") or [])
+-                if reconciliation_version == RECONCILIATION_CONTRACT_V2
++                if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}
+                 else None
+             ),
+             expected_outcome_rows=(
+                 list(commit_plan.get("rows") or [])
+-                if reconciliation_version == RECONCILIATION_CONTRACT_V2
++                if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}
+                 else None
+             ),
+-            allow_zero_write=reconciliation_version == RECONCILIATION_CONTRACT_V2,
+-            data_date=args.data_date if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None,
++            allow_zero_write=reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3},
++            data_date=args.data_date if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None,
+             reconciliation_preview_json_path=(
+-                reconciliation_preview_path if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
++                reconciliation_preview_path if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None
+             ),
+             reconciliation_preview_sha256=(
+-                reconciliation_preview_sha256 if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
++                reconciliation_preview_sha256 if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None
+             ),
+         )
+     except (ManualExecutionCommitError, ValueError) as exc:
+diff --git a/scripts/runbook_execution_reconciliation_preview.py b/scripts/runbook_execution_reconciliation_preview.py
+index 3184c84..4b5c785 100644
+--- a/scripts/runbook_execution_reconciliation_preview.py
++++ b/scripts/runbook_execution_reconciliation_preview.py
+@@ -137,7 +137,7 @@ def get_workspace_preview_paths(
+ 
+ 
+ def format_preview_markdown(preview: dict[str, Any]) -> str:
+-    if preview.get("schema_version") == "execution_reconciliation_preview.v2":
++    if preview.get("schema_version") in {"execution_reconciliation_preview.v2", "execution_reconciliation_preview.v3"}:
+         return _format_outcome_preview_markdown(preview)
+     lines = [
+         f"# Execution Reconciliation Preview - {preview['runner_result']}",
+@@ -189,14 +189,15 @@ def _format_outcome_preview_markdown(preview: dict[str, Any]) -> str:
+         f"- Waiting: {preview.get('waiting_count', 0)}",
+         f"- Invalid: {preview.get('invalid_count', 0)}",
+         "",
+-        "| Outcome | Status | Symbol | Side | Planned Qty | Actual Qty | Actual Price | Reason |",
+-        "| --- | --- | --- | --- | ---: | ---: | ---: | --- |",
++        "| Outcome | Status | Sequence | Symbol | Side | Planned Qty | Actual Qty | Actual Price | Reason |",
++        "| --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |",
+     ]
+     for row in preview.get("rows", []):
+         lines.append(
+-            "| {outcome} | {status} | {symbol} | {side} | {planned} | {actual} | {price} | {reason} |".format(
++            "| {outcome} | {status} | {sequence} | {symbol} | {side} | {planned} | {actual} | {price} | {reason} |".format(
+                 outcome=row.get("outcome") or "",
+                 status=row.get("status") or "",
++                sequence=_md_value(row.get("execution_sequence")),
+                 symbol=row.get("symbol") or "",
+                 side=row.get("side") or "",
+                 planned=_md_value(row.get("planned_quantity")),
+diff --git a/scripts/runbook_stage_b_verifier.py b/scripts/runbook_stage_b_verifier.py
+index afdd589..5859832 100644
+--- a/scripts/runbook_stage_b_verifier.py
++++ b/scripts/runbook_stage_b_verifier.py
+@@ -81,7 +81,7 @@ def verify_stage_b_completion(
+         (commit_payload or {}).get("execution_contract_version")
+         or resolution.get("execution_contract_version")
+     )
+-    is_v2 = commit_contract_version == runbook_state.EXECUTION_CONTRACT_V2
++    is_v2 = commit_contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+     v2_evidence: dict[str, Any] = {}
+     if commit_payload is not None:
+         _check_commit_report(commit_payload, account_id, trade_date, checks)
+@@ -429,7 +429,7 @@ def _resolve_stage_b_reports(
+     state_contract_version = (
+         runbook_state.get_execution_contract(state).get("version") if state is not None else None
+     )
+-    state_contract_is_v2 = state_contract_version == runbook_state.EXECUTION_CONTRACT_V2
++    state_contract_is_v2 = state_contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+     if sync_report is None and state is not None and not state_contract_is_v2:
+         sync_report = _resolve_pinned_artifact(
+             workspace,
+@@ -566,7 +566,7 @@ def _check_commit_report(payload: dict[str, Any], account_id: str, trade_date: s
+     committed_row_count = _committed_row_count(payload)
+     zero_write = (
+         payload.get("zero_write") is True
+-        and payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
++        and payload.get("execution_contract_version") in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+     )
+     status = str(payload.get("status") or "").upper()
+     if not status and _rows_all_committed(payload):
+@@ -636,7 +636,7 @@ def _check_v2_execution_evidence(
+     checks: list[dict[str, Any]],
+ ) -> dict[str, Any]:
+     evidence: dict[str, Any] = {
+-        "execution_contract_version": runbook_state.EXECUTION_CONTRACT_V2,
++        "execution_contract_version": commit_payload.get("execution_contract_version"),
+         "reconciliation_preview_json": None,
+         "reconciliation_preview_sha256": None,
+         "planned_count": 0,
+@@ -644,8 +644,9 @@ def _check_v2_execution_evidence(
+         "partial_count": 0,
+         "not_executed_count": 0,
+     }
+-    schema_ok = commit_payload.get("schema_version") == "execution_commit.v2"
+-    version_ok = commit_payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
++    contract_version = commit_payload.get("execution_contract_version")
++    schema_ok = commit_payload.get("schema_version") in {"execution_commit.v2", "execution_commit.v3"}
++    version_ok = contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+     checks.append(
+         _check(
+             "v2_commit_contract",
+@@ -734,7 +735,7 @@ def _check_v2_execution_evidence(
+ 
+     preview_context_ok = (
+         (preview.get("schema_version") or preview.get("reconciliation_contract_version"))
+-        == runbook_state.EXECUTION_CONTRACT_V2
++        in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+         and preview.get("account_id") == account_id
+         and preview.get("data_date") == data_date
+         and preview.get("trade_date") == trade_date
+diff --git a/scripts/runbook_stage_runner.py b/scripts/runbook_stage_runner.py
+index fef3123..c6e20ee 100644
+--- a/scripts/runbook_stage_runner.py
++++ b/scripts/runbook_stage_runner.py
+@@ -46,6 +46,11 @@ from core.paper_daily_review_scope import (
+     write_scope_manifest,
+ )
+ from core.paper_execution_intent import validate_daily_plan_execution_intent
++from core.execution_outcome_flow import (
++    RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
++    validate_effective_execution_candidates,
++)
+ from core.stage_a_asof_contract import (
+     StageAAsOfContext,
+     StageAAsOfContractError,
+@@ -636,6 +641,7 @@ def run_stage_b(
+     for command in sequence:
+         if command.command_key == "execution_commit" and not dry_run:
+             try:
++                _validate_stage_b_effective_candidates(state, workspace)
+                 logical = runbook_stage_b_recovery.build_stage_b_logical_operation(state, workspace)
+                 attempt_id = uuid.uuid4().hex
+                 _, preseal_ref = runbook_stage_b_recovery.write_precommit_evidence(
+@@ -657,7 +663,7 @@ def run_stage_b(
+                     state,
+                     workspace,
+                     command,
+-                    f"execution_commit idempotency blocked: {exc}",
++                    f"execution_commit precommit blocked: {exc}",
+                 )
+                 command_json_path, command_txt_path = _write_command_result_and_log(
+                     workspace,
+@@ -4658,6 +4664,27 @@ def _existing_artifacts_from_payload(payload: dict[str, Any], mapping: dict[str,
+     return artifacts
+ 
+ 
++def _validate_stage_b_effective_candidates(state: RunbookState, workspace: Path) -> None:
++    reconciliation_ref = state.artifacts.get("execution_reconciliation_preview_json")
++    if not reconciliation_ref:
++        raise ValueError("reconciliation_preview_artifact_required")
++    reconciliation = json.loads(
++        _artifact_ref_path(workspace, reconciliation_ref).read_text(encoding="utf-8")
++    )
++    if not isinstance(reconciliation, dict):
++        raise ValueError("reconciliation_preview_root_must_be_object")
++    version = reconciliation.get("schema_version") or reconciliation.get("reconciliation_contract_version")
++    if version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
++        return
++    preview_ref = state.artifacts.get("execution_preview_json")
++    if not preview_ref:
++        raise ValueError("execution_preview_artifact_required")
++    preview = json.loads(_artifact_ref_path(workspace, preview_ref).read_text(encoding="utf-8"))
++    if not isinstance(preview, dict):
++        raise ValueError("execution_preview_root_must_be_object")
++    validate_effective_execution_candidates(preview, reconciliation)
++
++
+ def _validate_execution_preview_payload(payload: dict[str, Any]) -> dict[str, Any]:
+     blockers = []
+     is_v2 = payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
+diff --git a/scripts/runbook_state.py b/scripts/runbook_state.py
+index 4a8d2bb..10d2aa3 100644
+--- a/scripts/runbook_state.py
++++ b/scripts/runbook_state.py
+@@ -21,7 +21,8 @@ STATE_DIRNAME = "runbook_states"
+ SCHEMA_VERSION = "runbook_state.v1"
+ EXECUTION_CONTRACT_V1 = "execution_reconciliation_preview.v1"
+ EXECUTION_CONTRACT_V2 = "execution_reconciliation_preview.v2"
+-SUPPORTED_EXECUTION_CONTRACTS = {EXECUTION_CONTRACT_V1, EXECUTION_CONTRACT_V2}
++EXECUTION_CONTRACT_V3 = "execution_reconciliation_preview.v3"
++SUPPORTED_EXECUTION_CONTRACTS = {EXECUTION_CONTRACT_V1, EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}
+ STAGE_IDS = ("A", "GATE1", "B", "C", "GATE2", "D", "E", "F")
+ ALLOWED_STATUSES = {"READY", "PENDING", "RUNNING", "WAIT", "PASS", "BLOCKED", "FAILED", "DONE"}
+ ALLOWED_IDEMPOTENCY_STATUSES = {
+@@ -135,7 +136,7 @@ def create_initial_state(
+         last_completed_stage=None,
+         stage_status={stage_id: "PENDING" for stage_id in STAGE_IDS},
+         execution_contract={
+-            "version": EXECUTION_CONTRACT_V2,
++            "version": EXECUTION_CONTRACT_V3,
+             "input_finalized": False,
+             "finalized_at": None,
+         },
+@@ -239,7 +240,7 @@ def get_execution_contract(state: RunbookState) -> dict[str, Any]:
+ def activate_execution_outcome_v2(state: RunbookState) -> RunbookState:
+     contract = get_execution_contract(state)
+     version = contract.get("version")
+-    if version == EXECUTION_CONTRACT_V2:
++    if version in {EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}:
+         return state
+     if version != EXECUTION_CONTRACT_V1 or contract.get("input_finalized"):
+         raise ValueError("execution_contract_cannot_be_upgraded")
+@@ -274,11 +275,34 @@ def activate_execution_outcome_v2(state: RunbookState) -> RunbookState:
+     )
+ 
+ 
++def activate_execution_order_v3(state: RunbookState) -> RunbookState:
++    """Upgrade only an untouched v2 execution before any B-stage evidence exists."""
++    contract = get_execution_contract(state)
++    if contract.get("version") == EXECUTION_CONTRACT_V3:
++        return state
++    if contract.get("version") != EXECUTION_CONTRACT_V2 or contract.get("input_finalized"):
++        raise ValueError("execution_contract_cannot_be_upgraded")
++    if (
++        state.stage_status.get("B") != "PENDING"
++        or (state.last_completed_step is not None and state.last_completed_step >= 7)
++        or any(name in state.artifacts for name in ("execution_reconciliation_preview_json", "execution_commit_report_json"))
++        or state.idempotency_records
++    ):
++        raise ValueError("completed_or_started_v2_execution_contract_is_immutable")
++    timestamp = _next_updated_at(state)
++    return replace(
++        state,
++        updated_at=timestamp,
++        execution_contract={"version": EXECUTION_CONTRACT_V3, "input_finalized": False, "finalized_at": None},
++        history=_append_history(state, {"event_type": "execution_order_v3_activated", "stage_id": state.current_stage, "step_id": state.last_completed_step, "status": state.current_status, "reason": None, "created_at": timestamp}),
++    )
++
++
+ def finalize_execution_input(state: RunbookState) -> RunbookState:
+     """Finalize v2 input once; a repeated Finalize is an exact no-op."""
+     contract = get_execution_contract(state)
+-    if contract.get("version") != EXECUTION_CONTRACT_V2:
+-        raise ValueError("execution_finalize_requires_v2_contract")
++    if contract.get("version") not in {EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}:
++        raise ValueError("execution_finalize_requires_v2_or_v3_contract")
+     if contract.get("input_finalized") is True:
+         return state
+     timestamp = _next_updated_at(state)
+diff --git a/tests/test_execution_outcome_flow.py b/tests/test_execution_outcome_flow.py
+index deacacc..b694fd6 100644
+--- a/tests/test_execution_outcome_flow.py
++++ b/tests/test_execution_outcome_flow.py
+@@ -8,6 +8,7 @@ import pytest
+ from core.execution_outcome_flow import (
+     RECONCILIATION_CONTRACT_V1,
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+     build_execution_commit_plan,
+     derive_execution_preview,
+ )
+@@ -18,6 +19,9 @@ from core.paper_manual_execution_commit import commit_manual_execution_preview
+ from core.paper_daily_review_scope import sha256_file
+ from scripts.runbook_state import (
+     EXECUTION_CONTRACT_V1,
++    EXECUTION_CONTRACT_V2,
++    EXECUTION_CONTRACT_V3,
++    activate_execution_order_v3,
+     activate_execution_outcome_v2,
+     create_initial_state,
+     finalize_execution_input,
+@@ -138,7 +142,7 @@ def test_explicit_invalid_or_excess_input_is_blocked(quantity: object, price: ob
+ 
+ 
+ def test_finalize_first_call_succeeds_and_second_is_exact_no_op() -> None:
+-    state = activate_execution_outcome_v2(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE))
++    state = create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE)
+     finalized = finalize_execution_input(state)
+     assert finalized.execution_contract["input_finalized"] is True
+     assert finalize_execution_input(finalized) is finalized
+@@ -147,7 +151,7 @@ def test_finalize_first_call_succeeds_and_second_is_exact_no_op() -> None:
+ def test_runbook_preview_reads_persisted_finalize_state(tmp_path) -> None:
+     workspace = tmp_path / "workspace"
+     state = finalize_execution_input(
+-        activate_execution_outcome_v2(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE))
++        create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE)
+     )
+     save_state(
+         state,
+@@ -276,6 +280,14 @@ def test_completed_v1_runbook_cannot_be_upgraded() -> None:
+         activate_execution_outcome_v2(state)
+ 
+ 
++def test_only_untouched_v2_state_can_activate_to_v3() -> None:
++    state = replace(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE), execution_contract={"version": EXECUTION_CONTRACT_V2, "input_finalized": False, "finalized_at": None})
++    assert activate_execution_order_v3(state).execution_contract["version"] == EXECUTION_CONTRACT_V3
++    started = replace(state, stage_status={**state.stage_status, "B": "PASS"})
++    with pytest.raises(ValueError, match="immutable"):
++        activate_execution_order_v3(started)
++
++
+ def test_unsupported_contract_version_fails_closed() -> None:
+     preview = derive_execution_preview(
+         _plan(), [_execution(10, 100)], account_id=ACCOUNT, data_date=DATA_DATE,
+@@ -284,3 +296,36 @@ def test_unsupported_contract_version_fails_closed() -> None:
+     )
+     assert preview["runner_result"] == BLOCKED
+     assert build_execution_commit_plan(preview)["runner_result"] == BLOCKED
++
++
++def test_v3_orders_trade_bearing_rows_by_execution_sequence_and_preserves_identity() -> None:
++    plan = [
++        {"symbol": "AAPL", "action": "BUY", "quantity": 1, "price": 100},
++        {"symbol": "MSFT", "action": "SELL", "quantity": 1, "price": 100},
++    ]
++    rows = [
++        {**_execution(1, 100), "execution_sequence": 20},
++        {**_execution(1, 100), "symbol": "MSFT", "side": "SELL", "page_id": "page-msft", "external_key": build_manual_execution_key(ACCOUNT, TRADE_DATE, "MSFT", "SELL", 1), "execution_sequence": 5},
++    ]
++    preview = derive_execution_preview(plan, rows, account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
++    commit_plan = build_execution_commit_plan(preview)
++    assert preview["runner_result"] == PASS
++    assert [row["symbol"] for row in commit_plan["rows"]] == ["MSFT", "AAPL"]
++    assert [row["execution_sequence"] for row in commit_plan["rows"]] == [5, 20]
++    assert {row["candidate_key"] for row in commit_plan["rows"]} == {row["candidate_key"] for row in preview["rows"]}
++
++
++@pytest.mark.parametrize("sequence", [None, 0, -1, 1.5, "abc"])
++def test_v3_rejects_missing_or_invalid_trade_sequence(sequence: object) -> None:
++    preview = derive_execution_preview(_plan(), [{**_execution(10, 100), "execution_sequence": sequence}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
++    assert preview["runner_result"] == BLOCKED
++
++
++def test_v3_rejects_duplicate_and_not_executed_sequence_but_allows_gaps() -> None:
++    plan = [{"symbol": "AAPL", "action": "BUY", "quantity": 1, "price": 100}, {"symbol": "MSFT", "action": "BUY", "quantity": 1, "price": 100}]
++    duplicate = [{**_execution(1, 100), "execution_sequence": 3}, {**_execution(1, 100), "symbol": "MSFT", "page_id": "page-msft", "external_key": build_manual_execution_key(ACCOUNT, TRADE_DATE, "MSFT", "BUY", 1), "execution_sequence": 3}]
++    assert derive_execution_preview(plan, duplicate, account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)["runner_result"] == BLOCKED
++    gap = derive_execution_preview(plan, [{**duplicate[0], "execution_sequence": 2}, {**duplicate[1], "execution_sequence": 9}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
++    assert gap["runner_result"] == PASS
++    skipped = derive_execution_preview(_plan(), [{**_execution(None, None), "execution_sequence": 1}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
++    assert skipped["runner_result"] == BLOCKED
+diff --git a/tests/test_paper_manual_execution_commit.py b/tests/test_paper_manual_execution_commit.py
+index 9ab166f..eacef31 100644
+--- a/tests/test_paper_manual_execution_commit.py
++++ b/tests/test_paper_manual_execution_commit.py
+@@ -293,7 +293,8 @@ def commit_env(monkeypatch):
+             shutil.rmtree(account_root)
+ 
+ 
+-def test_fail_preview_is_rejected(commit_env):
++@pytest.mark.parametrize("outcome", [None, "EXECUTED", "PARTIAL"])
++def test_fail_preview_is_rejected(commit_env, outcome, monkeypatch):
+     payload = _preview_payload(
+         date="2026-05-25",
+         commit_allowed="false",
+@@ -302,11 +303,25 @@ def test_fail_preview_is_rejected(commit_env):
+         candidates=[_candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0, validation_status="FAIL")],
+     )
+     commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
++    evidence = {}
++    if outcome is not None:
++        candidate = payload["candidates"][0]
++        evidence = _v2_evidence(commit_env["preview_path"].with_name("reconciliation.json"), [{
++            "candidate_key": candidate["canonical_key"], "symbol": "AAPL", "side": "BUY",
++            "actual_quantity": 1, "actual_price": 100.0, "outcome": outcome,
++        }])
++        evidence["eligible_candidate_keys"] = {candidate["canonical_key"]}
++    def unexpected_write(*args, **kwargs):
++        raise AssertionError("FAIL preview reached a domain writer")
++    for name in ("append_paper_execution_log", "save_paper_current_state",
++                 "save_paper_account_snapshot", "save_paper_position_snapshot"):
++        monkeypatch.setattr(commit_module, name, unexpected_write)
+     with pytest.raises(ManualExecutionCommitError, match="FAIL rows"):
+         commit_manual_execution_preview(
+             execution_date="2026-05-25",
+             preview_json_path=commit_env["preview_path"],
+             account_paths=commit_env["account_paths"],
++            **evidence,
+         )
+ 
+ 
+@@ -528,10 +543,11 @@ def test_current_state_save_failure_rolls_back(commit_env, monkeypatch):
+ def test_v2_outcome_filter_commits_only_trade_bearing_candidate(commit_env):
+     aapl = _candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)
+     msft = _candidate(symbol="MSFT", side="BUY", quantity=1, actual_price=200.0)
++    msft.update(quantity=None, actual_price=None, validation_status="FAIL")
+     payload = _preview_payload(
+         date="2026-05-25",
+-        commit_allowed="true",
+-        fail_count=0,
++        commit_allowed="false",
++        fail_count=1,
+         warning_count=0,
+         candidates=[aapl, msft],
+     )
+diff --git a/tests/test_runbook_stage_runner_stage_b.py b/tests/test_runbook_stage_runner_stage_b.py
+index 315ddcb..af64ec5 100644
+--- a/tests/test_runbook_stage_runner_stage_b.py
++++ b/tests/test_runbook_stage_runner_stage_b.py
+@@ -4,6 +4,9 @@ import json
+ import subprocess
+ import sys
+ from pathlib import Path
++from unittest.mock import Mock
++
++import pytest
+ 
+ from scripts import runbook_stage_runner
+ from scripts import runbook_stage_b_recovery
+@@ -14,6 +17,10 @@ from core.paper_account_paths import build_paper_account_paths
+ from core.paper_execution_intent import build_execution_intent
+ from core.paper_execution_log import paper_trade_preview_to_row
+ from core.paper_manual_execution_commit import _candidate_to_trade_preview
++from core.execution_outcome_flow import derive_execution_preview, RECONCILIATION_CONTRACT_V2
++from core.execution_reconciliation import build_manual_execution_key
++from core.notion_account_keys import build_daily_plan_external_key
++from core import paper_manual_execution_commit as commit_module
+ 
+ 
+ ACCOUNT_ID = "paper_a"
+@@ -217,8 +224,8 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]], *, zero_commit: bo
+                 commit_json.write_text(
+                     json.dumps(
+                         {
+-                            "schema_version": "execution_commit.v2",
+-                            "execution_contract_version": "execution_reconciliation_preview.v2",
++                            "schema_version": "execution_commit.v3",
++                            "execution_contract_version": "execution_reconciliation_preview.v3",
+                             "status": "COMMITTED",
+                             "zero_write": True,
+                             "account_id": ACCOUNT_ID,
+@@ -283,6 +290,164 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]], *, zero_commit: bo
+     return fake_run
+ 
+ 
++def _v2_inputs(outcomes: tuple[str, ...]) -> tuple[dict, dict]:
++    candidates = _execution_candidates(len(outcomes))
++    planned = []
++    rows = []
++    for candidate, outcome in zip(candidates, outcomes):
++        planned.append({
++            "symbol": candidate["symbol"], "action": candidate["side"],
++            "quantity": 10, "price": candidate["actual_price"],
++        })
++        candidate.update(
++            canonical_key=build_manual_execution_key(
++                ACCOUNT_ID, TRADE_DATE, candidate["symbol"], candidate["side"], 1
++            ),
++            quantity=10 if outcome == "EXECUTED" else 3,
++            validation_status="PASS",
++        )
++        if outcome == "NOT_EXECUTED":
++            candidate.update(quantity=None, actual_price=None, validation_status="FAIL")
++        rows.append({
++            **candidate,
++            "external_key": candidate["canonical_key"],
++            "page_id": candidate["symbol"],
++            "linked_daily_plan_key": build_daily_plan_external_key(ACCOUNT_ID, TRADE_DATE),
++            "status": "READY", "import_status": "NOT_IMPORTED",
++        })
++    reconciliation = derive_execution_preview(
++        planned, rows, account_id=ACCOUNT_ID, data_date=DATA_DATE, trade_date=TRADE_DATE,
++        contract_version=RECONCILIATION_CONTRACT_V2, input_finalized=True,
++    )
++    assert reconciliation["runner_result"] == "PASS"
++    assert [row["outcome"] for row in reconciliation["rows"]] == list(outcomes)
++    fail_count = sum(candidate["validation_status"] == "FAIL" for candidate in candidates)
++    return {
++        "execution_contract_version": RECONCILIATION_CONTRACT_V2,
++        "account_id": ACCOUNT_ID, "execution_date": TRADE_DATE,
++        "candidates": candidates, "candidate_count": len(candidates),
++        "fail_count": fail_count, "commit_allowed": "false" if fail_count else "true",
++    }, reconciliation
++
++
++def _install_v2_run(tmp_path, monkeypatch, preview, reconciliation):
++    state_path = _seed_gate1_pass_state(tmp_path)
++    state = runbook_state.finalize_execution_input(runbook_state.load_state(state_path))
++    runbook_state.save_state(state, state_path)
++    # All subprocesses are fake; account evidence reads are isolated too.
++    account_paths = build_paper_account_paths(ACCOUNT_ID, account_root=tmp_path / "account", create=False)
++    monkeypatch.setattr(runbook_stage_b_recovery, "build_paper_account_paths", lambda *a, **k: account_paths)
++    calls = []
++    zero = reconciliation["not_executed_count"] == reconciliation["planned_count"]
++    fake = _fake_stage_b_run(tmp_path, calls, zero_commit=zero)
++
++    def fake_run(argv, cwd, timeout_sec=1800):
++        result = fake(argv, cwd, timeout_sec)
++        payload = json.loads(result["stdout"])
++        if "--preview" in argv:
++            Path(payload["json_path"]).write_text(json.dumps(preview), encoding="utf-8")
++            payload.update(preview)
++        elif "runbook_execution_reconciliation_preview.py" in " ".join(argv):
++            Path(payload["preview_json"]).write_text(json.dumps(reconciliation), encoding="utf-8")
++            payload.update(reconciliation)
++        result["stdout"] = json.dumps(payload)
++        return result
++
++    command = Mock(side_effect=fake_run)
++    preseal = Mock(wraps=runbook_stage_b_recovery.write_precommit_evidence)
++    reserve = Mock(wraps=runbook_state.reserve_stage_b_execution_attempt)
++    writer = Mock(side_effect=AssertionError("domain writer must not be invoked"))
++    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", command)
++    monkeypatch.setattr(runbook_stage_b_recovery, "write_precommit_evidence", preseal)
++    monkeypatch.setattr(runbook_state, "reserve_stage_b_execution_attempt", reserve)
++    for name in ("append_paper_execution_log", "save_paper_current_state",
++                 "save_paper_account_snapshot", "save_paper_position_snapshot"):
++        monkeypatch.setattr(commit_module, name, writer)
++    return command, preseal, reserve, writer, state_path
++
++
++@pytest.mark.parametrize("outcome", ["EXECUTED", "PARTIAL"])
++@pytest.mark.parametrize("aggregate_fail_count", [0, 1])
++def test_v2_effective_fail_blocks_before_preseal_attempt_commit(
++    tmp_path, monkeypatch, outcome, aggregate_fail_count
++):
++    preview, reconciliation = _v2_inputs((outcome,))
++    preview["candidates"][0]["validation_status"] = "FAIL"
++    preview.update(fail_count=aggregate_fail_count, commit_allowed="false")
++    command, preseal, reserve, writer, state_path = _install_v2_run(
++        tmp_path, monkeypatch, preview, reconciliation
++    )
++
++    result = runbook_stage_runner.run_stage_b(
++        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
++    )
++
++    assert result["runner_result"] == "BLOCKED"
++    state = runbook_state.load_state(state_path)
++    assert "Effective execution preview contains FAIL rows" in state.last_error["reason"]
++    assert command.call_count == 2  # preview + reconciliation; commit/sync NOT_RUN
++    assert not any("--commit" in call.args[0] for call in command.call_args_list)
++    preseal.assert_not_called()
++    reserve.assert_not_called()
++    writer.assert_not_called()
++    assert state.idempotency_records == {}
++    assert "stage_b_execution_commit_preseal_json" not in state.artifacts
++    assert not list(tmp_path.rglob("*preseal*.json"))
++
++
++@pytest.mark.parametrize("mismatch", ["missing", "duplicate_preview", "duplicate_outcome", "blank_key", "price"])
++def test_v2_candidate_mapping_blocks_before_attempt(tmp_path, monkeypatch, mismatch):
++    preview, reconciliation = _v2_inputs(("EXECUTED",))
++    if mismatch == "missing":
++        preview["candidates"] = []
++    elif mismatch == "duplicate_preview":
++        preview["candidates"].append(dict(preview["candidates"][0]))
++    elif mismatch == "duplicate_outcome":
++        reconciliation["rows"].append(dict(reconciliation["rows"][0]))
++    elif mismatch == "blank_key":
++        reconciliation["rows"][0].pop("candidate_key")
++    else:
++        preview["candidates"][0]["actual_price"] += 1
++    command, preseal, reserve, writer, _ = _install_v2_run(tmp_path, monkeypatch, preview, reconciliation)
++    result = runbook_stage_runner.run_stage_b(
++        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
++    )
++    assert result["runner_result"] == "BLOCKED"
++    assert command.call_count == 2
++    preseal.assert_not_called()
++    reserve.assert_not_called()
++    writer.assert_not_called()
++
++
++def test_v2_valid_effective_candidates_continue_commit_path(tmp_path, monkeypatch):
++    preview, reconciliation = _v2_inputs(("EXECUTED", "PARTIAL"))
++    command, preseal, reserve, _, _ = _install_v2_run(tmp_path, monkeypatch, preview, reconciliation)
++    result = runbook_stage_runner.run_stage_b(
++        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
++    )
++    assert result["runner_result"] == "PASS"
++    preseal.assert_called_once()
++    reserve.assert_called_once()
++    assert sum("--commit" in call.args[0] for call in command.call_args_list) == 1
++
++
++@pytest.mark.parametrize("outcomes", [
++    ("EXECUTED", "NOT_EXECUTED"), ("NOT_EXECUTED", "NOT_EXECUTED"),
++])
++def test_v2_blank_skipped_rows_pass_effective_gate(tmp_path, monkeypatch, outcomes):
++    preview, reconciliation = _v2_inputs(outcomes)
++    _, _, _, _, state_path = _install_v2_run(tmp_path, monkeypatch, preview, reconciliation)
++    state = runbook_state.load_state(state_path)
++    preview_path = tmp_path / "pinned_preview.json"
++    recon_path = tmp_path / "pinned_reconciliation.json"
++    preview_path.write_text(json.dumps(preview), encoding="utf-8")
++    recon_path.write_text(json.dumps(reconciliation), encoding="utf-8")
++    state = runbook_state.record_artifact(state, "execution_preview_json", str(preview_path), tmp_path)
++    state = runbook_state.record_artifact(state, "execution_reconciliation_preview_json", str(recon_path), tmp_path)
++    assert preview["fail_count"] > 0 and preview["commit_allowed"] == "false"
++    assert runbook_stage_runner._validate_stage_b_effective_candidates(state, tmp_path) is None
++
++
+ def test_stage_b_dry_run_renders_step_7_7r_8_9_commands(tmp_path: Path) -> None:
+     _seed_gate1_pass_state(tmp_path)
+ 
+diff --git a/tests/test_runbook_state.py b/tests/test_runbook_state.py
+index 5aeda6f..c97d4bc 100644
+--- a/tests/test_runbook_state.py
++++ b/tests/test_runbook_state.py
+@@ -79,7 +79,7 @@ def test_initial_state_defaults() -> None:
+     assert set(state.stage_status) == {"A", "GATE1", "B", "C", "GATE2", "D", "E", "F"}
+     assert all(status == "PENDING" for status in state.stage_status.values())
+     assert state.execution_contract == {
+-        "version": runbook_state.EXECUTION_CONTRACT_V2,
++        "version": runbook_state.EXECUTION_CONTRACT_V3,
+         "input_finalized": False,
+         "finalized_at": None,
+     }
+@@ -102,7 +102,7 @@ def test_save_state_then_load_state_round_trips(tmp_path: Path) -> None:
+     assert loaded == state
+ 
+ 
+-def test_new_context_state_file_persists_v2_contract(tmp_path: Path) -> None:
++def test_new_context_state_file_persists_v3_contract(tmp_path: Path) -> None:
+     result, path, state = runbook_state.init_state_file_for_context(
+         tmp_path,
+         ACCOUNT_ID,
+@@ -113,18 +113,16 @@ def test_new_context_state_file_persists_v2_contract(tmp_path: Path) -> None:
+     loaded = runbook_state.load_state(path)
+ 
+     assert result == "CREATED"
+-    assert state.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V2
++    assert state.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V3
+     assert loaded.execution_contract == state.execution_contract
+ 
+ 
+-def test_new_v2_state_finalizes_without_activation_and_activation_is_exact_no_op() -> None:
++def test_new_v3_state_finalizes_without_activation() -> None:
+     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+ 
+-    assert runbook_state.activate_execution_outcome_v2(state) is state
+-
+     finalized = runbook_state.finalize_execution_input(state)
+ 
+-    assert finalized.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V2
++    assert finalized.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V3
+     assert finalized.execution_contract["input_finalized"] is True
+     assert finalized.execution_contract["finalized_at"] is not None
+ 
+#
+# SECTION 2: SV2-only (current SV2 worktree versus approved SV1 worktree)
+# Reference SV1 worktree: C:\Users\inocha\AppData\Local\Temp\StockScreener_MFU_SV1_20260911
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\config\\notion_property_mapping.example.json" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\config\\notion_property_mapping.example.json"
+index 8d844d1..b50d963 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\config\\notion_property_mapping.example.json"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\config\\notion_property_mapping.example.json"
+@@ -141,6 +141,7 @@
+     "side": "Side",
+     "quantity": "Quantity",
+     "actual_price": "Actual Price",
++    "execution_sequence": "Execution Sequence",
+     "commission": "Commission",
+     "currency": "Currency",
+     "broker": "Broker",
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\execution_outcome_flow.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\execution_outcome_flow.py"
+index 415ebb6..e7c11a0 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\execution_outcome_flow.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\execution_outcome_flow.py"
+@@ -19,10 +19,13 @@ from core.execution_reconciliation import (
+ 
+ RECONCILIATION_CONTRACT_V1 = "execution_reconciliation_preview.v1"
+ RECONCILIATION_CONTRACT_V2 = "execution_reconciliation_preview.v2"
++RECONCILIATION_CONTRACT_V3 = "execution_reconciliation_preview.v3"
+ OUTCOME_CONTRACT_V2 = "execution_outcome.v2"
++OUTCOME_CONTRACT_V3 = "execution_outcome.v3"
+ SUPPORTED_RECONCILIATION_CONTRACTS = {
+     RECONCILIATION_CONTRACT_V1,
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+ }
+ TRADE_BEARING_OUTCOMES = {EXECUTED, PARTIAL}
+ 
+@@ -48,7 +51,7 @@ def derive_execution_preview(
+             trade_date=trade_date,
+             daily_plan_path=daily_plan_path,
+         )
+-    if contract_version != RECONCILIATION_CONTRACT_V2:
++    if contract_version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+         return _unsupported_version_result(contract_version)
+ 
+     plan_rows = normalize_plan_items(daily_plan, account_id, trade_date)
+@@ -59,7 +62,7 @@ def derive_execution_preview(
+         "account_id": account_id,
+         "data_date": data_date,
+         "trade_date": trade_date,
+-        "contract_version": OUTCOME_CONTRACT_V2,
++        "contract_version": OUTCOME_CONTRACT_V3 if contract_version == RECONCILIATION_CONTRACT_V3 else OUTCOME_CONTRACT_V2,
+     }
+     result = derive_execution_outcomes(
+         plan_rows,
+@@ -68,8 +71,8 @@ def derive_execution_preview(
+         plan_context=context,
+         execution_context=context,
+     )
+-    result["schema_version"] = RECONCILIATION_CONTRACT_V2
+-    result["reconciliation_contract_version"] = RECONCILIATION_CONTRACT_V2
++    result["schema_version"] = contract_version
++    result["reconciliation_contract_version"] = contract_version
+     result["account_id"] = account_id
+     result["data_date"] = data_date
+     result["trade_date"] = trade_date
+@@ -95,6 +98,7 @@ def derive_execution_preview(
+             actual_price=execution_row.get("actual_price"),
+             page_id=execution_row.get("page_id"),
+             linked_daily_plan_key=execution_row.get("linked_daily_plan_key"),
++            execution_sequence=execution_row.get("execution_sequence"),
+         )
+         reason = _price_reason(row)
+         if reason is not None:
+@@ -107,10 +111,11 @@ def derive_execution_preview(
+                 }
+             )
+ 
+-    if price_errors:
++    sequence_errors = _validate_v3_execution_sequences(result.get("rows", [])) if contract_version == RECONCILIATION_CONTRACT_V3 else []
++    if price_errors or sequence_errors:
+         result["runner_result"] = BLOCKED
+         result["errors"] = sorted(
+-            [*result.get("errors", []), *price_errors],
++            [*result.get("errors", []), *price_errors, *sequence_errors],
+             key=lambda item: (str(item.get("candidate_key") or ""), str(item.get("reason_code") or "")),
+         )
+         result["invalid_count"] = len(result["errors"])
+@@ -123,7 +128,7 @@ def build_execution_commit_plan(preview: dict[str, Any]) -> dict[str, Any]:
+     version = preview.get("schema_version") or preview.get("reconciliation_contract_version")
+     if version == RECONCILIATION_CONTRACT_V1:
+         return {"runner_result": PASS, "dispatch": "V1", "legacy_preview": preview}
+-    if version != RECONCILIATION_CONTRACT_V2:
++    if version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+         return _unsupported_version_result(version)
+     if preview.get("input_finalized") is not True:
+         return {
+@@ -148,9 +153,11 @@ def build_execution_commit_plan(preview: dict[str, Any]) -> dict[str, Any]:
+             "rows": [],
+         }
+     trade_rows = [row for row in rows if row.get("outcome") in TRADE_BEARING_OUTCOMES]
++    if version == RECONCILIATION_CONTRACT_V3:
++        trade_rows.sort(key=lambda row: int(row["execution_sequence"]))
+     return {
+         "runner_result": PASS,
+-        "dispatch": "V2",
++        "dispatch": "V3" if version == RECONCILIATION_CONTRACT_V3 else "V2",
+         "rows": trade_rows,
+         "candidate_keys": [row.get("candidate_key") for row in trade_rows],
+         "committed_trade_count": len(trade_rows),
+@@ -179,8 +186,7 @@ def filter_execution_preview_candidates(
+         raise ValueError(
+             "Outcome preview candidate keys are missing from the input preview: " + ", ".join(missing)
+         )
+-    # Preserve the existing writer order; this is not an actual execution chronology.
+-    selected = [keyed[key] for key in sorted(eligible_candidate_keys)]
++    ordered_keys = sorted(eligible_candidate_keys)
+     if expected_outcome_rows is not None:
+         expected_by_key = {}
+         for row in expected_outcome_rows:
+@@ -188,7 +194,11 @@ def filter_execution_preview_candidates(
+             if not key or key in expected_by_key:
+                 raise ValueError("Pinned reconciliation preview has invalid trade-bearing candidate keys.")
+             expected_by_key[key] = row
+-        for key, candidate in zip(sorted(eligible_candidate_keys), selected):
++        if set(expected_by_key) != eligible_candidate_keys:
++            raise ValueError("Pinned reconciliation preview candidate keys changed before commit.")
++        ordered_keys = [str(row.get("candidate_key") or "").strip() for row in expected_outcome_rows]
++        for key in ordered_keys:
++            candidate = keyed[key]
+             expected = expected_by_key.get(key)
+             if expected is None:
+                 raise ValueError(f"Missing outcome row for commit candidate: {key}")
+@@ -197,10 +207,12 @@ def filter_execution_preview_candidates(
+                 or str(candidate.get("side") or "").strip().upper() != str(expected.get("side") or "").strip().upper()
+                 or not _same_number(candidate.get("quantity"), expected.get("actual_quantity"))
+                 or not _same_number(candidate.get("actual_price"), expected.get("actual_price"))
++                or (expected.get("execution_sequence") is not None and not _same_number(candidate.get("execution_sequence"), expected.get("execution_sequence")))
+             ):
+                 raise ValueError(
+                     f"Input preview does not match the pinned outcome row: {key}"
+                 )
++    selected = [keyed[key] for key in ordered_keys]
+     filtered = dict(preview_payload)
+     filtered["candidates"] = selected
+     filtered["candidate_count"] = len(selected)
+@@ -223,8 +235,8 @@ def validate_effective_execution_candidates(
+ ) -> None:
+     """Reject an invalid v2 write-set before the runner creates a commit attempt."""
+     commit_plan = build_execution_commit_plan(reconciliation)
+-    if commit_plan.get("runner_result") != PASS or commit_plan.get("dispatch") != "V2":
+-        raise ValueError("Pinned reconciliation preview is not v2 commit-eligible.")
++    if commit_plan.get("runner_result") != PASS or commit_plan.get("dispatch") not in {"V2", "V3"}:
++        raise ValueError("Pinned reconciliation preview is not outcome commit-eligible.")
+     keys = [str(key or "").strip() for key in commit_plan["candidate_keys"]]
+     if any(not key for key in keys) or len(set(keys)) != len(keys):
+         raise ValueError("Pinned reconciliation preview has invalid trade-bearing candidate keys.")
+@@ -261,6 +273,41 @@ def _price_reason(row: dict[str, Any]) -> str | None:
+     return None
+ 
+ 
++def _validate_v3_execution_sequences(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
++    errors: list[dict[str, Any]] = []
++    seen: dict[int, str] = {}
++    for row in rows:
++        sequence = _positive_integer(row.get("execution_sequence"))
++        outcome = row.get("outcome")
++        key = str(row.get("candidate_key") or "")
++        if outcome in TRADE_BEARING_OUTCOMES:
++            if sequence is None:
++                row.update(status=BLOCKED, outcome=None, reason_code="execution_sequence_required")
++                errors.append({"candidate_key": key, "reason_code": "execution_sequence_required", "message": "EXECUTED/PARTIAL requires a positive integer execution_sequence."})
++            elif sequence in seen:
++                row.update(status=BLOCKED, outcome=None, reason_code="duplicate_execution_sequence")
++                errors.append({"candidate_key": key, "reason_code": "duplicate_execution_sequence", "message": "execution_sequence must be unique within the account and trade date."})
++            else:
++                row["execution_sequence"] = sequence
++                seen[sequence] = key
++        elif outcome == NOT_EXECUTED and not _blank(row.get("execution_sequence")):
++            row.update(status=BLOCKED, outcome=None, reason_code="execution_sequence_not_executed_must_be_blank")
++            errors.append({"candidate_key": key, "reason_code": "execution_sequence_not_executed_must_be_blank", "message": "NOT_EXECUTED requires a blank execution_sequence."})
++    return errors
++
++
++def _positive_integer(value: Any) -> int | None:
++    if isinstance(value, bool) or _blank(value):
++        return None
++    try:
++        number = Decimal(str(value))
++    except (InvalidOperation, ValueError):
++        return None
++    if not number.is_finite() or number <= 0 or number != number.to_integral_value():
++        return None
++    return int(number)
++
++
+ def _positive_finite_decimal(value: Any) -> Decimal | None:
+     try:
+         number = Decimal(str(value))
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\execution_reconciliation.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\execution_reconciliation.py"
+index 95ecf34..f48e61d 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\execution_reconciliation.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\execution_reconciliation.py"
+@@ -444,6 +444,7 @@ def normalize_execution_row(row: dict[str, Any], account_id: str, trade_date: st
+         "actual_quantity": quantity_raw if quantity is None and not _is_blank(quantity_raw) else _json_number(quantity),
+         "actual_price": price_raw if price is None and not _is_blank(price_raw) else _json_number(price),
+         "actual_notional": _json_number(_multiply(quantity, price)),
++        "execution_sequence": row.get("execution_sequence"),
+         "commission": row.get("commission"),
+         "status": _none_if_blank(row.get("status")),
+         "import_status": str(row.get("import_status") or row.get("import_status_raw") or "").strip().upper(),
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\notion_exporters.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\notion_exporters.py"
+index 7dcc71b..e8b7c9b 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\notion_exporters.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\notion_exporters.py"
+@@ -132,6 +132,7 @@ class ManualExecutionTemplateExportCandidate:
+             "side": self.side,
+             "quantity": self.quantity,
+             "actual_price": None,
++            "execution_sequence": None,
+             "commission": 0,
+             "currency": "USD",
+             "broker": "PAPER",
+@@ -969,6 +970,7 @@ def build_manual_execution_template_properties(
+         resolve_notion_property_name(mapping, "symbol"): notion_rich_text(candidate.symbol),
+         resolve_notion_property_name(mapping, "side"): notion_select(candidate.side),
+         resolve_notion_property_name(mapping, "quantity"): notion_number(candidate.quantity),
++        resolve_notion_property_name(mapping, "execution_sequence"): notion_number(None),
+         resolve_notion_property_name(mapping, "commission"): notion_number(0),
+         resolve_notion_property_name(mapping, "currency"): notion_select("USD"),
+         resolve_notion_property_name(mapping, "broker"): broker_property,
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\notion_manual_execution_importer.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\notion_manual_execution_importer.py"
+index 6c3d06f..7d29ca3 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\notion_manual_execution_importer.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\notion_manual_execution_importer.py"
+@@ -72,6 +72,7 @@ class ManualExecutionCandidate:
+     import_status_raw: str | None
+     imported_at_raw: str | None
+     synced_at_raw: str | None
++    execution_sequence: int | float | None = None
+     canonical_key: str = ""
+     legacy_canonical_key: str | None = None
+     legacy_key_compatible: bool = False
+@@ -359,6 +360,7 @@ def normalize_manual_execution_pages(
+         side = _extract_select(properties, resolve_notion_property_name(mapping, "side")).upper().strip()
+         quantity_value = _extract_number(properties, resolve_notion_property_name(mapping, "quantity"))
+         actual_price = _extract_number(properties, resolve_notion_property_name(mapping, "actual_price"))
++        execution_sequence = _extract_optional_number(properties, mapping.get("execution_sequence"))
+         quantity = int(quantity_value) if quantity_value is not None and float(quantity_value).is_integer() else quantity_value
+         candidate = ManualExecutionCandidate(
+             account_id=resolved_account_id,
+@@ -382,6 +384,7 @@ def normalize_manual_execution_pages(
+             import_status_raw=_extract_optional_select(properties, mapping.get("import_status")),
+             imported_at_raw=_extract_optional_text(properties, mapping.get("imported_at")),
+             synced_at_raw=_extract_optional_text(properties, mapping.get("synced_at")),
++            execution_sequence=execution_sequence,
+         )
+ 
+         commission_text = _extract_optional_number(properties, mapping.get("commission"))
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\notion_schema_validator.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\notion_schema_validator.py"
+index 4abafcc..e6973fc 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\notion_schema_validator.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\notion_schema_validator.py"
+@@ -140,6 +140,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str,
+             _expected(manual_execution, "side", "select", select_options=("BUY", "SELL"), check_options=True),
+             _expected(manual_execution, "quantity", "number"),
+             _expected(manual_execution, "actual_price", "number"),
++            _expected(manual_execution, "execution_sequence", "number", required=False),
+             _expected(
+                 manual_execution,
+                 "status",
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\paper_manual_execution_commit.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\paper_manual_execution_commit.py"
+index 399e055..374d460 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\core\\paper_manual_execution_commit.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\core\\paper_manual_execution_commit.py"
+@@ -22,6 +22,7 @@ from core.notion_account_keys import (
+ )
+ from core.execution_outcome_flow import (
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+     build_execution_commit_plan,
+     filter_execution_preview_candidates,
+ )
+@@ -362,8 +363,8 @@ def _validate_v2_reconciliation_evidence(
+     if not isinstance(payload, dict):
+         raise ManualExecutionCommitError("Pinned reconciliation preview root must be an object.")
+     version = payload.get("schema_version") or payload.get("reconciliation_contract_version")
+-    if version != RECONCILIATION_CONTRACT_V2:
+-        raise ManualExecutionCommitError("Pinned reconciliation preview is not the v2 contract.")
++    if version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
++        raise ManualExecutionCommitError("Pinned reconciliation preview is not an outcome contract.")
+     expected_context = {
+         "account_id": account_id,
+         "data_date": str(data_date),
+@@ -407,6 +408,7 @@ def _validate_v2_reconciliation_evidence(
+         raise ManualExecutionCommitError("Pinned reconciliation preview outcome count invariant failed.")
+     return {
+         "data_date": str(data_date),
++        "execution_contract_version": version,
+         "reconciliation_preview_json_path": str(evidence_path),
+         "reconciliation_preview_sha256": actual_sha256,
+     }
+@@ -682,11 +684,10 @@ def _write_commit_sidecar(
+         ],
+     }
+     if v2_evidence is not None:
+-        payload.update(
+-            schema_version="execution_commit.v2",
+-            execution_contract_version=RECONCILIATION_CONTRACT_V2,
++        payload.update({
+             **v2_evidence,
+-        )
++            "schema_version": "execution_commit.v3" if v2_evidence.get("execution_contract_version") == RECONCILIATION_CONTRACT_V3 else "execution_commit.v2",
++        })
+     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+ 
+     lines = [
+@@ -729,9 +730,10 @@ def _write_zero_commit_sidecar(
+     json_path = reports_dir / f"manual_execution_import_commit_{compact_date}.json"
+     markdown_path = reports_dir / f"manual_execution_import_commit_{compact_date}.md"
+     reports_dir.mkdir(parents=True, exist_ok=True)
++    contract_version = v2_evidence.get("execution_contract_version")
+     payload = {
+-        "schema_version": "execution_commit.v2",
+-        "execution_contract_version": "execution_reconciliation_preview.v2",
++        "schema_version": "execution_commit.v3" if contract_version == RECONCILIATION_CONTRACT_V3 else "execution_commit.v2",
++        "execution_contract_version": contract_version,
+         "status": "COMMITTED",
+         "zero_write": True,
+         "account_id": account_id,
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\import_notion_executions.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\import_notion_executions.py"
+index 763d625..7959bc1 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\import_notion_executions.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\import_notion_executions.py"
+@@ -22,6 +22,7 @@ from core.execution_reconciliation import (  # noqa: E402
+ )
+ from core.execution_outcome_flow import (  # noqa: E402
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+     build_execution_commit_plan,
+ )
+ from core.paper_manual_execution_commit import (  # noqa: E402
+@@ -154,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
+         or reconciliation_preview.get("reconciliation_contract_version")
+     )
+     commit_plan = build_execution_commit_plan(reconciliation_preview)
+-    if reconciliation_version == RECONCILIATION_CONTRACT_V2:
++    if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+         context_ok = (
+             reconciliation_preview.get("account_id") == resolved_account_id
+             and reconciliation_preview.get("data_date") == args.data_date
+@@ -191,21 +192,21 @@ def main(argv: list[str] | None = None) -> int:
+             account_paths=account_paths,
+             eligible_candidate_keys=(
+                 set(commit_plan.get("candidate_keys") or [])
+-                if reconciliation_version == RECONCILIATION_CONTRACT_V2
++                if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}
+                 else None
+             ),
+             expected_outcome_rows=(
+                 list(commit_plan.get("rows") or [])
+-                if reconciliation_version == RECONCILIATION_CONTRACT_V2
++                if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}
+                 else None
+             ),
+-            allow_zero_write=reconciliation_version == RECONCILIATION_CONTRACT_V2,
+-            data_date=args.data_date if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None,
++            allow_zero_write=reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3},
++            data_date=args.data_date if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None,
+             reconciliation_preview_json_path=(
+-                reconciliation_preview_path if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
++                reconciliation_preview_path if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None
+             ),
+             reconciliation_preview_sha256=(
+-                reconciliation_preview_sha256 if reconciliation_version == RECONCILIATION_CONTRACT_V2 else None
++                reconciliation_preview_sha256 if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None
+             ),
+         )
+     except (ManualExecutionCommitError, ValueError) as exc:
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\runbook_execution_reconciliation_preview.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\runbook_execution_reconciliation_preview.py"
+index 3184c84..4b5c785 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\runbook_execution_reconciliation_preview.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\runbook_execution_reconciliation_preview.py"
+@@ -137,7 +137,7 @@ def get_workspace_preview_paths(
+ 
+ 
+ def format_preview_markdown(preview: dict[str, Any]) -> str:
+-    if preview.get("schema_version") == "execution_reconciliation_preview.v2":
++    if preview.get("schema_version") in {"execution_reconciliation_preview.v2", "execution_reconciliation_preview.v3"}:
+         return _format_outcome_preview_markdown(preview)
+     lines = [
+         f"# Execution Reconciliation Preview - {preview['runner_result']}",
+@@ -189,14 +189,15 @@ def _format_outcome_preview_markdown(preview: dict[str, Any]) -> str:
+         f"- Waiting: {preview.get('waiting_count', 0)}",
+         f"- Invalid: {preview.get('invalid_count', 0)}",
+         "",
+-        "| Outcome | Status | Symbol | Side | Planned Qty | Actual Qty | Actual Price | Reason |",
+-        "| --- | --- | --- | --- | ---: | ---: | ---: | --- |",
++        "| Outcome | Status | Sequence | Symbol | Side | Planned Qty | Actual Qty | Actual Price | Reason |",
++        "| --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |",
+     ]
+     for row in preview.get("rows", []):
+         lines.append(
+-            "| {outcome} | {status} | {symbol} | {side} | {planned} | {actual} | {price} | {reason} |".format(
++            "| {outcome} | {status} | {sequence} | {symbol} | {side} | {planned} | {actual} | {price} | {reason} |".format(
+                 outcome=row.get("outcome") or "",
+                 status=row.get("status") or "",
++                sequence=_md_value(row.get("execution_sequence")),
+                 symbol=row.get("symbol") or "",
+                 side=row.get("side") or "",
+                 planned=_md_value(row.get("planned_quantity")),
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\runbook_stage_b_verifier.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\runbook_stage_b_verifier.py"
+index afdd589..5859832 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\runbook_stage_b_verifier.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\runbook_stage_b_verifier.py"
+@@ -81,7 +81,7 @@ def verify_stage_b_completion(
+         (commit_payload or {}).get("execution_contract_version")
+         or resolution.get("execution_contract_version")
+     )
+-    is_v2 = commit_contract_version == runbook_state.EXECUTION_CONTRACT_V2
++    is_v2 = commit_contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+     v2_evidence: dict[str, Any] = {}
+     if commit_payload is not None:
+         _check_commit_report(commit_payload, account_id, trade_date, checks)
+@@ -429,7 +429,7 @@ def _resolve_stage_b_reports(
+     state_contract_version = (
+         runbook_state.get_execution_contract(state).get("version") if state is not None else None
+     )
+-    state_contract_is_v2 = state_contract_version == runbook_state.EXECUTION_CONTRACT_V2
++    state_contract_is_v2 = state_contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+     if sync_report is None and state is not None and not state_contract_is_v2:
+         sync_report = _resolve_pinned_artifact(
+             workspace,
+@@ -566,7 +566,7 @@ def _check_commit_report(payload: dict[str, Any], account_id: str, trade_date: s
+     committed_row_count = _committed_row_count(payload)
+     zero_write = (
+         payload.get("zero_write") is True
+-        and payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
++        and payload.get("execution_contract_version") in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+     )
+     status = str(payload.get("status") or "").upper()
+     if not status and _rows_all_committed(payload):
+@@ -636,7 +636,7 @@ def _check_v2_execution_evidence(
+     checks: list[dict[str, Any]],
+ ) -> dict[str, Any]:
+     evidence: dict[str, Any] = {
+-        "execution_contract_version": runbook_state.EXECUTION_CONTRACT_V2,
++        "execution_contract_version": commit_payload.get("execution_contract_version"),
+         "reconciliation_preview_json": None,
+         "reconciliation_preview_sha256": None,
+         "planned_count": 0,
+@@ -644,8 +644,9 @@ def _check_v2_execution_evidence(
+         "partial_count": 0,
+         "not_executed_count": 0,
+     }
+-    schema_ok = commit_payload.get("schema_version") == "execution_commit.v2"
+-    version_ok = commit_payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
++    contract_version = commit_payload.get("execution_contract_version")
++    schema_ok = commit_payload.get("schema_version") in {"execution_commit.v2", "execution_commit.v3"}
++    version_ok = contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+     checks.append(
+         _check(
+             "v2_commit_contract",
+@@ -734,7 +735,7 @@ def _check_v2_execution_evidence(
+ 
+     preview_context_ok = (
+         (preview.get("schema_version") or preview.get("reconciliation_contract_version"))
+-        == runbook_state.EXECUTION_CONTRACT_V2
++        in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
+         and preview.get("account_id") == account_id
+         and preview.get("data_date") == data_date
+         and preview.get("trade_date") == trade_date
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\runbook_stage_runner.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\runbook_stage_runner.py"
+index 1845bb2..c6e20ee 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\runbook_stage_runner.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\runbook_stage_runner.py"
+@@ -48,6 +48,7 @@ from core.paper_daily_review_scope import (
+ from core.paper_execution_intent import validate_daily_plan_execution_intent
+ from core.execution_outcome_flow import (
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+     validate_effective_execution_candidates,
+ )
+ from core.stage_a_asof_contract import (
+@@ -4673,7 +4674,7 @@ def _validate_stage_b_effective_candidates(state: RunbookState, workspace: Path)
+     if not isinstance(reconciliation, dict):
+         raise ValueError("reconciliation_preview_root_must_be_object")
+     version = reconciliation.get("schema_version") or reconciliation.get("reconciliation_contract_version")
+-    if version != RECONCILIATION_CONTRACT_V2:
++    if version not in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3}:
+         return
+     preview_ref = state.artifacts.get("execution_preview_json")
+     if not preview_ref:
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\runbook_state.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\runbook_state.py"
+index 4a8d2bb..10d2aa3 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\scripts\\runbook_state.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\scripts\\runbook_state.py"
+@@ -21,7 +21,8 @@ STATE_DIRNAME = "runbook_states"
+ SCHEMA_VERSION = "runbook_state.v1"
+ EXECUTION_CONTRACT_V1 = "execution_reconciliation_preview.v1"
+ EXECUTION_CONTRACT_V2 = "execution_reconciliation_preview.v2"
+-SUPPORTED_EXECUTION_CONTRACTS = {EXECUTION_CONTRACT_V1, EXECUTION_CONTRACT_V2}
++EXECUTION_CONTRACT_V3 = "execution_reconciliation_preview.v3"
++SUPPORTED_EXECUTION_CONTRACTS = {EXECUTION_CONTRACT_V1, EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}
+ STAGE_IDS = ("A", "GATE1", "B", "C", "GATE2", "D", "E", "F")
+ ALLOWED_STATUSES = {"READY", "PENDING", "RUNNING", "WAIT", "PASS", "BLOCKED", "FAILED", "DONE"}
+ ALLOWED_IDEMPOTENCY_STATUSES = {
+@@ -135,7 +136,7 @@ def create_initial_state(
+         last_completed_stage=None,
+         stage_status={stage_id: "PENDING" for stage_id in STAGE_IDS},
+         execution_contract={
+-            "version": EXECUTION_CONTRACT_V2,
++            "version": EXECUTION_CONTRACT_V3,
+             "input_finalized": False,
+             "finalized_at": None,
+         },
+@@ -239,7 +240,7 @@ def get_execution_contract(state: RunbookState) -> dict[str, Any]:
+ def activate_execution_outcome_v2(state: RunbookState) -> RunbookState:
+     contract = get_execution_contract(state)
+     version = contract.get("version")
+-    if version == EXECUTION_CONTRACT_V2:
++    if version in {EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}:
+         return state
+     if version != EXECUTION_CONTRACT_V1 or contract.get("input_finalized"):
+         raise ValueError("execution_contract_cannot_be_upgraded")
+@@ -274,11 +275,34 @@ def activate_execution_outcome_v2(state: RunbookState) -> RunbookState:
+     )
+ 
+ 
++def activate_execution_order_v3(state: RunbookState) -> RunbookState:
++    """Upgrade only an untouched v2 execution before any B-stage evidence exists."""
++    contract = get_execution_contract(state)
++    if contract.get("version") == EXECUTION_CONTRACT_V3:
++        return state
++    if contract.get("version") != EXECUTION_CONTRACT_V2 or contract.get("input_finalized"):
++        raise ValueError("execution_contract_cannot_be_upgraded")
++    if (
++        state.stage_status.get("B") != "PENDING"
++        or (state.last_completed_step is not None and state.last_completed_step >= 7)
++        or any(name in state.artifacts for name in ("execution_reconciliation_preview_json", "execution_commit_report_json"))
++        or state.idempotency_records
++    ):
++        raise ValueError("completed_or_started_v2_execution_contract_is_immutable")
++    timestamp = _next_updated_at(state)
++    return replace(
++        state,
++        updated_at=timestamp,
++        execution_contract={"version": EXECUTION_CONTRACT_V3, "input_finalized": False, "finalized_at": None},
++        history=_append_history(state, {"event_type": "execution_order_v3_activated", "stage_id": state.current_stage, "step_id": state.last_completed_step, "status": state.current_status, "reason": None, "created_at": timestamp}),
++    )
++
++
+ def finalize_execution_input(state: RunbookState) -> RunbookState:
+     """Finalize v2 input once; a repeated Finalize is an exact no-op."""
+     contract = get_execution_contract(state)
+-    if contract.get("version") != EXECUTION_CONTRACT_V2:
+-        raise ValueError("execution_finalize_requires_v2_contract")
++    if contract.get("version") not in {EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}:
++        raise ValueError("execution_finalize_requires_v2_or_v3_contract")
+     if contract.get("input_finalized") is True:
+         return state
+     timestamp = _next_updated_at(state)
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\tests\\test_execution_outcome_flow.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\tests\\test_execution_outcome_flow.py"
+index deacacc..b694fd6 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\tests\\test_execution_outcome_flow.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\tests\\test_execution_outcome_flow.py"
+@@ -8,6 +8,7 @@ import pytest
+ from core.execution_outcome_flow import (
+     RECONCILIATION_CONTRACT_V1,
+     RECONCILIATION_CONTRACT_V2,
++    RECONCILIATION_CONTRACT_V3,
+     build_execution_commit_plan,
+     derive_execution_preview,
+ )
+@@ -18,6 +19,9 @@ from core.paper_manual_execution_commit import commit_manual_execution_preview
+ from core.paper_daily_review_scope import sha256_file
+ from scripts.runbook_state import (
+     EXECUTION_CONTRACT_V1,
++    EXECUTION_CONTRACT_V2,
++    EXECUTION_CONTRACT_V3,
++    activate_execution_order_v3,
+     activate_execution_outcome_v2,
+     create_initial_state,
+     finalize_execution_input,
+@@ -138,7 +142,7 @@ def test_explicit_invalid_or_excess_input_is_blocked(quantity: object, price: ob
+ 
+ 
+ def test_finalize_first_call_succeeds_and_second_is_exact_no_op() -> None:
+-    state = activate_execution_outcome_v2(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE))
++    state = create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE)
+     finalized = finalize_execution_input(state)
+     assert finalized.execution_contract["input_finalized"] is True
+     assert finalize_execution_input(finalized) is finalized
+@@ -147,7 +151,7 @@ def test_finalize_first_call_succeeds_and_second_is_exact_no_op() -> None:
+ def test_runbook_preview_reads_persisted_finalize_state(tmp_path) -> None:
+     workspace = tmp_path / "workspace"
+     state = finalize_execution_input(
+-        activate_execution_outcome_v2(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE))
++        create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE)
+     )
+     save_state(
+         state,
+@@ -276,6 +280,14 @@ def test_completed_v1_runbook_cannot_be_upgraded() -> None:
+         activate_execution_outcome_v2(state)
+ 
+ 
++def test_only_untouched_v2_state_can_activate_to_v3() -> None:
++    state = replace(create_initial_state(ACCOUNT, DATA_DATE, TRADE_DATE), execution_contract={"version": EXECUTION_CONTRACT_V2, "input_finalized": False, "finalized_at": None})
++    assert activate_execution_order_v3(state).execution_contract["version"] == EXECUTION_CONTRACT_V3
++    started = replace(state, stage_status={**state.stage_status, "B": "PASS"})
++    with pytest.raises(ValueError, match="immutable"):
++        activate_execution_order_v3(started)
++
++
+ def test_unsupported_contract_version_fails_closed() -> None:
+     preview = derive_execution_preview(
+         _plan(), [_execution(10, 100)], account_id=ACCOUNT, data_date=DATA_DATE,
+@@ -284,3 +296,36 @@ def test_unsupported_contract_version_fails_closed() -> None:
+     )
+     assert preview["runner_result"] == BLOCKED
+     assert build_execution_commit_plan(preview)["runner_result"] == BLOCKED
++
++
++def test_v3_orders_trade_bearing_rows_by_execution_sequence_and_preserves_identity() -> None:
++    plan = [
++        {"symbol": "AAPL", "action": "BUY", "quantity": 1, "price": 100},
++        {"symbol": "MSFT", "action": "SELL", "quantity": 1, "price": 100},
++    ]
++    rows = [
++        {**_execution(1, 100), "execution_sequence": 20},
++        {**_execution(1, 100), "symbol": "MSFT", "side": "SELL", "page_id": "page-msft", "external_key": build_manual_execution_key(ACCOUNT, TRADE_DATE, "MSFT", "SELL", 1), "execution_sequence": 5},
++    ]
++    preview = derive_execution_preview(plan, rows, account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
++    commit_plan = build_execution_commit_plan(preview)
++    assert preview["runner_result"] == PASS
++    assert [row["symbol"] for row in commit_plan["rows"]] == ["MSFT", "AAPL"]
++    assert [row["execution_sequence"] for row in commit_plan["rows"]] == [5, 20]
++    assert {row["candidate_key"] for row in commit_plan["rows"]} == {row["candidate_key"] for row in preview["rows"]}
++
++
++@pytest.mark.parametrize("sequence", [None, 0, -1, 1.5, "abc"])
++def test_v3_rejects_missing_or_invalid_trade_sequence(sequence: object) -> None:
++    preview = derive_execution_preview(_plan(), [{**_execution(10, 100), "execution_sequence": sequence}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
++    assert preview["runner_result"] == BLOCKED
++
++
++def test_v3_rejects_duplicate_and_not_executed_sequence_but_allows_gaps() -> None:
++    plan = [{"symbol": "AAPL", "action": "BUY", "quantity": 1, "price": 100}, {"symbol": "MSFT", "action": "BUY", "quantity": 1, "price": 100}]
++    duplicate = [{**_execution(1, 100), "execution_sequence": 3}, {**_execution(1, 100), "symbol": "MSFT", "page_id": "page-msft", "external_key": build_manual_execution_key(ACCOUNT, TRADE_DATE, "MSFT", "BUY", 1), "execution_sequence": 3}]
++    assert derive_execution_preview(plan, duplicate, account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)["runner_result"] == BLOCKED
++    gap = derive_execution_preview(plan, [{**duplicate[0], "execution_sequence": 2}, {**duplicate[1], "execution_sequence": 9}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
++    assert gap["runner_result"] == PASS
++    skipped = derive_execution_preview(_plan(), [{**_execution(None, None), "execution_sequence": 1}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
++    assert skipped["runner_result"] == BLOCKED
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\tests\\test_runbook_stage_runner_stage_b.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\tests\\test_runbook_stage_runner_stage_b.py"
+index bbbba22..af64ec5 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\tests\\test_runbook_stage_runner_stage_b.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\tests\\test_runbook_stage_runner_stage_b.py"
+@@ -224,8 +224,8 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]], *, zero_commit: bo
+                 commit_json.write_text(
+                     json.dumps(
+                         {
+-                            "schema_version": "execution_commit.v2",
+-                            "execution_contract_version": "execution_reconciliation_preview.v2",
++                            "schema_version": "execution_commit.v3",
++                            "execution_contract_version": "execution_reconciliation_preview.v3",
+                             "status": "COMMITTED",
+                             "zero_write": True,
+                             "account_id": ACCOUNT_ID,
+diff --git "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\tests\\test_runbook_state.py" "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\tests\\test_runbook_state.py"
+index 5aeda6f..c97d4bc 100644
+--- "a/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV1_20260911\\tests\\test_runbook_state.py"
++++ "b/C:\\Users\\inocha\\AppData\\Local\\Temp\\StockScreener_MFU_SV2_20260912\\tests\\test_runbook_state.py"
+@@ -79,7 +79,7 @@ def test_initial_state_defaults() -> None:
+     assert set(state.stage_status) == {"A", "GATE1", "B", "C", "GATE2", "D", "E", "F"}
+     assert all(status == "PENDING" for status in state.stage_status.values())
+     assert state.execution_contract == {
+-        "version": runbook_state.EXECUTION_CONTRACT_V2,
++        "version": runbook_state.EXECUTION_CONTRACT_V3,
+         "input_finalized": False,
+         "finalized_at": None,
+     }
+@@ -102,7 +102,7 @@ def test_save_state_then_load_state_round_trips(tmp_path: Path) -> None:
+     assert loaded == state
+ 
+ 
+-def test_new_context_state_file_persists_v2_contract(tmp_path: Path) -> None:
++def test_new_context_state_file_persists_v3_contract(tmp_path: Path) -> None:
+     result, path, state = runbook_state.init_state_file_for_context(
+         tmp_path,
+         ACCOUNT_ID,
+@@ -113,18 +113,16 @@ def test_new_context_state_file_persists_v2_contract(tmp_path: Path) -> None:
+     loaded = runbook_state.load_state(path)
+ 
+     assert result == "CREATED"
+-    assert state.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V2
++    assert state.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V3
+     assert loaded.execution_contract == state.execution_contract
+ 
+ 
+-def test_new_v2_state_finalizes_without_activation_and_activation_is_exact_no_op() -> None:
++def test_new_v3_state_finalizes_without_activation() -> None:
+     state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+ 
+-    assert runbook_state.activate_execution_outcome_v2(state) is state
+-
+     finalized = runbook_state.finalize_execution_input(state)
+ 
+-    assert finalized.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V2
++    assert finalized.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V3
+     assert finalized.execution_contract["input_finalized"] is True
+     assert finalized.execution_contract["finalized_at"] is not None
+ 

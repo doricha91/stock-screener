@@ -81,7 +81,7 @@ def verify_stage_b_completion(
         (commit_payload or {}).get("execution_contract_version")
         or resolution.get("execution_contract_version")
     )
-    is_v2 = commit_contract_version == runbook_state.EXECUTION_CONTRACT_V2
+    is_v2 = commit_contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
     v2_evidence: dict[str, Any] = {}
     if commit_payload is not None:
         _check_commit_report(commit_payload, account_id, trade_date, checks)
@@ -429,7 +429,7 @@ def _resolve_stage_b_reports(
     state_contract_version = (
         runbook_state.get_execution_contract(state).get("version") if state is not None else None
     )
-    state_contract_is_v2 = state_contract_version == runbook_state.EXECUTION_CONTRACT_V2
+    state_contract_is_v2 = state_contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
     if sync_report is None and state is not None and not state_contract_is_v2:
         sync_report = _resolve_pinned_artifact(
             workspace,
@@ -566,7 +566,7 @@ def _check_commit_report(payload: dict[str, Any], account_id: str, trade_date: s
     committed_row_count = _committed_row_count(payload)
     zero_write = (
         payload.get("zero_write") is True
-        and payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
+        and payload.get("execution_contract_version") in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
     )
     status = str(payload.get("status") or "").upper()
     if not status and _rows_all_committed(payload):
@@ -636,7 +636,7 @@ def _check_v2_execution_evidence(
     checks: list[dict[str, Any]],
 ) -> dict[str, Any]:
     evidence: dict[str, Any] = {
-        "execution_contract_version": runbook_state.EXECUTION_CONTRACT_V2,
+        "execution_contract_version": commit_payload.get("execution_contract_version"),
         "reconciliation_preview_json": None,
         "reconciliation_preview_sha256": None,
         "planned_count": 0,
@@ -644,8 +644,9 @@ def _check_v2_execution_evidence(
         "partial_count": 0,
         "not_executed_count": 0,
     }
-    schema_ok = commit_payload.get("schema_version") == "execution_commit.v2"
-    version_ok = commit_payload.get("execution_contract_version") == runbook_state.EXECUTION_CONTRACT_V2
+    contract_version = commit_payload.get("execution_contract_version")
+    schema_ok = commit_payload.get("schema_version") in {"execution_commit.v2", "execution_commit.v3"}
+    version_ok = contract_version in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
     checks.append(
         _check(
             "v2_commit_contract",
@@ -734,7 +735,7 @@ def _check_v2_execution_evidence(
 
     preview_context_ok = (
         (preview.get("schema_version") or preview.get("reconciliation_contract_version"))
-        == runbook_state.EXECUTION_CONTRACT_V2
+        in {runbook_state.EXECUTION_CONTRACT_V2, runbook_state.EXECUTION_CONTRACT_V3}
         and preview.get("account_id") == account_id
         and preview.get("data_date") == data_date
         and preview.get("trade_date") == trade_date

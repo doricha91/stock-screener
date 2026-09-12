@@ -4,6 +4,9 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
 
 from scripts import runbook_stage_runner
 from scripts import runbook_stage_b_recovery
@@ -14,6 +17,10 @@ from core.paper_account_paths import build_paper_account_paths
 from core.paper_execution_intent import build_execution_intent
 from core.paper_execution_log import paper_trade_preview_to_row
 from core.paper_manual_execution_commit import _candidate_to_trade_preview
+from core.execution_outcome_flow import derive_execution_preview, RECONCILIATION_CONTRACT_V2
+from core.execution_reconciliation import build_manual_execution_key
+from core.notion_account_keys import build_daily_plan_external_key
+from core import paper_manual_execution_commit as commit_module
 
 
 ACCOUNT_ID = "paper_a"
@@ -217,8 +224,8 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]], *, zero_commit: bo
                 commit_json.write_text(
                     json.dumps(
                         {
-                            "schema_version": "execution_commit.v2",
-                            "execution_contract_version": "execution_reconciliation_preview.v2",
+                            "schema_version": "execution_commit.v3",
+                            "execution_contract_version": "execution_reconciliation_preview.v3",
                             "status": "COMMITTED",
                             "zero_write": True,
                             "account_id": ACCOUNT_ID,
@@ -281,6 +288,164 @@ def _fake_stage_b_run(tmp_path: Path, calls: list[list[str]], *, zero_commit: bo
         }
 
     return fake_run
+
+
+def _v2_inputs(outcomes: tuple[str, ...]) -> tuple[dict, dict]:
+    candidates = _execution_candidates(len(outcomes))
+    planned = []
+    rows = []
+    for candidate, outcome in zip(candidates, outcomes):
+        planned.append({
+            "symbol": candidate["symbol"], "action": candidate["side"],
+            "quantity": 10, "price": candidate["actual_price"],
+        })
+        candidate.update(
+            canonical_key=build_manual_execution_key(
+                ACCOUNT_ID, TRADE_DATE, candidate["symbol"], candidate["side"], 1
+            ),
+            quantity=10 if outcome == "EXECUTED" else 3,
+            validation_status="PASS",
+        )
+        if outcome == "NOT_EXECUTED":
+            candidate.update(quantity=None, actual_price=None, validation_status="FAIL")
+        rows.append({
+            **candidate,
+            "external_key": candidate["canonical_key"],
+            "page_id": candidate["symbol"],
+            "linked_daily_plan_key": build_daily_plan_external_key(ACCOUNT_ID, TRADE_DATE),
+            "status": "READY", "import_status": "NOT_IMPORTED",
+        })
+    reconciliation = derive_execution_preview(
+        planned, rows, account_id=ACCOUNT_ID, data_date=DATA_DATE, trade_date=TRADE_DATE,
+        contract_version=RECONCILIATION_CONTRACT_V2, input_finalized=True,
+    )
+    assert reconciliation["runner_result"] == "PASS"
+    assert [row["outcome"] for row in reconciliation["rows"]] == list(outcomes)
+    fail_count = sum(candidate["validation_status"] == "FAIL" for candidate in candidates)
+    return {
+        "execution_contract_version": RECONCILIATION_CONTRACT_V2,
+        "account_id": ACCOUNT_ID, "execution_date": TRADE_DATE,
+        "candidates": candidates, "candidate_count": len(candidates),
+        "fail_count": fail_count, "commit_allowed": "false" if fail_count else "true",
+    }, reconciliation
+
+
+def _install_v2_run(tmp_path, monkeypatch, preview, reconciliation):
+    state_path = _seed_gate1_pass_state(tmp_path)
+    state = runbook_state.finalize_execution_input(runbook_state.load_state(state_path))
+    runbook_state.save_state(state, state_path)
+    # All subprocesses are fake; account evidence reads are isolated too.
+    account_paths = build_paper_account_paths(ACCOUNT_ID, account_root=tmp_path / "account", create=False)
+    monkeypatch.setattr(runbook_stage_b_recovery, "build_paper_account_paths", lambda *a, **k: account_paths)
+    calls = []
+    zero = reconciliation["not_executed_count"] == reconciliation["planned_count"]
+    fake = _fake_stage_b_run(tmp_path, calls, zero_commit=zero)
+
+    def fake_run(argv, cwd, timeout_sec=1800):
+        result = fake(argv, cwd, timeout_sec)
+        payload = json.loads(result["stdout"])
+        if "--preview" in argv:
+            Path(payload["json_path"]).write_text(json.dumps(preview), encoding="utf-8")
+            payload.update(preview)
+        elif "runbook_execution_reconciliation_preview.py" in " ".join(argv):
+            Path(payload["preview_json"]).write_text(json.dumps(reconciliation), encoding="utf-8")
+            payload.update(reconciliation)
+        result["stdout"] = json.dumps(payload)
+        return result
+
+    command = Mock(side_effect=fake_run)
+    preseal = Mock(wraps=runbook_stage_b_recovery.write_precommit_evidence)
+    reserve = Mock(wraps=runbook_state.reserve_stage_b_execution_attempt)
+    writer = Mock(side_effect=AssertionError("domain writer must not be invoked"))
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", command)
+    monkeypatch.setattr(runbook_stage_b_recovery, "write_precommit_evidence", preseal)
+    monkeypatch.setattr(runbook_state, "reserve_stage_b_execution_attempt", reserve)
+    for name in ("append_paper_execution_log", "save_paper_current_state",
+                 "save_paper_account_snapshot", "save_paper_position_snapshot"):
+        monkeypatch.setattr(commit_module, name, writer)
+    return command, preseal, reserve, writer, state_path
+
+
+@pytest.mark.parametrize("outcome", ["EXECUTED", "PARTIAL"])
+@pytest.mark.parametrize("aggregate_fail_count", [0, 1])
+def test_v2_effective_fail_blocks_before_preseal_attempt_commit(
+    tmp_path, monkeypatch, outcome, aggregate_fail_count
+):
+    preview, reconciliation = _v2_inputs((outcome,))
+    preview["candidates"][0]["validation_status"] = "FAIL"
+    preview.update(fail_count=aggregate_fail_count, commit_allowed="false")
+    command, preseal, reserve, writer, state_path = _install_v2_run(
+        tmp_path, monkeypatch, preview, reconciliation
+    )
+
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+
+    assert result["runner_result"] == "BLOCKED"
+    state = runbook_state.load_state(state_path)
+    assert "Effective execution preview contains FAIL rows" in state.last_error["reason"]
+    assert command.call_count == 2  # preview + reconciliation; commit/sync NOT_RUN
+    assert not any("--commit" in call.args[0] for call in command.call_args_list)
+    preseal.assert_not_called()
+    reserve.assert_not_called()
+    writer.assert_not_called()
+    assert state.idempotency_records == {}
+    assert "stage_b_execution_commit_preseal_json" not in state.artifacts
+    assert not list(tmp_path.rglob("*preseal*.json"))
+
+
+@pytest.mark.parametrize("mismatch", ["missing", "duplicate_preview", "duplicate_outcome", "blank_key", "price"])
+def test_v2_candidate_mapping_blocks_before_attempt(tmp_path, monkeypatch, mismatch):
+    preview, reconciliation = _v2_inputs(("EXECUTED",))
+    if mismatch == "missing":
+        preview["candidates"] = []
+    elif mismatch == "duplicate_preview":
+        preview["candidates"].append(dict(preview["candidates"][0]))
+    elif mismatch == "duplicate_outcome":
+        reconciliation["rows"].append(dict(reconciliation["rows"][0]))
+    elif mismatch == "blank_key":
+        reconciliation["rows"][0].pop("candidate_key")
+    else:
+        preview["candidates"][0]["actual_price"] += 1
+    command, preseal, reserve, writer, _ = _install_v2_run(tmp_path, monkeypatch, preview, reconciliation)
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+    assert result["runner_result"] == "BLOCKED"
+    assert command.call_count == 2
+    preseal.assert_not_called()
+    reserve.assert_not_called()
+    writer.assert_not_called()
+
+
+def test_v2_valid_effective_candidates_continue_commit_path(tmp_path, monkeypatch):
+    preview, reconciliation = _v2_inputs(("EXECUTED", "PARTIAL"))
+    command, preseal, reserve, _, _ = _install_v2_run(tmp_path, monkeypatch, preview, reconciliation)
+    result = runbook_stage_runner.run_stage_b(
+        tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
+    )
+    assert result["runner_result"] == "PASS"
+    preseal.assert_called_once()
+    reserve.assert_called_once()
+    assert sum("--commit" in call.args[0] for call in command.call_args_list) == 1
+
+
+@pytest.mark.parametrize("outcomes", [
+    ("EXECUTED", "NOT_EXECUTED"), ("NOT_EXECUTED", "NOT_EXECUTED"),
+])
+def test_v2_blank_skipped_rows_pass_effective_gate(tmp_path, monkeypatch, outcomes):
+    preview, reconciliation = _v2_inputs(outcomes)
+    _, _, _, _, state_path = _install_v2_run(tmp_path, monkeypatch, preview, reconciliation)
+    state = runbook_state.load_state(state_path)
+    preview_path = tmp_path / "pinned_preview.json"
+    recon_path = tmp_path / "pinned_reconciliation.json"
+    preview_path.write_text(json.dumps(preview), encoding="utf-8")
+    recon_path.write_text(json.dumps(reconciliation), encoding="utf-8")
+    state = runbook_state.record_artifact(state, "execution_preview_json", str(preview_path), tmp_path)
+    state = runbook_state.record_artifact(state, "execution_reconciliation_preview_json", str(recon_path), tmp_path)
+    assert preview["fail_count"] > 0 and preview["commit_allowed"] == "false"
+    assert runbook_stage_runner._validate_stage_b_effective_candidates(state, tmp_path) is None
 
 
 def test_stage_b_dry_run_renders_step_7_7r_8_9_commands(tmp_path: Path) -> None:

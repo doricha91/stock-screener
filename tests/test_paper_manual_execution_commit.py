@@ -293,7 +293,8 @@ def commit_env(monkeypatch):
             shutil.rmtree(account_root)
 
 
-def test_fail_preview_is_rejected(commit_env):
+@pytest.mark.parametrize("outcome", [None, "EXECUTED", "PARTIAL"])
+def test_fail_preview_is_rejected(commit_env, outcome, monkeypatch):
     payload = _preview_payload(
         date="2026-05-25",
         commit_allowed="false",
@@ -302,11 +303,25 @@ def test_fail_preview_is_rejected(commit_env):
         candidates=[_candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0, validation_status="FAIL")],
     )
     commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    evidence = {}
+    if outcome is not None:
+        candidate = payload["candidates"][0]
+        evidence = _v2_evidence(commit_env["preview_path"].with_name("reconciliation.json"), [{
+            "candidate_key": candidate["canonical_key"], "symbol": "AAPL", "side": "BUY",
+            "actual_quantity": 1, "actual_price": 100.0, "outcome": outcome,
+        }])
+        evidence["eligible_candidate_keys"] = {candidate["canonical_key"]}
+    def unexpected_write(*args, **kwargs):
+        raise AssertionError("FAIL preview reached a domain writer")
+    for name in ("append_paper_execution_log", "save_paper_current_state",
+                 "save_paper_account_snapshot", "save_paper_position_snapshot"):
+        monkeypatch.setattr(commit_module, name, unexpected_write)
     with pytest.raises(ManualExecutionCommitError, match="FAIL rows"):
         commit_manual_execution_preview(
             execution_date="2026-05-25",
             preview_json_path=commit_env["preview_path"],
             account_paths=commit_env["account_paths"],
+            **evidence,
         )
 
 
@@ -528,10 +543,11 @@ def test_current_state_save_failure_rolls_back(commit_env, monkeypatch):
 def test_v2_outcome_filter_commits_only_trade_bearing_candidate(commit_env):
     aapl = _candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)
     msft = _candidate(symbol="MSFT", side="BUY", quantity=1, actual_price=200.0)
+    msft.update(quantity=None, actual_price=None, validation_status="FAIL")
     payload = _preview_payload(
         date="2026-05-25",
-        commit_allowed="true",
-        fail_count=0,
+        commit_allowed="false",
+        fail_count=1,
         warning_count=0,
         candidates=[aapl, msft],
     )

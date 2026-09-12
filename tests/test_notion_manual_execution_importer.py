@@ -41,6 +41,7 @@ def _mapping_root() -> dict[str, dict[str, str]]:
             "side": "Side",
             "quantity": "Quantity",
             "actual_price": "Actual Price",
+            "execution_sequence": "Execution Sequence",
             "commission": "Commission",
             "currency": "Currency",
             "broker": "Broker",
@@ -71,6 +72,7 @@ def _page(
     plan_date: str | None = "2026-05-25",
     linked_daily_plan_key: str | None = "daily_plan:2026-05-25",
     account_id: str | None = "paper_default",
+    execution_sequence: int | None = None,
 ) -> dict:
     properties = {
         "Name": {"type": "title", "title": [{"plain_text": f"{symbol} {side}"}]},
@@ -79,6 +81,7 @@ def _page(
         "Side": {"type": "select", "select": {"name": side}},
         "Quantity": {"type": "number", "number": quantity},
         "Actual Price": {"type": "number", "number": actual_price},
+        "Execution Sequence": {"type": "number", "number": execution_sequence},
         "Status": {"type": "select", "select": {"name": status}},
         "Note": {"type": "rich_text", "rich_text": []},
         "Broker": {"type": "rich_text", "rich_text": ([] if not broker else [{"plain_text": broker}])},
@@ -313,6 +316,53 @@ def test_preview_marks_cash_shortfall_as_fail(monkeypatch, tmp_path):
     )
     assert preview.fail_count == 1
     assert preview.candidates[0].validation_status == FAIL
+
+
+def test_preview_uses_v3_execution_sequence_for_stateful_cash_validation(monkeypatch, tmp_path):
+    _seed_ledgers(tmp_path)
+    monkeypatch.setattr(importer, "paper_account_snapshot_path", lambda: tmp_path / "paper_account_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_position_snapshot_path", lambda: tmp_path / "paper_position_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "reports")
+    pages = [
+        _page(page_id="page-buy", execution_date="2026-05-25", symbol="BUYME", side="BUY", quantity=10, actual_price=150.0, commission=0, currency="USD", broker="IBKR", execution_sequence=20),
+        _page(page_id="page-sell", execution_date="2026-05-25", symbol="F", side="SELL", quantity=10, actual_price=100.0, commission=0, currency="USD", broker="IBKR", execution_sequence=10),
+    ]
+    preview = build_manual_execution_preview(client=FakeClient(pages), settings=_settings(), mapping_root=_mapping_root(), execution_date="2026-05-25", execution_contract_version="execution_reconciliation_preview.v3")
+    assert preview.fail_count == 0
+    reversed_pages = [
+        {**pages[0], "properties": {**pages[0]["properties"], "Execution Sequence": {"type": "number", "number": 10}}},
+        {**pages[1], "properties": {**pages[1]["properties"], "Execution Sequence": {"type": "number", "number": 20}}},
+    ]
+    blocked = build_manual_execution_preview(client=FakeClient(reversed_pages), settings=_settings(), mapping_root=_mapping_root(), execution_date="2026-05-25", execution_contract_version="execution_reconciliation_preview.v3")
+    assert any(issue.code == "insufficient_cash" for candidate in blocked.candidates for issue in candidate.validation_issues)
+
+
+def test_v2_incidental_sequence_keeps_candidate_order(monkeypatch, tmp_path):
+    _seed_ledgers(tmp_path)
+    monkeypatch.setattr(importer, "paper_account_snapshot_path", lambda: tmp_path / "paper_account_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_position_snapshot_path", lambda: tmp_path / "paper_position_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "reports")
+    pages = [
+        _page(page_id="page-buy", execution_date="2026-05-25", symbol="BUYME", side="BUY", quantity=10, actual_price=150, commission=0, currency="USD", broker="IBKR", execution_sequence=20),
+        _page(page_id="page-sell", execution_date="2026-05-25", symbol="F", side="SELL", quantity=10, actual_price=100, commission=0, currency="USD", broker="IBKR", execution_sequence=10),
+    ]
+    preview = build_manual_execution_preview(client=FakeClient(pages), settings=_settings(), mapping_root=_mapping_root(), execution_date="2026-05-25", execution_contract_version="execution_reconciliation_preview.v2")
+    assert any(issue.code == "insufficient_cash" for candidate in preview.candidates for issue in candidate.validation_issues)
+
+
+def test_v3_long_cap_uses_sequence_order(monkeypatch, tmp_path):
+    _seed_ledgers(tmp_path)
+    _write(tmp_path / "paper_position_snapshot.csv", "snapshot_date,symbol,shares\n2026-05-20,F,10\n")
+    monkeypatch.setattr(importer, "paper_account_snapshot_path", lambda: tmp_path / "paper_account_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_position_snapshot_path", lambda: tmp_path / "paper_position_snapshot.csv")
+    monkeypatch.setattr(importer, "paper_reports_dir", lambda: tmp_path / "reports")
+    def preview(buy_sequence, sell_sequence):
+        return build_manual_execution_preview(client=FakeClient([
+            _page(page_id="buy", execution_date="2026-05-25", symbol="NEW", side="BUY", quantity=1, actual_price=10, commission=0, currency="USD", broker="IBKR", execution_sequence=buy_sequence),
+            _page(page_id="sell", execution_date="2026-05-25", symbol="F", side="SELL", quantity=10, actual_price=10, commission=0, currency="USD", broker="IBKR", execution_sequence=sell_sequence),
+        ]), settings=_settings(), mapping_root=_mapping_root(), execution_date="2026-05-25", execution_contract_version="execution_reconciliation_preview.v3", max_long_positions=1)
+    assert preview(20, 10).fail_count == 0
+    assert preview(10, 20).fail_count > 0
 
 
 def test_preview_only_queries_ready_rows_for_requested_date(monkeypatch, tmp_path):

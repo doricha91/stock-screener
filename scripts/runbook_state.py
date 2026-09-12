@@ -21,7 +21,8 @@ STATE_DIRNAME = "runbook_states"
 SCHEMA_VERSION = "runbook_state.v1"
 EXECUTION_CONTRACT_V1 = "execution_reconciliation_preview.v1"
 EXECUTION_CONTRACT_V2 = "execution_reconciliation_preview.v2"
-SUPPORTED_EXECUTION_CONTRACTS = {EXECUTION_CONTRACT_V1, EXECUTION_CONTRACT_V2}
+EXECUTION_CONTRACT_V3 = "execution_reconciliation_preview.v3"
+SUPPORTED_EXECUTION_CONTRACTS = {EXECUTION_CONTRACT_V1, EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}
 STAGE_IDS = ("A", "GATE1", "B", "C", "GATE2", "D", "E", "F")
 ALLOWED_STATUSES = {"READY", "PENDING", "RUNNING", "WAIT", "PASS", "BLOCKED", "FAILED", "DONE"}
 ALLOWED_IDEMPOTENCY_STATUSES = {
@@ -135,7 +136,7 @@ def create_initial_state(
         last_completed_stage=None,
         stage_status={stage_id: "PENDING" for stage_id in STAGE_IDS},
         execution_contract={
-            "version": EXECUTION_CONTRACT_V2,
+            "version": EXECUTION_CONTRACT_V3,
             "input_finalized": False,
             "finalized_at": None,
         },
@@ -239,7 +240,7 @@ def get_execution_contract(state: RunbookState) -> dict[str, Any]:
 def activate_execution_outcome_v2(state: RunbookState) -> RunbookState:
     contract = get_execution_contract(state)
     version = contract.get("version")
-    if version == EXECUTION_CONTRACT_V2:
+    if version in {EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}:
         return state
     if version != EXECUTION_CONTRACT_V1 or contract.get("input_finalized"):
         raise ValueError("execution_contract_cannot_be_upgraded")
@@ -274,11 +275,34 @@ def activate_execution_outcome_v2(state: RunbookState) -> RunbookState:
     )
 
 
+def activate_execution_order_v3(state: RunbookState) -> RunbookState:
+    """Upgrade only an untouched v2 execution before any B-stage evidence exists."""
+    contract = get_execution_contract(state)
+    if contract.get("version") == EXECUTION_CONTRACT_V3:
+        return state
+    if contract.get("version") != EXECUTION_CONTRACT_V2 or contract.get("input_finalized"):
+        raise ValueError("execution_contract_cannot_be_upgraded")
+    if (
+        state.stage_status.get("B") != "PENDING"
+        or (state.last_completed_step is not None and state.last_completed_step >= 7)
+        or any(name in state.artifacts for name in ("execution_reconciliation_preview_json", "execution_commit_report_json"))
+        or state.idempotency_records
+    ):
+        raise ValueError("completed_or_started_v2_execution_contract_is_immutable")
+    timestamp = _next_updated_at(state)
+    return replace(
+        state,
+        updated_at=timestamp,
+        execution_contract={"version": EXECUTION_CONTRACT_V3, "input_finalized": False, "finalized_at": None},
+        history=_append_history(state, {"event_type": "execution_order_v3_activated", "stage_id": state.current_stage, "step_id": state.last_completed_step, "status": state.current_status, "reason": None, "created_at": timestamp}),
+    )
+
+
 def finalize_execution_input(state: RunbookState) -> RunbookState:
     """Finalize v2 input once; a repeated Finalize is an exact no-op."""
     contract = get_execution_contract(state)
-    if contract.get("version") != EXECUTION_CONTRACT_V2:
-        raise ValueError("execution_finalize_requires_v2_contract")
+    if contract.get("version") not in {EXECUTION_CONTRACT_V2, EXECUTION_CONTRACT_V3}:
+        raise ValueError("execution_finalize_requires_v2_or_v3_contract")
     if contract.get("input_finalized") is True:
         return state
     timestamp = _next_updated_at(state)
