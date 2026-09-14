@@ -11,6 +11,7 @@ from core.execution_outcome_flow import (
     RECONCILIATION_CONTRACT_V3,
     build_execution_commit_plan,
     derive_execution_preview,
+    filter_execution_preview_candidates,
 )
 from core.execution_reconciliation import BLOCKED, EXECUTED, NOT_EXECUTED, PARTIAL, PASS, WAIT, build_manual_execution_key
 from core.notion_account_keys import build_daily_plan_external_key
@@ -329,3 +330,37 @@ def test_v3_rejects_duplicate_and_not_executed_sequence_but_allows_gaps() -> Non
     assert gap["runner_result"] == PASS
     skipped = derive_execution_preview(_plan(), [{**_execution(None, None), "execution_sequence": 1}], account_id=ACCOUNT, data_date=DATA_DATE, trade_date=TRADE_DATE, contract_version=RECONCILIATION_CONTRACT_V3, input_finalized=True)
     assert skipped["runner_result"] == BLOCKED
+
+
+def test_v3_preview_reconciliation_sequence_drift_is_blocked() -> None:
+    key = build_manual_execution_key(ACCOUNT, TRADE_DATE, "AAPL", "BUY", 1)
+    input_preview = {
+        "candidates": [
+            {
+                "canonical_key": key,
+                "symbol": "AAPL",
+                "side": "BUY",
+                "quantity": 10,
+                "actual_price": 100,
+                "execution_sequence": 2,
+                "validation_status": PASS,
+            }
+        ]
+    }
+    expected_rows = [
+        {
+            "candidate_key": key,
+            "symbol": "AAPL",
+            "side": "BUY",
+            "actual_quantity": 10,
+            "actual_price": 100,
+            "execution_sequence": 1,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="does not match the pinned outcome row"):
+        filter_execution_preview_candidates(
+            input_preview,
+            {key},
+            expected_outcome_rows=expected_rows,
+        )

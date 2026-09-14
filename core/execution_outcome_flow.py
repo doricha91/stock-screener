@@ -30,6 +30,51 @@ SUPPORTED_RECONCILIATION_CONTRACTS = {
 TRADE_BEARING_OUTCOMES = {EXECUTED, PARTIAL}
 
 
+def validate_v3_execution_input_requirements(
+    execution_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate editable v3 row fields with the reconciliation SSOT.
+
+    Gate 1 does not persist an outcome. A blank quantity represents the
+    finalized NOT_EXECUTED input; any non-blank quantity is trade-bearing for
+    the price/sequence requirements shared with reconciliation.
+    """
+    validation_rows: list[dict[str, Any]] = []
+    for index, execution_row in enumerate(execution_rows):
+        actual_quantity = execution_row.get("quantity")
+        validation_rows.append(
+            {
+                "candidate_key": f"gate-row:{index}",
+                "actual_quantity": actual_quantity,
+                "actual_price": execution_row.get("actual_price"),
+                "execution_sequence": execution_row.get("execution_sequence"),
+                "outcome": NOT_EXECUTED if _blank(actual_quantity) else EXECUTED,
+            }
+        )
+
+    errors: list[dict[str, Any]] = []
+    for row in validation_rows:
+        reason = _price_reason(row)
+        if reason is not None:
+            errors.append(
+                {
+                    "candidate_key": row["candidate_key"],
+                    "reason_code": reason,
+                    "message": "Quantity and price must both be blank, or both be finite and positive.",
+                }
+            )
+    errors.extend(_validate_v3_execution_sequences(validation_rows))
+
+    for error in errors:
+        index = int(str(error["candidate_key"]).removeprefix("gate-row:"))
+        source = execution_rows[index]
+        error["row_index"] = index
+        error["candidate_key"] = str(
+            source.get("external_key") or source.get("page_id") or f"row:{index}"
+        )
+    return errors
+
+
 def derive_execution_preview(
     daily_plan: dict[str, Any],
     execution_rows: list[dict[str, Any]],

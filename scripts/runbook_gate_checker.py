@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.notion_account_keys import normalize_notion_account_id
 from core.notion_client import NotionAPIError, NotionClient
+from core.execution_outcome_flow import validate_v3_execution_input_requirements
 from core.notion_mapping import (
     get_mapping_section,
     load_notion_property_mapping,
@@ -110,7 +111,10 @@ def check_gate1_readiness(
     if finalize_execution_input and execution_intent["action_mode"] == "EXECUTION":
         execution_contract = runbook_state.get_execution_contract(state)
         contract_version = execution_contract.get("version")
-        if contract_version == runbook_state.EXECUTION_CONTRACT_V2:
+        if contract_version in {
+            runbook_state.EXECUTION_CONTRACT_V2,
+            runbook_state.EXECUTION_CONTRACT_V3,
+        }:
             try:
                 finalized_state = runbook_state.finalize_execution_input(state)
                 if finalized_state is not state:
@@ -229,7 +233,7 @@ def check_gate1_readiness(
             "manual_execution_input_not_ready",
             next_poll_time,
         )
-        message = "Fill Actual Price and set Status=READY in Notion."
+        message = _gate1_input_prompt(state)
     runbook_state.save_state(state, state_path)
     result = create_gate_result(
         state,
@@ -253,7 +257,7 @@ def check_gate1_execution_input(
     row_fetcher: GateRowFetcher | None = None,
     next_poll_minutes: int = DEFAULT_NEXT_POLL_MINUTES,
 ) -> dict[str, Any]:
-    """Finalize eligible v2 execution input, then return the Gate 1 business result."""
+    """Finalize eligible v2/v3 execution input, then return the Gate 1 business result."""
     return check_gate1_readiness(
         workspace,
         account_id,
@@ -501,6 +505,7 @@ def normalize_gate1_rows(raw_rows: list[dict[str, Any]], state: RunbookState) ->
     trade_date = state.frozen_context.trade_date
     linked_daily_plan_key = build_linked_daily_plan_key(account_id, trade_date)
     rows = []
+    execution_contract = runbook_state.get_execution_contract(state)
     for raw in raw_rows:
         row = normalize_flat_manual_execution_row(raw)
         missing = _row_missing_reasons(
@@ -508,7 +513,7 @@ def normalize_gate1_rows(raw_rows: list[dict[str, Any]], state: RunbookState) ->
             account_id,
             trade_date,
             linked_daily_plan_key,
-            execution_contract=runbook_state.get_execution_contract(state),
+            execution_contract=execution_contract,
         )
         rows.append(
             {
@@ -517,6 +522,13 @@ def normalize_gate1_rows(raw_rows: list[dict[str, Any]], state: RunbookState) ->
                 "missing": missing,
             }
         )
+    if execution_contract.get("version") == runbook_state.EXECUTION_CONTRACT_V3:
+        for error in validate_v3_execution_input_requirements(rows):
+            row = rows[int(error["row_index"])]
+            reason_code = str(error["reason_code"])
+            if reason_code not in row["missing"]:
+                row["missing"].append(reason_code)
+            row["ready"] = False
     return rows
 
 
@@ -553,6 +565,7 @@ def normalize_flat_manual_execution_row(row: dict[str, Any]) -> dict[str, Any]:
         "side": str(row.get("side") or "").strip().upper(),
         "quantity": row.get("quantity"),
         "actual_price": actual_price,
+        "execution_sequence": row.get("execution_sequence"),
         "status": str(row.get("status") or "").strip().upper(),
         "import_status": str(row.get("import_status") or row.get("import_status_raw") or "").strip().upper(),
         "failed_count": int(row.get("failed_count") or 0),
@@ -586,6 +599,10 @@ def normalize_notion_manual_execution_page(page: dict[str, Any], mapping: dict[s
         "side": _extract_select(properties, resolve_notion_property_name(mapping, "side")),
         "quantity": _extract_number(properties, resolve_notion_property_name(mapping, "quantity")),
         "actual_price": _extract_number(properties, resolve_notion_property_name(mapping, "actual_price")),
+        "execution_sequence": _extract_number(
+            properties,
+            mapping.get("execution_sequence"),
+        ),
         "status": _extract_select(properties, resolve_notion_property_name(mapping, "status")),
         "import_status": _extract_select(properties, resolve_notion_property_name(mapping, "import_status")),
         "failed_count": 0,
@@ -655,7 +672,7 @@ def create_gate_result(
                 if runner_result == "PASS" and action_mode == "NO_ACTION"
                 else "Run Stage B execution preview."
                 if runner_result == "PASS"
-                else "Fill Actual Price and set Status=READY in Notion."
+                else _gate1_input_prompt(state)
             ),
             "next_poll_time": next_poll_time,
         },
@@ -890,14 +907,28 @@ def _row_missing_reasons(
         missing.append("import_status_NOT_IMPORTED")
     if row.get("status") != "READY":
         missing.append("status_READY")
-    is_v2 = (execution_contract or {}).get("version") == runbook_state.EXECUTION_CONTRACT_V2
-    if is_v2 and (execution_contract or {}).get("input_finalized") is not True:
+    contract_version = (execution_contract or {}).get("version")
+    is_outcome_contract = contract_version in {
+        runbook_state.EXECUTION_CONTRACT_V2,
+        runbook_state.EXECUTION_CONTRACT_V3,
+    }
+    if is_outcome_contract and (execution_contract or {}).get("input_finalized") is not True:
         missing.append("execution_input_not_finalized")
-    if not is_v2 and row.get("actual_price") is None:
+    if not is_outcome_contract and row.get("actual_price") is None:
         missing.append("actual_price")
     if int(row.get("failed_count") or 0) != 0:
         missing.append("failed_count")
     return missing
+
+
+def _gate1_input_prompt(state: RunbookState) -> str:
+    if runbook_state.get_execution_contract(state).get("version") == runbook_state.EXECUTION_CONTRACT_V3:
+        return (
+            "For EXECUTED/PARTIAL, fill Actual Price and Execution Sequence; "
+            "for NOT_EXECUTED, leave Quantity, Actual Price, and Execution Sequence blank; "
+            "then set Status=READY in Notion."
+        )
+    return "Fill Actual Price and set Status=READY in Notion."
 
 
 def _gate2_precondition_error(
@@ -1171,7 +1202,7 @@ def _extract_date(properties: dict[str, Any], property_name: str) -> str | None:
     return (prop.get("date") or {}).get("start")
 
 
-def _extract_number(properties: dict[str, Any], property_name: str) -> float | int | None:
+def _extract_number(properties: dict[str, Any], property_name: str | None) -> float | int | None:
     prop = properties.get(property_name) or {}
     return prop.get("number")
 

@@ -140,7 +140,7 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str, 
             _expected(manual_execution, "side", "select", select_options=("BUY", "SELL"), check_options=True),
             _expected(manual_execution, "quantity", "number"),
             _expected(manual_execution, "actual_price", "number"),
-            _expected(manual_execution, "execution_sequence", "number", required=False),
+            _expected(manual_execution, "execution_sequence", "number"),
             _expected(
                 manual_execution,
                 "status",

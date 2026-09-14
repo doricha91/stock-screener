@@ -95,6 +95,13 @@ def _stage_a_pass_state() -> runbook_state.RunbookState:
     return runbook_state.complete_stage(state, "A")
 
 
+def _stage_a_pass_v3_state() -> runbook_state.RunbookState:
+    return runbook_state.complete_stage(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        "A",
+    )
+
+
 def _ready_rows() -> list[dict[str, object]]:
     return [
         _row("CCI", "SELL", 84, 12.34),
@@ -102,6 +109,13 @@ def _ready_rows() -> list[dict[str, object]]:
         _row("PLD", "SELL", 52, 32.34),
         _row("CMG", "BUY", 207, 42.34),
     ]
+
+
+def _ready_v3_rows() -> list[dict[str, object]]:
+    rows = _ready_rows()
+    for sequence, row in enumerate(rows, start=1):
+        row["execution_sequence"] = sequence
+    return rows
 
 
 def _row(
@@ -115,6 +129,7 @@ def _row(
     execution_date: str = TRADE_DATE,
     linked_daily_plan_key: str | None = None,
     failed_count: int = 0,
+    execution_sequence: int | float | None = None,
 ) -> dict[str, object]:
     return {
         "page_id": f"page-{symbol}",
@@ -126,6 +141,7 @@ def _row(
         "side": side,
         "quantity": quantity,
         "actual_price": actual_price,
+        "execution_sequence": execution_sequence,
         "status": status,
         "import_status": import_status,
         "failed_count": failed_count,
@@ -189,7 +205,14 @@ def test_gate1_passes_when_all_rows_ready(tmp_path: Path) -> None:
 
 def test_new_v2_gate1_waits_until_execution_input_is_finalized(tmp_path: Path) -> None:
     state = runbook_state.complete_stage(
-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        replace(
+            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+            execution_contract={
+                "version": runbook_state.EXECUTION_CONTRACT_V2,
+                "input_finalized": False,
+                "finalized_at": None,
+            },
+        ),
         "A",
     )
     _save_state(tmp_path, state)
@@ -210,7 +233,14 @@ def test_new_v2_gate1_waits_until_execution_input_is_finalized(tmp_path: Path) -
 
 def test_integrated_gate1_finalizes_v2_execution_then_passes(tmp_path: Path) -> None:
     state = runbook_state.complete_stage(
-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        replace(
+            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+            execution_contract={
+                "version": runbook_state.EXECUTION_CONTRACT_V2,
+                "input_finalized": False,
+                "finalized_at": None,
+            },
+        ),
         "A",
     )
     state_path = _save_state(tmp_path, state)
@@ -234,9 +264,121 @@ def test_integrated_gate1_finalizes_v2_execution_then_passes(tmp_path: Path) -> 
     assert finalized_events[0]["created_at"] == loaded.execution_contract["finalized_at"]
 
 
+def test_integrated_gate1_finalizes_v3_executed_and_partial_rows_then_passes(
+    tmp_path: Path,
+) -> None:
+    state_path = _save_state(tmp_path, _stage_a_pass_v3_state())
+    rows = _ready_v3_rows()
+    rows[1]["quantity"] = 4
+
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: rows,
+    )
+
+    loaded = runbook_state.load_state(state_path)
+    assert result["runner_result"] == "PASS"
+    assert loaded.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V3
+    assert loaded.execution_contract["input_finalized"] is True
+
+
+def test_integrated_gate1_v3_not_executed_accepts_blank_price_and_sequence(
+    tmp_path: Path,
+) -> None:
+    _save_state(tmp_path, _stage_a_pass_v3_state())
+    rows = _ready_v3_rows()
+    rows[0]["quantity"] = None
+    rows[0]["actual_price"] = None
+    rows[0]["execution_sequence"] = None
+
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: rows,
+    )
+
+    assert result["runner_result"] == "PASS"
+
+
+def test_integrated_gate1_v3_trade_bearing_row_requires_sequence(tmp_path: Path) -> None:
+    _save_state(tmp_path, _stage_a_pass_v3_state())
+    rows = _ready_v3_rows()
+    rows[0]["execution_sequence"] = None
+
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: rows,
+    )
+    payload = json.loads(Path(result["gate_result_json"]).read_text(encoding="utf-8"))
+
+    assert result["runner_result"] == "WAIT"
+    assert "Execution Sequence" in result["next_required_action"]
+    assert "execution_sequence_required" in payload["rows"][0]["missing"]
+
+
+def test_integrated_gate1_v3_not_executed_requires_blank_sequence(tmp_path: Path) -> None:
+    _save_state(tmp_path, _stage_a_pass_v3_state())
+    rows = _ready_v3_rows()
+    rows[0]["quantity"] = None
+    rows[0]["actual_price"] = None
+    rows[0]["execution_sequence"] = 7
+
+    result = runbook_gate_checker.check_gate1_execution_input(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: rows,
+    )
+    payload = json.loads(Path(result["gate_result_json"]).read_text(encoding="utf-8"))
+
+    assert result["runner_result"] == "WAIT"
+    assert "execution_sequence_not_executed_must_be_blank" in payload["rows"][0]["missing"]
+
+
+def test_gate1_v2_ignores_incidental_sequence(tmp_path: Path) -> None:
+    state = replace(
+        _stage_a_pass_v3_state(),
+        execution_contract={
+            "version": runbook_state.EXECUTION_CONTRACT_V2,
+            "input_finalized": True,
+            "finalized_at": "2026-06-30T12:00:00+09:00",
+        },
+    )
+    _save_state(tmp_path, state)
+    rows = _ready_rows()
+    rows[0]["execution_sequence"] = 0
+    rows[1]["execution_sequence"] = 0
+
+    result = runbook_gate_checker.check_gate1_readiness(
+        tmp_path,
+        ACCOUNT_ID,
+        DATA_DATE,
+        TRADE_DATE,
+        row_fetcher=lambda state: rows,
+    )
+
+    assert result["runner_result"] == "PASS"
+
+
 def test_integrated_gate1_rerun_does_not_repeat_finalize(tmp_path: Path) -> None:
     state = runbook_state.complete_stage(
-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        replace(
+            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+            execution_contract={
+                "version": runbook_state.EXECUTION_CONTRACT_V2,
+                "input_finalized": False,
+                "finalized_at": None,
+            },
+        ),
         "A",
     )
     state_path = _save_state(tmp_path, state)
@@ -263,7 +405,14 @@ def test_integrated_gate1_rerun_does_not_repeat_finalize(tmp_path: Path) -> None
 
 def test_integrated_gate1_preserves_finalize_across_wait_then_pass(tmp_path: Path) -> None:
     state = runbook_state.complete_stage(
-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        replace(
+            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+            execution_contract={
+                "version": runbook_state.EXECUTION_CONTRACT_V2,
+                "input_finalized": False,
+                "finalized_at": None,
+            },
+        ),
         "A",
     )
     state_path = _save_state(tmp_path, state)
@@ -441,7 +590,14 @@ def test_integrated_gate1_finalize_failure_does_not_query(
 
 def test_integrated_gate1_query_failure_keeps_single_finalize_for_retry(tmp_path: Path) -> None:
     state = runbook_state.complete_stage(
-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        replace(
+            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+            execution_contract={
+                "version": runbook_state.EXECUTION_CONTRACT_V2,
+                "input_finalized": False,
+                "finalized_at": None,
+            },
+        ),
         "A",
     )
     state_path = _save_state(tmp_path, state)
@@ -706,6 +862,7 @@ def test_gate1_query_uses_env_compatible_notion_settings(monkeypatch) -> None:
                 "side": "Side",
                 "quantity": "Quantity",
                 "actual_price": "Actual Price",
+                "execution_sequence": "Execution Sequence",
                 "status": "Status",
                 "import_status": "Import Status",
             }
@@ -724,6 +881,55 @@ def test_gate1_query_uses_env_compatible_notion_settings(monkeypatch) -> None:
     assert calls["token"] == "fake-token"
     assert calls["data_source_id"] == "manual-executions-source"
     assert calls["page_size"] == 100
+
+
+def test_manual_execution_notion_normalization_preserves_execution_sequence() -> None:
+    mapping = {
+        "account_id": "Account ID",
+        "execution_date": "Execution Date",
+        "linked_daily_plan_key": "Linked Daily Plan Key",
+        "external_key": "External Key",
+        "symbol": "Symbol",
+        "side": "Side",
+        "quantity": "Quantity",
+        "actual_price": "Actual Price",
+        "execution_sequence": "Execution Sequence",
+        "status": "Status",
+        "import_status": "Import Status",
+    }
+    page = {
+        "id": "page-cci",
+        "properties": {
+            "Account ID": {"select": {"name": ACCOUNT_ID}},
+            "Execution Date": {"date": {"start": TRADE_DATE}},
+            "Linked Daily Plan Key": {
+                "rich_text": [{"plain_text": f"daily_plan:{ACCOUNT_ID}:{TRADE_DATE}"}]
+            },
+            "External Key": {
+                "rich_text": [
+                    {
+                        "plain_text": (
+                            f"manual_execution:{ACCOUNT_ID}:{TRADE_DATE}:CCI:SELL:01"
+                        )
+                    }
+                ]
+            },
+            "Symbol": {"rich_text": [{"plain_text": "CCI"}]},
+            "Side": {"select": {"name": "SELL"}},
+            "Quantity": {"number": 84},
+            "Actual Price": {"number": 12.34},
+            "Execution Sequence": {"number": 7},
+            "Status": {"select": {"name": "READY"}},
+            "Import Status": {"select": {"name": "NOT_IMPORTED"}},
+        },
+    }
+
+    normalized = runbook_gate_checker.normalize_notion_manual_execution_page(page, mapping)
+
+    assert normalized["execution_sequence"] == 7
+    assert runbook_gate_checker.normalize_flat_manual_execution_row(normalized)[
+        "execution_sequence"
+    ] == 7
 
 
 def test_gate1_writes_json_txt_and_latest(tmp_path: Path) -> None:

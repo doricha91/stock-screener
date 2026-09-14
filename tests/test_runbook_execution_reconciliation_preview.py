@@ -38,6 +38,23 @@ def _write_manual_executions(path: Path) -> None:
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
+def _save_finalized_v2_state(workspace: Path) -> None:
+    state = replace(
+        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
+        execution_contract={
+            "version": runbook_state.EXECUTION_CONTRACT_V2,
+            "input_finalized": True,
+            "finalized_at": "2026-06-30T12:00:00+09:00",
+        },
+    )
+    runbook_state.save_state(
+        state,
+        runbook_state.get_state_path_for_context(
+            workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE
+        ),
+    )
+
+
 def _row(symbol: str, side: str, sequence: int, quantity: int, actual_price: float) -> dict[str, object]:
     return {
         "page_id": f"page-{symbol}",
@@ -62,6 +79,7 @@ def test_preview_writes_json_md_and_latest_artifacts(tmp_path: Path) -> None:
     executions_path = tmp_path / "manual_executions.json"
     _write_daily_plan(daily_plan_path)
     _write_manual_executions(executions_path)
+    _save_finalized_v2_state(workspace)
 
     result = preview_script.run_execution_reconciliation_preview(
         workspace,
@@ -153,6 +171,7 @@ def test_cli_reads_fixture_json_without_notion_or_ledger_writes(tmp_path: Path, 
     executions_path = tmp_path / "manual_executions.json"
     _write_daily_plan(daily_plan_path)
     _write_manual_executions(executions_path)
+    _save_finalized_v2_state(workspace)
 
     exit_code = preview_script.main(
         [

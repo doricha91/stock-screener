@@ -249,7 +249,7 @@ ops\runbook_wrappers\daily\04_close_day.cmd
 
 통합 wrapper는 각 단계가 PASS일 때만 다음 단계로 진행한다. `WAIT`, `BLOCKED`, `FAILED`가 나오면 출력의 `STOPPED_AT`, `Recovery`, `next_required_action`을 확인하고, 해결 후 같은 primary wrapper를 재실행한다. 이미 PASS인 비가역 단계는 state/evidence에 따라 건너뛰므로 Stage B execution commit, Stage D append, Stage E EOD commit을 무조건 반복하지 않는다.
 
-`V2 EXECUTION`의 Finalize → Gate1, already-finalized safe no-op, `V1` legacy 의미와 `NO_ACTION` 계약은 기존 Gate1/Stage runner가 그대로 담당한다. Primary wrapper는 이 로직을 재구현하지 않는다.
+`V2/V3 EXECUTION`의 Finalize → Gate1, already-finalized safe no-op, `V1` legacy 의미와 `NO_ACTION` 계약은 기존 Gate1/Stage runner가 그대로 담당한다. Primary wrapper는 이 로직을 재구현하지 않는다.
 
 통합 흐름 자체가 고장 났거나 특정 단계만 수동 복구해야 할 때만 기존 detailed wrapper를 사용한다.
 
@@ -453,20 +453,22 @@ Manual Executions DB에서 아래 속성을 확인하거나 입력한다.
 - `Execution Date`: `%TRADE_DATE%`와 일치해야 한다.
 - `Symbol`
 - `Side`: `BUY` 또는 `SELL`
-- `Quantity`
+- `Quantity`: 실제 체결 수량. 미체결이면 blank로 둔다.
 - `Plan Price`: 참고값
-- `Actual Price`: paper execution에 사용할 실제 체결가
+- `Actual Price`: `EXECUTED`/`PARTIAL`이면 실제 체결가를 입력하고, `NOT_EXECUTED`이면 blank로 둔다.
+- `Execution Sequence`: `EXECUTED`/`PARTIAL`이면 같은 Account ID와 Execution Date 안의 실제 체결 순서를 positive integer로 입력한다. Daily Plan, 종목, page 생성 순서가 아니다. `NOT_EXECUTED`이면 blank로 둔다.
 - `Commission`: 필요 시 입력, 기본 0 가능
 - `Currency`: 보통 `USD`
 - `Broker`: 보통 `PAPER`
-- `Status`: preview/commit 대상이면 `READY`
+- `Status`: 위 실행 결과 입력을 모두 완료한 뒤 `READY`로 변경한다.
 - `Import Status`: 초기에는 not imported 계열이며 commit/sync 후 갱신됨
 - `Validation Status` / `Validation Message`: sync 이후 확인
 
 preview로 넘기기 위한 조건:
 
-- Actual Price 입력 완료.
-- `Status=READY`.
+- `EXECUTED`/`PARTIAL`: Actual Price와 Execution Sequence 입력 완료.
+- `NOT_EXECUTED`: Quantity, Actual Price, Execution Sequence가 모두 blank.
+- 모든 실행 결과 입력을 완료한 뒤 `Status=READY`.
 - Account ID와 Execution Date 필터 일치.
 
 ### 4.3 Execution Preview
@@ -491,7 +493,8 @@ python scripts\import_notion_executions.py --date %TRADE_DATE% --account-id %ACC
 
 - 원래 no-action day인지.
 - Notion row가 `Status=READY`인지.
-- `Actual Price`가 입력됐는지.
+- 체결 row의 `Actual Price`와 `Execution Sequence`가 입력됐는지.
+- 미체결 row의 `Quantity`, `Actual Price`, `Execution Sequence`가 모두 blank인지.
 - `Account ID`가 `%ACCOUNT_ID%`인지.
 - `Execution Date`가 `%TRADE_DATE%`인지.
 
@@ -880,7 +883,7 @@ python -c "import json; p=json.load(open(r'outputs\orch_status.json',encoding='u
 ### Manual Execution Preview `candidate_count=0`
 
 - no-action day이면 정상일 수 있다.
-- 그 외에는 Notion의 `Actual Price`, `Status=READY`, `Account ID`, `Execution Date`를 확인한다.
+- 그 외에는 Notion의 execution outcome별 `Quantity`, `Actual Price`, `Execution Sequence`, `Status=READY`, `Account ID`, `Execution Date`를 확인한다.
 
 ### Manual Review Preview `candidate_count=0`
 

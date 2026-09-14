@@ -102,6 +102,7 @@ def _mapping() -> dict[str, dict[str, str]]:
             "side": "Side",
             "quantity": "Quantity",
             "actual_price": "Actual Price",
+            "execution_sequence": "Execution Sequence",
             "status": "Status",
             "external_key": "External Key",
             "plan_date": "Plan Date",
@@ -260,6 +261,7 @@ def _manual_execution_schema(*, broker_type="select", currency_options=None) -> 
             "Side": _property("Side", "select", options=["BUY", "SELL"]),
             "Quantity": _property("Quantity", "number"),
             "Actual Price": _property("Actual Price", "number"),
+            "Execution Sequence": _property("Execution Sequence", "number"),
             "Status": _property("Status", "select", options=["DRAFT", "READY", "IMPORTED", "REJECTED"]),
             "External Key": _property("External Key", "rich_text"),
             "Plan Date": _property("Plan Date", "date"),
@@ -578,6 +580,19 @@ def test_manual_execution_required_property_missing_is_fail():
     )
     assert result.status == FAIL
     assert any(issue.property_name == "Actual Price" for issue in result.issues)
+
+
+def test_manual_execution_sequence_property_missing_is_fail():
+    schema = _manual_execution_schema()
+    schema["properties"].pop("Execution Sequence")
+    result = validate_data_source_schema(
+        target="manual_executions",
+        data_source_id="ds-manual",
+        actual_schema=schema,
+        mapping_root=_mapping(),
+    )
+    assert result.status == FAIL
+    assert any(issue.property_name == "Execution Sequence" for issue in result.issues)
 
 
 def test_manual_execution_missing_select_options_is_warning():

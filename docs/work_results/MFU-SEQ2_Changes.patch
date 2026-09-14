@@ -1,0 +1,625 @@
+diff --git a/core/execution_outcome_flow.py b/core/execution_outcome_flow.py
+index e7c11a015d8a08464c84ef8624c2033748c28951..46ecc6a538b4cca81dc3772b5162621a68948b22 100644
+--- a/core/execution_outcome_flow.py
++++ b/core/execution_outcome_flow.py
+@@ -32,0 +33,45 @@ TRADE_BEARING_OUTCOMES = {EXECUTED, PARTIAL}
++def validate_v3_execution_input_requirements(
++    execution_rows: list[dict[str, Any]],
++) -> list[dict[str, Any]]:
++    """Validate editable v3 row fields with the reconciliation SSOT.
++
++    Gate 1 does not persist an outcome. A blank quantity represents the
++    finalized NOT_EXECUTED input; any non-blank quantity is trade-bearing for
++    the price/sequence requirements shared with reconciliation.
++    """
++    validation_rows: list[dict[str, Any]] = []
++    for index, execution_row in enumerate(execution_rows):
++        actual_quantity = execution_row.get("quantity")
++        validation_rows.append(
++            {
++                "candidate_key": f"gate-row:{index}",
++                "actual_quantity": actual_quantity,
++                "actual_price": execution_row.get("actual_price"),
++                "execution_sequence": execution_row.get("execution_sequence"),
++                "outcome": NOT_EXECUTED if _blank(actual_quantity) else EXECUTED,
++            }
++        )
++
++    errors: list[dict[str, Any]] = []
++    for row in validation_rows:
++        reason = _price_reason(row)
++        if reason is not None:
++            errors.append(
++                {
++                    "candidate_key": row["candidate_key"],
++                    "reason_code": reason,
++                    "message": "Quantity and price must both be blank, or both be finite and positive.",
++                }
++            )
++    errors.extend(_validate_v3_execution_sequences(validation_rows))
++
++    for error in errors:
++        index = int(str(error["candidate_key"]).removeprefix("gate-row:"))
++        source = execution_rows[index]
++        error["row_index"] = index
++        error["candidate_key"] = str(
++            source.get("external_key") or source.get("page_id") or f"row:{index}"
++        )
++    return errors
++
++
+diff --git a/core/notion_schema_validator.py b/core/notion_schema_validator.py
+index e6973fcba94c4515d19735895d42343764772a16..b07f551e3392b59fb82c884cdc37046b7b024be3 100644
+--- a/core/notion_schema_validator.py
++++ b/core/notion_schema_validator.py
+@@ -143 +143 @@ def build_expected_schema(mapping_root: dict[str, dict[str, str]]) -> dict[str,
+-            _expected(manual_execution, "execution_sequence", "number", required=False),
++            _expected(manual_execution, "execution_sequence", "number"),
+diff --git a/docs/operations/paper_daily_cycle_commands.md b/docs/operations/paper_daily_cycle_commands.md
+index 5ebf2ec0a20c6ced8a21381c6ec9bc70782fc553..c749d69604b170e2cb58989f663fb1fd401a0718 100644
+--- a/docs/operations/paper_daily_cycle_commands.md
++++ b/docs/operations/paper_daily_cycle_commands.md
+@@ -252 +252 @@ ops\runbook_wrappers\daily\04_close_day.cmd
+-`V2 EXECUTION`의 Finalize → Gate1, already-finalized safe no-op, `V1` legacy 의미와 `NO_ACTION` 계약은 기존 Gate1/Stage runner가 그대로 담당한다. Primary wrapper는 이 로직을 재구현하지 않는다.
++`V2/V3 EXECUTION`의 Finalize → Gate1, already-finalized safe no-op, `V1` legacy 의미와 `NO_ACTION` 계약은 기존 Gate1/Stage runner가 그대로 담당한다. Primary wrapper는 이 로직을 재구현하지 않는다.
+@@ -456 +456 @@ Manual Executions DB에서 아래 속성을 확인하거나 입력한다.
+-- `Quantity`
++- `Quantity`: 실제 체결 수량. 미체결이면 blank로 둔다.
+@@ -458 +458,2 @@ Manual Executions DB에서 아래 속성을 확인하거나 입력한다.
+-- `Actual Price`: paper execution에 사용할 실제 체결가
++- `Actual Price`: `EXECUTED`/`PARTIAL`이면 실제 체결가를 입력하고, `NOT_EXECUTED`이면 blank로 둔다.
++- `Execution Sequence`: `EXECUTED`/`PARTIAL`이면 같은 Account ID와 Execution Date 안의 실제 체결 순서를 positive integer로 입력한다. Daily Plan, 종목, page 생성 순서가 아니다. `NOT_EXECUTED`이면 blank로 둔다.
+@@ -462 +463 @@ Manual Executions DB에서 아래 속성을 확인하거나 입력한다.
+-- `Status`: preview/commit 대상이면 `READY`
++- `Status`: 위 실행 결과 입력을 모두 완료한 뒤 `READY`로 변경한다.
+@@ -468,2 +469,3 @@ preview로 넘기기 위한 조건:
+-- Actual Price 입력 완료.
+-- `Status=READY`.
++- `EXECUTED`/`PARTIAL`: Actual Price와 Execution Sequence 입력 완료.
++- `NOT_EXECUTED`: Quantity, Actual Price, Execution Sequence가 모두 blank.
++- 모든 실행 결과 입력을 완료한 뒤 `Status=READY`.
+@@ -494 +496,2 @@ python scripts\import_notion_executions.py --date %TRADE_DATE% --account-id %ACC
+-- `Actual Price`가 입력됐는지.
++- 체결 row의 `Actual Price`와 `Execution Sequence`가 입력됐는지.
++- 미체결 row의 `Quantity`, `Actual Price`, `Execution Sequence`가 모두 blank인지.
+@@ -883 +886 @@ python -c "import json; p=json.load(open(r'outputs\orch_status.json',encoding='u
+-- 그 외에는 Notion의 `Actual Price`, `Status=READY`, `Account ID`, `Execution Date`를 확인한다.
++- 그 외에는 Notion의 execution outcome별 `Quantity`, `Actual Price`, `Execution Sequence`, `Status=READY`, `Account ID`, `Execution Date`를 확인한다.
+diff --git a/scripts/runbook_gate_checker.py b/scripts/runbook_gate_checker.py
+index 6be88f19aa57f7a95377a26078f1bd63d4ed35f5..8aafd06e7f93715fda4c7748b0e29b788d90b6db 100644
+--- a/scripts/runbook_gate_checker.py
++++ b/scripts/runbook_gate_checker.py
+@@ -18,0 +19 @@ from core.notion_client import NotionAPIError, NotionClient
++from core.execution_outcome_flow import validate_v3_execution_input_requirements
+@@ -113 +114,4 @@ def check_gate1_readiness(
+-        if contract_version == runbook_state.EXECUTION_CONTRACT_V2:
++        if contract_version in {
++            runbook_state.EXECUTION_CONTRACT_V2,
++            runbook_state.EXECUTION_CONTRACT_V3,
++        }:
+@@ -232 +236 @@ def check_gate1_readiness(
+-        message = "Fill Actual Price and set Status=READY in Notion."
++        message = _gate1_input_prompt(state)
+@@ -256 +260 @@ def check_gate1_execution_input(
+-    """Finalize eligible v2 execution input, then return the Gate 1 business result."""
++    """Finalize eligible v2/v3 execution input, then return the Gate 1 business result."""
+@@ -503,0 +508 @@ def normalize_gate1_rows(raw_rows: list[dict[str, Any]], state: RunbookState) ->
++    execution_contract = runbook_state.get_execution_contract(state)
+@@ -511 +516 @@ def normalize_gate1_rows(raw_rows: list[dict[str, Any]], state: RunbookState) ->
+-            execution_contract=runbook_state.get_execution_contract(state),
++            execution_contract=execution_contract,
+@@ -519,0 +525,7 @@ def normalize_gate1_rows(raw_rows: list[dict[str, Any]], state: RunbookState) ->
++    if execution_contract.get("version") == runbook_state.EXECUTION_CONTRACT_V3:
++        for error in validate_v3_execution_input_requirements(rows):
++            row = rows[int(error["row_index"])]
++            reason_code = str(error["reason_code"])
++            if reason_code not in row["missing"]:
++                row["missing"].append(reason_code)
++            row["ready"] = False
+@@ -555,0 +568 @@ def normalize_flat_manual_execution_row(row: dict[str, Any]) -> dict[str, Any]:
++        "execution_sequence": row.get("execution_sequence"),
+@@ -588,0 +602,4 @@ def normalize_notion_manual_execution_page(page: dict[str, Any], mapping: dict[s
++        "execution_sequence": _extract_number(
++            properties,
++            mapping.get("execution_sequence"),
++        ),
+@@ -658 +675 @@ def create_gate_result(
+-                else "Fill Actual Price and set Status=READY in Notion."
++                else _gate1_input_prompt(state)
+@@ -893,2 +910,6 @@ def _row_missing_reasons(
+-    is_v2 = (execution_contract or {}).get("version") == runbook_state.EXECUTION_CONTRACT_V2
+-    if is_v2 and (execution_contract or {}).get("input_finalized") is not True:
++    contract_version = (execution_contract or {}).get("version")
++    is_outcome_contract = contract_version in {
++        runbook_state.EXECUTION_CONTRACT_V2,
++        runbook_state.EXECUTION_CONTRACT_V3,
++    }
++    if is_outcome_contract and (execution_contract or {}).get("input_finalized") is not True:
+@@ -896 +917 @@ def _row_missing_reasons(
+-    if not is_v2 and row.get("actual_price") is None:
++    if not is_outcome_contract and row.get("actual_price") is None:
+@@ -902,0 +924,10 @@ def _row_missing_reasons(
++def _gate1_input_prompt(state: RunbookState) -> str:
++    if runbook_state.get_execution_contract(state).get("version") == runbook_state.EXECUTION_CONTRACT_V3:
++        return (
++            "For EXECUTED/PARTIAL, fill Actual Price and Execution Sequence; "
++            "for NOT_EXECUTED, leave Quantity, Actual Price, and Execution Sequence blank; "
++            "then set Status=READY in Notion."
++        )
++    return "Fill Actual Price and set Status=READY in Notion."
++
++
+@@ -1174 +1205 @@ def _extract_date(properties: dict[str, Any], property_name: str) -> str | None:
+-def _extract_number(properties: dict[str, Any], property_name: str) -> float | int | None:
++def _extract_number(properties: dict[str, Any], property_name: str | None) -> float | int | None:
+diff --git a/tests/test_execution_outcome_flow.py b/tests/test_execution_outcome_flow.py
+index b694fd6bf049d9429ed3f6b3cb5d66a80471107c..9aa5e631adad663df187490f3984ed4103c5be93 100644
+--- a/tests/test_execution_outcome_flow.py
++++ b/tests/test_execution_outcome_flow.py
+@@ -13,0 +14 @@ from core.execution_outcome_flow import (
++    filter_execution_preview_candidates,
+@@ -331,0 +333,34 @@ def test_v3_rejects_duplicate_and_not_executed_sequence_but_allows_gaps() -> Non
++
++
++def test_v3_preview_reconciliation_sequence_drift_is_blocked() -> None:
++    key = build_manual_execution_key(ACCOUNT, TRADE_DATE, "AAPL", "BUY", 1)
++    input_preview = {
++        "candidates": [
++            {
++                "canonical_key": key,
++                "symbol": "AAPL",
++                "side": "BUY",
++                "quantity": 10,
++                "actual_price": 100,
++                "execution_sequence": 2,
++                "validation_status": PASS,
++            }
++        ]
++    }
++    expected_rows = [
++        {
++            "candidate_key": key,
++            "symbol": "AAPL",
++            "side": "BUY",
++            "actual_quantity": 10,
++            "actual_price": 100,
++            "execution_sequence": 1,
++        }
++    ]
++
++    with pytest.raises(ValueError, match="does not match the pinned outcome row"):
++        filter_execution_preview_candidates(
++            input_preview,
++            {key},
++            expected_outcome_rows=expected_rows,
++        )
+diff --git a/tests/test_mfu_seq2_v3_notion_wiring.py b/tests/test_mfu_seq2_v3_notion_wiring.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f555561ac9513df1ce0ac8f3958c6d4030efe46
+--- /dev/null
++++ b/tests/test_mfu_seq2_v3_notion_wiring.py
+@@ -0,0 +1,144 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any
++
++from core.execution_reconciliation import PARTIAL, build_manual_execution_key
++from core.notion_account_keys import build_daily_plan_external_key
++from core.paper_execution_intent import build_execution_intent
++from scripts import runbook_gate_checker, runbook_state
++from scripts.runbook_execution_reconciliation_preview import (
++    run_execution_reconciliation_preview,
++)
++from tests.paper_account_test_support import ensure_initialized_account_paths
++
++
++ACCOUNT_ID = "paper_pilot_202606"
++DATA_DATE = "2026-06-30"
++TRADE_DATE = "2026-07-01"
++
++
++def _manual_execution_mapping() -> dict[str, str]:
++    return {
++        "external_key": "External Key",
++        "account_id": "Account ID",
++        "execution_date": "Execution Date",
++        "linked_daily_plan_key": "Linked Daily Plan Key",
++        "symbol": "Symbol",
++        "side": "Side",
++        "quantity": "Quantity",
++        "actual_price": "Actual Price",
++        "execution_sequence": "Execution Sequence",
++        "status": "Status",
++        "import_status": "Import Status",
++    }
++
++
++def _draft_notion_page() -> dict[str, Any]:
++    return {
++        "id": "page-aapl",
++        "properties": {
++            "External Key": {
++                "rich_text": [
++                    {
++                        "plain_text": build_manual_execution_key(
++                            ACCOUNT_ID, TRADE_DATE, "AAPL", "BUY", 1
++                        )
++                    }
++                ]
++            },
++            "Account ID": {"select": {"name": ACCOUNT_ID}},
++            "Execution Date": {"date": {"start": TRADE_DATE}},
++            "Linked Daily Plan Key": {
++                "rich_text": [
++                    {"plain_text": build_daily_plan_external_key(ACCOUNT_ID, TRADE_DATE)}
++                ]
++            },
++            "Symbol": {"rich_text": [{"plain_text": "AAPL"}]},
++            "Side": {"select": {"name": "BUY"}},
++            "Quantity": {"type": "number", "number": 10},
++            "Actual Price": {"type": "number", "number": None},
++            "Execution Sequence": {"type": "number", "number": None},
++            "Status": {"select": {"name": "DRAFT"}},
++            "Import Status": {"select": {"name": "NOT_IMPORTED"}},
++        },
++    }
++
++
++def test_v3_notion_row_keeps_sequence_through_gate1_and_reconciliation(
++    tmp_path: Path,
++) -> None:
++    workspace = tmp_path / "workspace"
++    account_root = tmp_path / "account"
++    workspace.mkdir(parents=True, exist_ok=True)
++    ensure_initialized_account_paths(account_root, account_id=ACCOUNT_ID, date_str=DATA_DATE)
++
++    plan = {
++        "schema_version": "paper_daily_plan.v1",
++        "account_id": ACCOUNT_ID,
++        "data_date": DATA_DATE,
++        "trade_date": TRADE_DATE,
++        "plan_date": TRADE_DATE,
++        "run_mode": "official",
++        "official_run": True,
++        "generated_at": "2026-06-30T12:00:00Z",
++        "items": [{"symbol": "AAPL", "action": "BUY", "quantity": 10, "price": 100.0}],
++        "execution_intent": build_execution_intent(
++            [{"symbol": "AAPL", "action": "BUY", "quantity": 10}]
++        ),
++        "fingerprints": {"generator_version": "paper_daily_plan.v1"},
++    }
++    plan_path = workspace / "daily_plan.json"
++    plan_path.write_text(json.dumps(plan), encoding="utf-8")
++
++    state = runbook_state.complete_stage(
++        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++        "A",
++    )
++    state = runbook_state.record_artifact(state, "daily_plan_json", str(plan_path), workspace)
++    state_path = runbook_state.get_state_path_for_context(
++        workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE
++    )
++    runbook_state.save_state(state, state_path)
++
++    page = _draft_notion_page()
++    draft = runbook_gate_checker.normalize_notion_manual_execution_page(
++        page, _manual_execution_mapping()
++    )
++    assert draft["status"] == "DRAFT"
++    assert draft["execution_sequence"] is None
++
++    properties = page["properties"]
++    properties["Quantity"]["number"] = 4
++    properties["Actual Price"]["number"] = 101.5
++    properties["Execution Sequence"]["number"] = 3
++    properties["Status"]["select"]["name"] = "READY"
++    ready_row = runbook_gate_checker.normalize_notion_manual_execution_page(
++        page, _manual_execution_mapping()
++    )
++
++    gate = runbook_gate_checker.check_gate1_execution_input(
++        workspace,
++        ACCOUNT_ID,
++        DATA_DATE,
++        TRADE_DATE,
++        row_fetcher=lambda state: [ready_row],
++    )
++    assert gate["runner_result"] == "PASS"
++
++    reconciliation = run_execution_reconciliation_preview(
++        workspace,
++        ACCOUNT_ID,
++        DATA_DATE,
++        TRADE_DATE,
++        daily_plan_path=plan_path,
++        row_fetcher=lambda state: [ready_row],
++        account_root=account_root,
++    )
++    payload = json.loads(Path(reconciliation["latest_preview_json"]).read_text(encoding="utf-8"))
++
++    assert reconciliation["runner_result"] == "PASS"
++    assert payload["schema_version"] == runbook_state.EXECUTION_CONTRACT_V3
++    assert payload["rows"][0]["outcome"] == PARTIAL
++    assert payload["rows"][0]["execution_sequence"] == 3
+diff --git a/tests/test_notion_schema_validator.py b/tests/test_notion_schema_validator.py
+index 057ef81b36889b353ed34d087e3fc24d909d9b28..3268cd07d435cff71a592646ef1d40a4abe733d6 100644
+--- a/tests/test_notion_schema_validator.py
++++ b/tests/test_notion_schema_validator.py
+@@ -104,0 +105 @@ def _mapping() -> dict[str, dict[str, str]]:
++            "execution_sequence": "Execution Sequence",
+@@ -262,0 +264 @@ def _manual_execution_schema(*, broker_type="select", currency_options=None) ->
++            "Execution Sequence": _property("Execution Sequence", "number"),
+@@ -582,0 +585,13 @@ def test_manual_execution_required_property_missing_is_fail():
++def test_manual_execution_sequence_property_missing_is_fail():
++    schema = _manual_execution_schema()
++    schema["properties"].pop("Execution Sequence")
++    result = validate_data_source_schema(
++        target="manual_executions",
++        data_source_id="ds-manual",
++        actual_schema=schema,
++        mapping_root=_mapping(),
++    )
++    assert result.status == FAIL
++    assert any(issue.property_name == "Execution Sequence" for issue in result.issues)
++
++
+diff --git a/tests/test_runbook_execution_reconciliation_preview.py b/tests/test_runbook_execution_reconciliation_preview.py
+index 50755f220ec446f46ed21e0faa0d646610009262..1d115796e40a8a31686d08f8ea59c22a9d049f2d 100644
+--- a/tests/test_runbook_execution_reconciliation_preview.py
++++ b/tests/test_runbook_execution_reconciliation_preview.py
+@@ -40,0 +41,17 @@ def _write_manual_executions(path: Path) -> None:
++def _save_finalized_v2_state(workspace: Path) -> None:
++    state = replace(
++        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++        execution_contract={
++            "version": runbook_state.EXECUTION_CONTRACT_V2,
++            "input_finalized": True,
++            "finalized_at": "2026-06-30T12:00:00+09:00",
++        },
++    )
++    runbook_state.save_state(
++        state,
++        runbook_state.get_state_path_for_context(
++            workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE
++        ),
++    )
++
++
+@@ -64,0 +82 @@ def test_preview_writes_json_md_and_latest_artifacts(tmp_path: Path) -> None:
++    _save_finalized_v2_state(workspace)
+@@ -155,0 +174 @@ def test_cli_reads_fixture_json_without_notion_or_ledger_writes(tmp_path: Path,
++    _save_finalized_v2_state(workspace)
+diff --git a/tests/test_runbook_gate_checker.py b/tests/test_runbook_gate_checker.py
+index 9c0301a2dd6c520b2bfaaa889fb9b38667114ea4..9de25fc5f48ea8f31eb4064985b4b22f1bfd0c72 100644
+--- a/tests/test_runbook_gate_checker.py
++++ b/tests/test_runbook_gate_checker.py
+@@ -97,0 +98,7 @@ def _stage_a_pass_state() -> runbook_state.RunbookState:
++def _stage_a_pass_v3_state() -> runbook_state.RunbookState:
++    return runbook_state.complete_stage(
++        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++        "A",
++    )
++
++
+@@ -106,0 +114,7 @@ def _ready_rows() -> list[dict[str, object]]:
++def _ready_v3_rows() -> list[dict[str, object]]:
++    rows = _ready_rows()
++    for sequence, row in enumerate(rows, start=1):
++        row["execution_sequence"] = sequence
++    return rows
++
++
+@@ -117,0 +132 @@ def _row(
++    execution_sequence: int | float | None = None,
+@@ -128,0 +144 @@ def _row(
++        "execution_sequence": execution_sequence,
+@@ -192 +208,8 @@ def test_new_v2_gate1_waits_until_execution_input_is_finalized(tmp_path: Path) -
+-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++        replace(
++            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++            execution_contract={
++                "version": runbook_state.EXECUTION_CONTRACT_V2,
++                "input_finalized": False,
++                "finalized_at": None,
++            },
++        ),
+@@ -213 +236,8 @@ def test_integrated_gate1_finalizes_v2_execution_then_passes(tmp_path: Path) ->
+-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++        replace(
++            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++            execution_contract={
++                "version": runbook_state.EXECUTION_CONTRACT_V2,
++                "input_finalized": False,
++                "finalized_at": None,
++            },
++        ),
+@@ -236,0 +267,105 @@ def test_integrated_gate1_finalizes_v2_execution_then_passes(tmp_path: Path) ->
++def test_integrated_gate1_finalizes_v3_executed_and_partial_rows_then_passes(
++    tmp_path: Path,
++) -> None:
++    state_path = _save_state(tmp_path, _stage_a_pass_v3_state())
++    rows = _ready_v3_rows()
++    rows[1]["quantity"] = 4
++
++    result = runbook_gate_checker.check_gate1_execution_input(
++        tmp_path,
++        ACCOUNT_ID,
++        DATA_DATE,
++        TRADE_DATE,
++        row_fetcher=lambda state: rows,
++    )
++
++    loaded = runbook_state.load_state(state_path)
++    assert result["runner_result"] == "PASS"
++    assert loaded.execution_contract["version"] == runbook_state.EXECUTION_CONTRACT_V3
++    assert loaded.execution_contract["input_finalized"] is True
++
++
++def test_integrated_gate1_v3_not_executed_accepts_blank_price_and_sequence(
++    tmp_path: Path,
++) -> None:
++    _save_state(tmp_path, _stage_a_pass_v3_state())
++    rows = _ready_v3_rows()
++    rows[0]["quantity"] = None
++    rows[0]["actual_price"] = None
++    rows[0]["execution_sequence"] = None
++
++    result = runbook_gate_checker.check_gate1_execution_input(
++        tmp_path,
++        ACCOUNT_ID,
++        DATA_DATE,
++        TRADE_DATE,
++        row_fetcher=lambda state: rows,
++    )
++
++    assert result["runner_result"] == "PASS"
++
++
++def test_integrated_gate1_v3_trade_bearing_row_requires_sequence(tmp_path: Path) -> None:
++    _save_state(tmp_path, _stage_a_pass_v3_state())
++    rows = _ready_v3_rows()
++    rows[0]["execution_sequence"] = None
++
++    result = runbook_gate_checker.check_gate1_execution_input(
++        tmp_path,
++        ACCOUNT_ID,
++        DATA_DATE,
++        TRADE_DATE,
++        row_fetcher=lambda state: rows,
++    )
++    payload = json.loads(Path(result["gate_result_json"]).read_text(encoding="utf-8"))
++
++    assert result["runner_result"] == "WAIT"
++    assert "Execution Sequence" in result["next_required_action"]
++    assert "execution_sequence_required" in payload["rows"][0]["missing"]
++
++
++def test_integrated_gate1_v3_not_executed_requires_blank_sequence(tmp_path: Path) -> None:
++    _save_state(tmp_path, _stage_a_pass_v3_state())
++    rows = _ready_v3_rows()
++    rows[0]["quantity"] = None
++    rows[0]["actual_price"] = None
++    rows[0]["execution_sequence"] = 7
++
++    result = runbook_gate_checker.check_gate1_execution_input(
++        tmp_path,
++        ACCOUNT_ID,
++        DATA_DATE,
++        TRADE_DATE,
++        row_fetcher=lambda state: rows,
++    )
++    payload = json.loads(Path(result["gate_result_json"]).read_text(encoding="utf-8"))
++
++    assert result["runner_result"] == "WAIT"
++    assert "execution_sequence_not_executed_must_be_blank" in payload["rows"][0]["missing"]
++
++
++def test_gate1_v2_ignores_incidental_sequence(tmp_path: Path) -> None:
++    state = replace(
++        _stage_a_pass_v3_state(),
++        execution_contract={
++            "version": runbook_state.EXECUTION_CONTRACT_V2,
++            "input_finalized": True,
++            "finalized_at": "2026-06-30T12:00:00+09:00",
++        },
++    )
++    _save_state(tmp_path, state)
++    rows = _ready_rows()
++    rows[0]["execution_sequence"] = 0
++    rows[1]["execution_sequence"] = 0
++
++    result = runbook_gate_checker.check_gate1_readiness(
++        tmp_path,
++        ACCOUNT_ID,
++        DATA_DATE,
++        TRADE_DATE,
++        row_fetcher=lambda state: rows,
++    )
++
++    assert result["runner_result"] == "PASS"
++
++
+@@ -239 +374,8 @@ def test_integrated_gate1_rerun_does_not_repeat_finalize(tmp_path: Path) -> None
+-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++        replace(
++            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++            execution_contract={
++                "version": runbook_state.EXECUTION_CONTRACT_V2,
++                "input_finalized": False,
++                "finalized_at": None,
++            },
++        ),
+@@ -266 +408,8 @@ def test_integrated_gate1_preserves_finalize_across_wait_then_pass(tmp_path: Pat
+-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++        replace(
++            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++            execution_contract={
++                "version": runbook_state.EXECUTION_CONTRACT_V2,
++                "input_finalized": False,
++                "finalized_at": None,
++            },
++        ),
+@@ -444 +593,8 @@ def test_integrated_gate1_query_failure_keeps_single_finalize_for_retry(tmp_path
+-        runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++        replace(
++            runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE),
++            execution_contract={
++                "version": runbook_state.EXECUTION_CONTRACT_V2,
++                "input_finalized": False,
++                "finalized_at": None,
++            },
++        ),
+@@ -708,0 +865 @@ def test_gate1_query_uses_env_compatible_notion_settings(monkeypatch) -> None:
++                "execution_sequence": "Execution Sequence",
+@@ -728,0 +886,49 @@ def test_gate1_query_uses_env_compatible_notion_settings(monkeypatch) -> None:
++def test_manual_execution_notion_normalization_preserves_execution_sequence() -> None:
++    mapping = {
++        "account_id": "Account ID",
++        "execution_date": "Execution Date",
++        "linked_daily_plan_key": "Linked Daily Plan Key",
++        "external_key": "External Key",
++        "symbol": "Symbol",
++        "side": "Side",
++        "quantity": "Quantity",
++        "actual_price": "Actual Price",
++        "execution_sequence": "Execution Sequence",
++        "status": "Status",
++        "import_status": "Import Status",
++    }
++    page = {
++        "id": "page-cci",
++        "properties": {
++            "Account ID": {"select": {"name": ACCOUNT_ID}},
++            "Execution Date": {"date": {"start": TRADE_DATE}},
++            "Linked Daily Plan Key": {
++                "rich_text": [{"plain_text": f"daily_plan:{ACCOUNT_ID}:{TRADE_DATE}"}]
++            },
++            "External Key": {
++                "rich_text": [
++                    {
++                        "plain_text": (
++                            f"manual_execution:{ACCOUNT_ID}:{TRADE_DATE}:CCI:SELL:01"
++                        )
++                    }
++                ]
++            },
++            "Symbol": {"rich_text": [{"plain_text": "CCI"}]},
++            "Side": {"select": {"name": "SELL"}},
++            "Quantity": {"number": 84},
++            "Actual Price": {"number": 12.34},
++            "Execution Sequence": {"number": 7},
++            "Status": {"select": {"name": "READY"}},
++            "Import Status": {"select": {"name": "NOT_IMPORTED"}},
++        },
++    }
++
++    normalized = runbook_gate_checker.normalize_notion_manual_execution_page(page, mapping)
++
++    assert normalized["execution_sequence"] == 7
++    assert runbook_gate_checker.normalize_flat_manual_execution_row(normalized)[
++        "execution_sequence"
++    ] == 7
++
++
