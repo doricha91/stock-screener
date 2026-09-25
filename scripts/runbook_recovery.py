@@ -9,8 +9,12 @@ from typing import Sequence
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core import runbook_recovery as legacy_recovery
+from core.operational_gap_recovery import (
+    authorize_progressed_active_recovery,
+    preview_progressed_active_recovery,
+)
 from core.runbook_calendar import load_market_calendar
-from core.runbook_recovery import authorize_recovery, preview_recovery, recovery_status
 
 
 def _identity_arguments(parser: argparse.ArgumentParser) -> None:
@@ -53,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     try:
         if args.command == "status":
-            result = recovery_status(**common)
+            result = legacy_recovery.recovery_status(**common)
         else:
             values = {
                 **common,
@@ -64,8 +68,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "confirm_contaminated_incomplete": bool(args.confirm_contaminated_incomplete),
                 "confirm_no_real_trades": bool(args.confirm_no_real_trades),
                 "confirm_gap_without_backfill": bool(args.confirm_gap_without_backfill),
+                "account_mode_resolver": (
+                    legacy_recovery.resolve_authoritative_account_mode
+                ),
             }
-            result = preview_recovery(**values) if args.command == "preview" else authorize_recovery(**values)
+            result = (
+                preview_progressed_active_recovery(**values)
+                if args.command == "preview"
+                else authorize_progressed_active_recovery(**values)
+            )
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         result = {
             "runner_result": "BLOCKED",

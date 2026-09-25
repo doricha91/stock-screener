@@ -325,6 +325,81 @@ def test_fail_preview_is_rejected(commit_env, outcome, monkeypatch):
         )
 
 
+def test_operational_gap_guard_blocks_before_any_execution_domain_write(
+    commit_env, monkeypatch, tmp_path: Path
+) -> None:
+    payload = _preview_payload(
+        date="2026-05-25",
+        commit_allowed="true",
+        fail_count=0,
+        warning_count=0,
+        candidates=[_candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    ledger_before = commit_env["exec_path"].read_bytes()
+
+    monkeypatch.setattr(
+        commit_module.operational_gap_recovery,
+        "guard_operational_gap_boundary",
+        lambda *args, **kwargs: {
+            "decision": commit_module.operational_gap_recovery.GUARD_BLOCKED,
+            "blockers": ["gap_execution_rows_present:1"],
+        },
+    )
+
+    def unexpected_write(*args, **kwargs):
+        raise AssertionError("operational-gap guard allowed a domain writer")
+
+    for name in (
+        "append_paper_execution_log",
+        "save_paper_current_state",
+        "save_paper_account_snapshot",
+        "save_paper_position_snapshot",
+    ):
+        monkeypatch.setattr(commit_module, name, unexpected_write)
+
+    with pytest.raises(ManualExecutionCommitError, match="operational-gap guard before any write"):
+        commit_manual_execution_preview(
+            execution_date="2026-05-25",
+            data_date="2026-05-24",
+            workspace=tmp_path,
+            preview_json_path=commit_env["preview_path"],
+            account_paths=commit_env["account_paths"],
+        )
+    assert commit_env["exec_path"].read_bytes() == ledger_before
+
+
+def test_operational_gap_guard_allow_preserves_execution_commit(
+    commit_env, monkeypatch, tmp_path: Path
+) -> None:
+    payload = _preview_payload(
+        date="2026-05-25",
+        commit_allowed="true",
+        fail_count=0,
+        warning_count=0,
+        candidates=[_candidate(symbol="AAPL", side="BUY", quantity=1, actual_price=100.0)],
+    )
+    commit_env["preview_path"].write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        commit_module.operational_gap_recovery,
+        "guard_operational_gap_boundary",
+        lambda *args, **kwargs: {
+            "decision": commit_module.operational_gap_recovery.GUARD_ALLOW,
+            "blockers": [],
+        },
+    )
+    result = commit_manual_execution_preview(
+        execution_date="2026-05-25",
+        data_date="2026-05-24",
+        workspace=tmp_path,
+        preview_json_path=commit_env["preview_path"],
+        account_paths=commit_env["account_paths"],
+    )
+    assert result.committed_row_count == 1
+    with commit_env["exec_path"].open("r", encoding="utf-8-sig", newline="") as handle:
+        assert len(list(csv.DictReader(handle))) == 1
+
+
 def test_warning_preview_requires_allow_warnings(commit_env):
     payload = _preview_payload(
         date="2026-05-25",

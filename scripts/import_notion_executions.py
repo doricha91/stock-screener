@@ -129,6 +129,15 @@ def main(argv: list[str] | None = None) -> int:
                 "message": "--data-date is required for --commit reconciliation gate.",
             },
         )
+    if not args.workspace:
+        return _print_commit_blocked(
+            args,
+            {
+                "ok": False,
+                "reason_code": "operational_gap_workspace_missing",
+                "message": "--workspace is required for the execution commit NTG guard.",
+            },
+        )
     if not args.reconciliation_preview_json:
         return _print_commit_blocked(
             args,
@@ -209,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             reconciliation_preview_sha256=(
                 reconciliation_preview_sha256 if reconciliation_version in {RECONCILIATION_CONTRACT_V2, RECONCILIATION_CONTRACT_V3} else None
             ),
+            workspace=Path(args.workspace),
         )
     except (ManualExecutionCommitError, ValueError) as exc:
         if args.json:

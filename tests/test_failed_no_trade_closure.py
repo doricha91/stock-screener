@@ -33,9 +33,16 @@ def _write_json(path: Path, payload: dict[str, object]) -> Path:
     return path
 
 
-def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
+def _seed_failed_attempt(
+    tmp_path: Path,
+    *,
+    account_id: str = ACCOUNT_ID,
+    data_date: str = DATA_DATE,
+    trade_date: str = TRADE_DATE,
+) -> dict[str, object]:
+    runbook_day_id = f"{account_id}_{data_date}_{trade_date}"
     workspace = tmp_path / "workspace"
-    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
+    account_root = tmp_path / "outputs" / "paper_accounts" / account_id
     workspace.mkdir()
     account_root.mkdir(parents=True)
     execution_path = account_root / "paper_execution_log.csv"
@@ -46,8 +53,8 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
     _write_csv(position_path, ["account_id", "snapshot_date", "symbol"])
 
     candidate = {
-        "account_id": ACCOUNT_ID,
-        "execution_date": TRADE_DATE,
+        "account_id": account_id,
+        "execution_date": trade_date,
         "symbol": "AMD",
         "side": "BUY",
         "quantity": 2,
@@ -55,32 +62,32 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
         "note": "fixture",
     }
     plan_path = _write_json(
-        workspace / "artifacts" / RUNBOOK_DAY_ID / "stage_a" / "daily_plan.json",
+        workspace / "artifacts" / runbook_day_id / "stage_a" / "daily_plan.json",
         {
             "schema_version": "paper_daily_plan.v1",
-            "account_id": ACCOUNT_ID,
-            "data_date": DATA_DATE,
-            "trade_date": TRADE_DATE,
+            "account_id": account_id,
+            "data_date": data_date,
+            "trade_date": trade_date,
             "items": [{"symbol": "AMD", "action": "BUY", "quantity": 2, "price": 100.0}],
         },
     )
     preview_path = _write_json(
-        workspace / "artifacts" / RUNBOOK_DAY_ID / "stage_b" / "preview.json",
+        workspace / "artifacts" / runbook_day_id / "stage_b" / "preview.json",
         {
-            "account_id": ACCOUNT_ID,
-            "execution_date": TRADE_DATE,
+            "account_id": account_id,
+            "execution_date": trade_date,
             "candidate_count": 1,
             "candidates": [candidate],
         },
     )
     reconciliation_path = _write_json(
-        workspace / "reconciliation_runs" / RUNBOOK_DAY_ID / "preview.json",
+        workspace / "reconciliation_runs" / runbook_day_id / "preview.json",
         {
             "schema_version": "execution_reconciliation_preview.v1",
             "runner_result": "PASS",
-            "account_id": ACCOUNT_ID,
-            "data_date": DATA_DATE,
-            "trade_date": TRADE_DATE,
+            "account_id": account_id,
+            "data_date": data_date,
+            "trade_date": trade_date,
             "notion_row_count": 1,
             "actual_count": 1,
             "planned_count": 1,
@@ -109,7 +116,7 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
         },
     )
 
-    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    state = runbook_state.create_initial_state(account_id, data_date, trade_date)
     state = runbook_state.complete_stage(state, "A")
     state = runbook_state.complete_stage(state, "GATE1")
     for name, path in (
@@ -121,7 +128,7 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
     state = runbook_state.start_stage(state, "B")
     state = runbook_state.complete_step(state, 7, "B")
     state_path = runbook_state.get_state_path_for_context(
-        workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE
+        workspace, account_id, data_date, trade_date
     )
     runbook_state.save_state(state, state_path)
     logical = runbook_stage_b_recovery.build_stage_b_logical_operation(state, workspace)
@@ -140,15 +147,15 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
         precommit_evidence_ref=preseal_ref,
     )
     command_path = _write_json(
-        workspace / "command_runs" / RUNBOOK_DAY_ID / "execution_commit.json",
+        workspace / "command_runs" / runbook_day_id / "execution_commit.json",
         {
             "schema_version": "runbook_command_result.v1",
             "runner_result": "FAILED",
-            "runbook_day_id": RUNBOOK_DAY_ID,
+            "runbook_day_id": runbook_day_id,
             "frozen_context": {
-                "account_id": ACCOUNT_ID,
-                "data_date": DATA_DATE,
-                "trade_date": TRADE_DATE,
+                "account_id": account_id,
+                "data_date": data_date,
+                "trade_date": trade_date,
             },
             "stage_id": "B",
             "step_id": 8,
@@ -179,6 +186,10 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
     runbook_state.save_state(state, state_path)
     return {
         "workspace": workspace,
+        "account_id": account_id,
+        "data_date": data_date,
+        "trade_date": trade_date,
+        "runbook_day_id": runbook_day_id,
         "account_root": account_root,
         "state_path": state_path,
         "failed_key": failed_key,
@@ -408,7 +419,9 @@ def test_closure_is_idempotent_and_conflicting_rewrite_is_blocked(tmp_path: Path
     assert evidence_path.read_bytes() == before
 
 
-def test_tamper_or_state_drift_invalidates_terminal_and_recovery(tmp_path: Path) -> None:
+def test_tamper_or_state_drift_invalidates_terminal_and_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fixture = _seed_failed_attempt(tmp_path)
     result = _close(fixture)
     evidence_path = Path(str(result["evidence_path"]))
@@ -423,6 +436,11 @@ def test_tamper_or_state_drift_invalidates_terminal_and_recovery(tmp_path: Path)
     classification = runbook_day_rollover.classify_account_runbooks(
         fixture["workspace"], ACCOUNT_ID
     )["classifications"][0]
+    monkeypatch.setattr(
+        runbook_recovery,
+        "resolve_authoritative_account_mode",
+        lambda _account_id: "PAPER",
+    )
     recovery = runbook_recovery.preview_recovery(
         workspace=fixture["workspace"],
         account_id=ACCOUNT_ID,

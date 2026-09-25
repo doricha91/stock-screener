@@ -27,11 +27,17 @@ from core.paper_high_watermark import (
     calculate_paper_high_watermarks,
     filter_execution_rows_on_or_before,
 )
+from core.operational_gap_recovery import (
+    GUARD_BLOCKED,
+    guard_operational_gap_boundary,
+)
 from core.paper_daily_plan_candidates import count_daily_plan_execution_candidates
 from core.paper_trade_preview import build_paper_trade_previews, can_resolve_paper_actual_fill
 from core.paths import (
     market_db_path,
 )
+from core.runbook_calendar import load_market_calendar
+from scripts import runbook_state
 
 
 def _display_date(date_str: str) -> str:
@@ -284,6 +290,8 @@ def run_paper_eod_dry_run(
     plan_path: str | Path | None = None,
     account_paths: PaperAccountPaths | None = None,
     json_output: bool = False,
+    data_date: str | None = None,
+    workspace: str | Path | None = None,
 ) -> int:
     clean_date = _normalize_date(date_str)
     require_initialized_writer_account_paths(
@@ -314,6 +322,7 @@ def run_paper_eod_dry_run(
     position_snapshot_save_result: dict[str, Any] | None = None
     market_valuation = None
     market_valuation_error: str | None = None
+    operational_gap_guard_result: dict[str, Any] | None = None
 
     target_snapshot_date = _display_date(date_str)
     source_snapshot_date = _latest_source_snapshot_date(paths)
@@ -387,6 +396,42 @@ def run_paper_eod_dry_run(
                 "execution rows were found. Run Manual Execution commit first."
             )
 
+    if commit and accounting_close_error is None:
+        if not str(data_date or "").strip() or workspace is None:
+            accounting_close_error = (
+                "EOD accounting close blocked: commit requires canonical data_date and "
+                "runbook workspace context."
+            )
+        else:
+            canonical_data_date = _display_date(str(data_date))
+            runbook_day_id = runbook_state.get_runbook_day_id(
+                account_paths.account_id,
+                canonical_data_date,
+                target_snapshot_date,
+            )
+            try:
+                operational_gap_guard_result = guard_operational_gap_boundary(
+                    workspace,
+                    account_id=account_paths.account_id,
+                    data_date=canonical_data_date,
+                    trade_date=target_snapshot_date,
+                    runbook_day_id=runbook_day_id,
+                    calendar=load_market_calendar(),
+                    account_root=account_paths.root,
+                    boundary="EOD_SNAPSHOT_WRITE",
+                )
+            except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+                accounting_close_error = (
+                    "EOD accounting close blocked: operational-gap guard failed: "
+                    f"{type(exc).__name__}:{exc}"
+                )
+            else:
+                if operational_gap_guard_result["decision"] == GUARD_BLOCKED:
+                    accounting_close_error = (
+                        "EOD accounting close blocked: "
+                        f"{operational_gap_guard_result['reason']}"
+                    )
+
     if accounting_close_error is None:
         try:
             paper_account_state = build_paper_account_preview_from_log(
@@ -398,7 +443,12 @@ def run_paper_eod_dry_run(
         except ValueError as exc:
             account_preview_error = str(exc)
 
-    if commit and account_preview_error is None and paper_account_state is not None:
+    if (
+        commit
+        and accounting_close_error is None
+        and account_preview_error is None
+        and paper_account_state is not None
+    ):
         try:
             paper_state_save_result = save_paper_current_state(
                 paper_account_state,
@@ -448,6 +498,7 @@ def run_paper_eod_dry_run(
 
     if (
         commit
+        and accounting_close_error is None
         and account_preview_error is None
         and paper_state_save_error is None
         and snapshot_save_error is None
@@ -465,6 +516,7 @@ def run_paper_eod_dry_run(
 
     if (
         commit
+        and accounting_close_error is None
         and position_snapshot_save_error is None
         and market_valuation is not None
         and position_snapshot_rows is not None
@@ -822,6 +874,7 @@ def run_paper_eod_dry_run(
             "account_snapshot_path": str(paths["paper_account_snapshot"]),
             "position_snapshot_path": str(paths["paper_position_snapshot"]),
             "market_valuation_status": snapshot_row.get("market_valuation_status") if snapshot_row else None,
+            "operational_gap_guard": operational_gap_guard_result,
         }
         payload = _write_eod_report(payload, paths, clean_date, commit)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -846,6 +899,14 @@ def main() -> int:
         action="store_true",
         help="Close paper accounting snapshots from the committed execution log without appending execution rows.",
     )
+    parser.add_argument(
+        "--data-date",
+        help="Canonical market data date required for commit mode.",
+    )
+    parser.add_argument(
+        "--runbook-workspace",
+        help="Canonical runbook workspace required for commit mode.",
+    )
     args = parser.parse_args()
     try:
         account_paths = build_paper_account_paths(args.account_id, create=False)
@@ -855,6 +916,8 @@ def main() -> int:
             commit=args.commit,
             plan_path=args.plan_path,
             account_paths=account_paths,
+            data_date=args.data_date,
+            workspace=args.runbook_workspace,
         )
     except ValueError as exc:
         print(f"Paper EOD aborted: {exc}")

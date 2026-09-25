@@ -5,10 +5,27 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from core.paper_account_paths import PaperAccountPaths
 from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
 from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
 from scripts import run_paper_eod_update
+
+
+@pytest.fixture(autouse=True)
+def _bind_canonical_eod_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = run_paper_eod_update.run_paper_eod_dry_run
+
+    def bound(*args, **kwargs):
+        if kwargs.get("commit"):
+            kwargs.setdefault("data_date", "2026-06-14")
+            kwargs.setdefault("workspace", tmp_path / "runbook_workspace")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(run_paper_eod_update, "run_paper_eod_dry_run", bound)
 
 
 def _account_paths(root: Path, account_id: str = "paper_eod_accounting") -> PaperAccountPaths:

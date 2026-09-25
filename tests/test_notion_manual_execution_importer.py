@@ -634,6 +634,8 @@ def test_cli_reports_missing_preview_json_for_non_default_commit(capsys):
             "2026-05-25",
             "--data-date",
             "2026-05-24",
+            "--workspace",
+            ".",
             "--commit",
             "--preview-json",
             "missing.json",
@@ -717,6 +719,8 @@ def test_cli_commit_requires_pass_reconciliation_before_commit(monkeypatch, tmp_
             "2026-05-25",
             "--data-date",
             "2026-05-24",
+            "--workspace",
+            str(tmp_path),
             "--commit",
             "--preview-json",
             str(preview_path),
@@ -732,6 +736,7 @@ def test_cli_commit_requires_pass_reconciliation_before_commit(monkeypatch, tmp_
     assert exit_code == 0
     assert '"status": "COMMITTED"' in output
     assert called["preview_json_path"] == preview_path
+    assert called["workspace"] == tmp_path
 
 
 def test_cli_commit_blocks_warning_reconciliation_without_write(monkeypatch, tmp_path, capsys):
@@ -753,6 +758,8 @@ def test_cli_commit_blocks_warning_reconciliation_without_write(monkeypatch, tmp
             "2026-05-25",
             "--data-date",
             "2026-05-24",
+            "--workspace",
+            str(tmp_path),
             "--commit",
             "--preview-json",
             str(preview_path),
@@ -790,6 +797,8 @@ def test_cli_commit_blocks_reconciliation_context_mismatch_without_write(monkeyp
             "2026-05-25",
             "--data-date",
             "2026-05-24",
+            "--workspace",
+            str(tmp_path),
             "--commit",
             "--preview-json",
             str(preview_path),

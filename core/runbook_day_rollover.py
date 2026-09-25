@@ -9,7 +9,12 @@ from typing import Any
 
 from core.paper_account_paths import build_paper_account_paths
 from core.runbook_calendar import CalendarCoverageError, MarketCalendar
-from core import failed_no_trade_closure, runbook_recovery, runbook_retirement
+from core import (
+    failed_no_trade_closure,
+    operational_gap_recovery,
+    runbook_recovery,
+    runbook_retirement,
+)
 from scripts import runbook_stage_e_evidence
 from scripts import runbook_stage_f_evidence
 from scripts import runbook_state
@@ -238,7 +243,92 @@ def preview_rollover(
     if not records:
         return _blocked("completed_runbook_day_not_found")
 
-    classified = [(record, classify_state(workspace_path, record, calendar)) for record in records]
+    account_root = build_paper_account_paths(account_id, create=False).root
+    gap_resolution = operational_gap_recovery.resolve_operational_gap_authorizations(
+        workspace_path,
+        account_id=account_id,
+        calendar=calendar,
+        account_root=account_root,
+        account_mode_resolver=runbook_recovery.resolve_authoritative_account_mode,
+    )
+    if gap_resolution["state"] == "BLOCKED":
+        if "multiple_unconsumed_authorizations" in gap_resolution["blockers"]:
+            return _blocked(
+                "multiple_recovery_authorizations",
+                [
+                    f"recovery_source:{item['source_identity']}"
+                    for item in gap_resolution.get("authorizations", [])
+                    if item.get("status") == "UNCONSUMED"
+                ],
+            )
+        if any(
+            str(blocker).startswith("legacy_recovery_invalid:")
+            for blocker in gap_resolution["blockers"]
+        ):
+            return _blocked("active_runbook_day_exists", gap_resolution["blockers"])
+        return _blocked("operational_gap_authorization_invalid", gap_resolution["blockers"])
+
+    authorization_sources = {
+        item["source_identity"]
+        for item in gap_resolution.get("authorizations", [])
+    }
+    classified: list[tuple[StateRecord, dict[str, Any]]] = []
+    for record in records:
+        classification = runbook_recovery._base_classification(workspace_path, record)
+        if record.state.runbook_day_id in authorization_sources:
+            classification = "OPERATIONAL_GAP_EXCLUDED"
+        classified.append(
+            (
+                record,
+                {
+                    "runbook_day_id": record.state.runbook_day_id,
+                    "data_date": record.state.frozen_context.data_date,
+                    "trade_date": record.state.frozen_context.trade_date,
+                    "classification": classification,
+                    "blockers": [],
+                },
+            )
+        )
+
+    if gap_resolution["state"] == "UNCONSUMED":
+        authorization = gap_resolution["authorization"]
+        restart = authorization["resume"]
+        completed_for_context = [
+            record
+            for record, item in classified
+            if item["classification"]
+            in {
+                "STANDARD_COMPLETED",
+                "LEGACY_COMPLETED",
+                failed_no_trade_closure.TERMINAL_CLASSIFICATION,
+            }
+        ]
+        previous_id = (
+            max(
+                completed_for_context,
+                key=lambda item: item.state.frozen_context.trade_date,
+            ).state.runbook_day_id
+            if completed_for_context
+            else None
+        )
+        return {
+            "runner_result": "PASS",
+            "mode": "PREVIEW",
+            "rollover_mode": "RECOVERY",
+            "account_id": account_id,
+            "previous_runbook_day_id": previous_id,
+            "recovery_source_runbook_day_id": authorization["source_identity"],
+            "operational_gap_evidence_kind": authorization["evidence_kind"],
+            "operational_gap_evidence_id": authorization["evidence_id"],
+            "next_data_date": restart["data_date"],
+            "next_trade_date": restart["trade_date"],
+            "next_runbook_day_id": restart["runbook_day_id"],
+            "runbook_classifications": [item for _, item in classified],
+            "already_exists": False,
+            "safe_to_prepare": True,
+            "next_required_action": NEXT_ACTION,
+        }
+
     active = [record for record, item in classified if item["classification"] == "ACTIVE_INCOMPLETE"]
     if len(active) > 1:
         return _blocked(
@@ -250,48 +340,6 @@ def preview_rollover(
             "active_runbook_day_exists",
             [f"active_runbook_day:{active[0].state.runbook_day_id}"],
         )
-
-    recoveries = [
-        record for record, item in classified if item["classification"] == "RECOVERY_EXCLUDED"
-    ]
-    current_recoveries, recovery_blockers = (
-        runbook_recovery._current_recovery_authorizations(
-            workspace_path,
-            recoveries,
-            calendar,
-        )
-    )
-    if recovery_blockers:
-        return _blocked("recovery_authorization_invalid", recovery_blockers)
-    if len(current_recoveries) > 1:
-        return _blocked(
-            "multiple_recovery_authorizations",
-            [
-                f"recovery_source:{record.state.runbook_day_id}"
-                for record, _ in current_recoveries
-            ],
-        )
-    if current_recoveries:
-        source, recovery = current_recoveries[0]
-        restart = recovery["payload"]["restart"]
-        already_exists = _already_exists(workspace_path, restart["runbook_day_id"])
-        if already_exists:
-            return _blocked("recovery_target_already_exists")
-        return {
-            "runner_result": "PASS",
-            "mode": "PREVIEW",
-            "rollover_mode": "RECOVERY",
-            "account_id": account_id,
-            "previous_runbook_day_id": recovery["payload"]["latest_completed"]["runbook_day_id"],
-            "recovery_source_runbook_day_id": source.state.runbook_day_id,
-            "next_data_date": restart["data_date"],
-            "next_trade_date": restart["trade_date"],
-            "next_runbook_day_id": restart["runbook_day_id"],
-            "runbook_classifications": [item for _, item in classified],
-            "already_exists": False,
-            "safe_to_prepare": True,
-            "next_required_action": NEXT_ACTION,
-        }
 
     completed = [
         record

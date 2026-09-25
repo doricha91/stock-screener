@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from core.operational_no_trade_gap import resolve_authoritative_account_mode
 from core.paper_account_paths import build_paper_account_paths
 from core.runbook_calendar import (
     CALENDAR_SCHEMA_VERSION,
@@ -68,8 +69,10 @@ def _blocked(reason: str, blockers: list[str] | None = None, *, mode: str) -> di
 
 
 def _is_paper_test(account_id: str) -> bool:
-    lowered = account_id.lower()
-    return "paper" in lowered or "test" in lowered
+    try:
+        return resolve_authoritative_account_mode(account_id) in {"PAPER", "TEST"}
+    except (OSError, UnicodeError, ValueError, RuntimeError):
+        return False
 
 
 def _target_exists(workspace: Path, runbook_day_id: str) -> bool:
@@ -797,9 +800,34 @@ def assert_initialization_allowed(
     trade_date: str,
     calendar: MarketCalendar,
 ) -> None:
-    from core import runbook_day_rollover
+    from core import operational_gap_recovery, runbook_day_rollover
 
     workspace_path = Path(workspace).resolve(strict=False)
+    requested_id = runbook_state.get_runbook_day_id(account_id, data_date, trade_date)
+    guard = operational_gap_recovery.guard_operational_gap_boundary(
+        workspace_path,
+        account_id=account_id,
+        data_date=data_date,
+        trade_date=trade_date,
+        runbook_day_id=requested_id,
+        calendar=calendar,
+        account_mode_resolver=resolve_authoritative_account_mode,
+        boundary="INITIALIZATION",
+    )
+    if guard["decision"] == operational_gap_recovery.GUARD_BLOCKED:
+        if guard["reason"] == "operational_gap_target_mismatch":
+            raise ValueError("recovery_target_mismatch")
+        if "multiple_unconsumed_authorizations" in guard["blockers"]:
+            raise ValueError("multiple_recovery_authorizations")
+        if any(
+            str(blocker).startswith("legacy_recovery_invalid:")
+            for blocker in guard["blockers"]
+        ):
+            raise ValueError("active_runbook_day_exists")
+        raise ValueError("operational_gap_authorization_invalid")
+    if guard["decision"] == operational_gap_recovery.GUARD_ALLOW:
+        return
+
     records, blockers = runbook_day_rollover._load_account_states(workspace_path, account_id)
     if blockers == ["runbook_states_directory_not_found"]:
         return
@@ -807,42 +835,23 @@ def assert_initialization_allowed(
         raise ValueError("initialization_invalid_runbook_state")
     if not records:
         return
-    classified = [
-        (record, runbook_day_rollover.classify_state(workspace_path, record, calendar))
-        for record in records
-    ]
-    active = [record for record, item in classified if item["classification"] == "ACTIVE_INCOMPLETE"]
-    progressed_active = [
-        record
-        for record in active
-        if not runbook_retirement.assess_zero_progress(workspace_path, record.path, record.state)["eligible"]
-    ]
-    recovery_records = [
-        record
-        for record, item in classified
-        if item["classification"] == DISPOSITION
-    ]
-    requested_id = runbook_state.get_runbook_day_id(account_id, data_date, trade_date)
-    if progressed_active:
-        raise ValueError("active_runbook_day_exists")
-    if not recovery_records:
+    if guard["resolver_state"] == "NONE":
+        classified = [
+            (record, _base_classification(workspace_path, record))
+            for record in records
+        ]
+        active = [record for record, classification in classified if classification == "ACTIVE_INCOMPLETE"]
+        progressed_active = [
+            record
+            for record in active
+            if not runbook_retirement.assess_zero_progress(
+                workspace_path, record.path, record.state
+            )["eligible"]
+        ]
+        if progressed_active:
+            raise ValueError("active_runbook_day_exists")
         return
-    current_recoveries, recovery_blockers = _current_recovery_authorizations(
-        workspace_path,
-        recovery_records,
-        calendar,
-    )
-    if recovery_blockers:
-        raise ValueError("recovery_authorization_invalid")
-    if len(current_recoveries) > 1:
-        raise ValueError("multiple_recovery_authorizations")
-    if current_recoveries:
-        validation = current_recoveries[0][1]
-        if validation["payload"]["restart"]["runbook_day_id"] != requested_id:
-            raise ValueError("recovery_target_mismatch")
-        return
-    if active:
-        raise ValueError("active_runbook_day_exists")
+
     rollover = runbook_day_rollover.preview_rollover(
         workspace_path,
         account_id,
@@ -851,9 +860,8 @@ def assert_initialization_allowed(
     )
     if (
         rollover.get("runner_result") != "PASS"
-        or rollover.get("rollover_mode") == "RECOVERY"
     ):
-        raise ValueError("recovery_authorization_already_consumed")
+        raise ValueError(str(rollover.get("reason") or "recovery_authorization_already_consumed"))
     requested_context = {
         "account_id": account_id,
         "data_date": data_date,

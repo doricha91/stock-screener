@@ -1,0 +1,1394 @@
+diff --git a/core/operational_gap_recovery.py b/core/operational_gap_recovery.py
+index 87cb064..4ae3a0e 100644
+--- a/core/operational_gap_recovery.py
++++ b/core/operational_gap_recovery.py
+@@ -3,22 +3,22 @@ from __future__ import annotations
+ import json
+ import os
+ from dataclasses import dataclass
+-from datetime import datetime
++from datetime import date, datetime
+ from pathlib import Path
+ from typing import Any, Callable, Mapping, Sequence
+ from zoneinfo import ZoneInfo
+ 
+-from core import runbook_recovery, runbook_retirement
++from core import failed_no_trade_closure, runbook_recovery, runbook_retirement
+ from core.operational_no_trade_gap import (
+     CONSUMPTION_MODE,
+     SCHEMA_VERSION,
+     CollisionState,
+     ConsumptionState,
+-    ContractSourcePolicy,
+     PolicyAssessment,
+     SourcePolicyRegistry,
+     assess_gap_collisions,
+     calendar_projection_sha256,
++    derive_canonical_gap_resume,
+     canonical_json_sha256,
+     derive_consumption_state,
+     parse_evidence,
+@@ -37,6 +37,8 @@ from scripts import runbook_state
+ GENERIC_EVIDENCE_DIRNAME = "operational_no_trade_gaps"
+ PROGRESSED_POLICY_TYPE = "PROGRESSED_ACTIVE_NO_TRADE"
+ PROGRESSED_POLICY_VERSION = 1
++TERMINAL_POLICY_TYPE = "TERMINAL_PROVEN_NO_TRADE"
++TERMINAL_POLICY_VERSION = 1
+ PRODUCTION_ACTIVATION_ENABLED = False
+ GUARD_ALLOW = "ALLOW"
+ GUARD_BLOCKED = "BLOCKED"
+@@ -52,6 +54,13 @@ class ProgressedActiveAssessment:
+     evidence: dict[str, Any] | None = None
+ 
+ 
++@dataclass(frozen=True)
++class TerminalProvenAssessment:
++    eligible: bool
++    blockers: tuple[str, ...]
++    evidence: dict[str, Any] | None = None
++
++
+ def generic_evidence_dir(workspace: str | Path) -> Path:
+     return Path(workspace).resolve(strict=False) / GENERIC_EVIDENCE_DIRNAME
+ 
+@@ -177,6 +186,88 @@ class ProgressedActiveNoTradePolicy:
+         return PolicyAssessment(not blockers, tuple(dict.fromkeys(blockers)))
+ 
+ 
++@dataclass(frozen=True)
++class TerminalProvenNoTradePolicy:
++    workspace: Path
++    calendar: MarketCalendar
++    account_mode_resolver: Callable[[str], str] = resolve_authoritative_account_mode
++    policy_type: str = TERMINAL_POLICY_TYPE
++    policy_version: int = TERMINAL_POLICY_VERSION
++
++    def assess_eligibility(self, source: Mapping[str, Any]) -> PolicyAssessment:
++        return self._validate(source)
++
++    def bind_source_evidence(self, source: Mapping[str, Any]) -> dict[str, Any]:
++        assessment = self._validate(source)
++        if not assessment.eligible:
++            raise ValueError("source_not_eligible:" + ",".join(assessment.blockers))
++        return json.loads(json.dumps(dict(source)))
++
++    def validate_source_still_valid(self, source: Mapping[str, Any]) -> PolicyAssessment:
++        return self._validate(source)
++
++    def _validate(self, source: Mapping[str, Any]) -> PolicyAssessment:
++        blockers: list[str] = []
++        account_id = str(source.get("account_id") or "").strip()
++        identity = str(source.get("identity") or "").strip()
++        state_ref = str(source.get("state_ref") or "").strip()
++        closure_ref = str(source.get("closure_ref") or "").strip()
++        lifecycle = str(source.get("lifecycle") or "").strip()
++        source_trade_date = str(source.get("source_trade_date") or "").strip()
++        first_legal_gap_date = str(source.get("first_legal_gap_date") or "").strip()
++        if lifecycle != failed_no_trade_closure.TERMINAL_CLASSIFICATION:
++            blockers.append("source_lifecycle_not_accepted")
++        try:
++            mode = str(self.account_mode_resolver(account_id) or "").strip().upper()
++        except (OSError, UnicodeError, ValueError, RuntimeError):
++            mode = ""
++            blockers.append("authoritative_account_mode_unavailable")
++        if mode not in {"PAPER", "TEST"}:
++            blockers.append("paper_or_test_account_required")
++        try:
++            state_path = _resolve_workspace_ref(self.workspace, state_ref)
++            closure_path = _resolve_workspace_ref(self.workspace, closure_ref)
++            state = runbook_state.load_state(state_path)
++            if state.runbook_day_id != identity:
++                blockers.append("source_identity_mismatch")
++            if state.frozen_context.account_id != account_id:
++                blockers.append("source_account_mismatch")
++            if state.frozen_context.trade_date != source_trade_date:
++                blockers.append("source_trade_date_mismatch")
++            expected_first = self.calendar.next_trading_day(
++                date.fromisoformat(state.frozen_context.trade_date)
++            ).isoformat()
++            if first_legal_gap_date != expected_first:
++                blockers.append("source_first_legal_gap_date_mismatch")
++            validation = failed_no_trade_closure.validate_closure_evidence(
++                self.workspace, state_path, state
++            )
++            if not validation["exists"]:
++                blockers.append("source_closure_missing")
++            elif not validation["valid"]:
++                blockers.extend(
++                    ["source_closure_invalid", *validation.get("blockers", [])]
++                )
++            else:
++                payload = validation["payload"]
++                if closure_path != Path(validation["path"]).resolve(strict=False):
++                    blockers.append("source_closure_ref_mismatch")
++                if payload.get("schema_version") != failed_no_trade_closure.SCHEMA_VERSION:
++                    blockers.append("source_closure_schema_mismatch")
++                if (
++                    payload.get("terminal_classification")
++                    != failed_no_trade_closure.TERMINAL_CLASSIFICATION
++                ):
++                    blockers.append("source_closure_lifecycle_mismatch")
++                if payload.get("runbook_day_id") != identity:
++                    blockers.append("source_closure_identity_mismatch")
++                context = payload.get("frozen_context")
++                if not isinstance(context, Mapping) or context.get("account_id") != account_id:
++                    blockers.append("source_closure_account_mismatch")
++        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
++            blockers.append("source_state_or_closure_invalid")
++        return PolicyAssessment(not blockers, tuple(dict.fromkeys(blockers)))
++
+ def build_recovery_policy_registry(
+     workspace: str | Path,
+     *,
+@@ -192,10 +283,10 @@ def build_recovery_policy_registry(
+         )
+     )
+     registry.register(
+-        ContractSourcePolicy(
+-            "TERMINAL_PROVEN_NO_TRADE",
+-            1,
+-            frozenset({"FAILED_NO_TRADE_CLOSED"}),
++        TerminalProvenNoTradePolicy(
++            Path(workspace).resolve(strict=False),
++            calendar=calendar,
++            account_mode_resolver=account_mode_resolver,
+         )
+     )
+     return registry
+@@ -430,6 +521,206 @@ def preview_progressed_active_recovery(*args: Any, **kwargs: Any) -> dict[str, A
+     }
+ 
+ 
++def assess_terminal_proven_no_trade_recovery(
++    workspace: str | Path,
++    *,
++    account_id: str,
++    source_runbook_day_id: str,
++    resume_data_date: str,
++    reason: str,
++    calendar: MarketCalendar,
++    confirm_paper_test: bool,
++    confirm_no_real_trades: bool,
++    confirm_gap_without_backfill: bool,
++    account_root: str | Path | None = None,
++    account_mode_resolver: Callable[[str], str] = resolve_authoritative_account_mode,
++    operator: str = "recovery-cli",
++) -> TerminalProvenAssessment:
++    blockers: list[str] = []
++    workspace_path = Path(workspace).resolve(strict=False)
++    account_id = str(account_id or "").strip()
++    source_runbook_day_id = str(source_runbook_day_id or "").strip()
++    reason = str(reason or "").strip()
++    operator = str(operator or "").strip()
++    if not confirm_paper_test:
++        blockers.append("paper_test_confirmation_required")
++    if not confirm_no_real_trades:
++        blockers.append("no_real_trades_confirmation_required")
++    if not confirm_gap_without_backfill:
++        blockers.append("gap_without_backfill_confirmation_required")
++    if not reason:
++        blockers.append("recovery_reason_required")
++    if not operator:
++        blockers.append("operator_required")
++    try:
++        account_mode = str(account_mode_resolver(account_id) or "").strip().upper()
++    except (OSError, UnicodeError, ValueError, RuntimeError):
++        account_mode = ""
++        blockers.append("authoritative_account_mode_unavailable")
++    if account_mode not in {"PAPER", "TEST"}:
++        blockers.append("paper_or_test_account_required")
++
++    state_path = runbook_state.get_state_path_for_runbook_day_id(
++        workspace_path, source_runbook_day_id
++    )
++    try:
++        state = runbook_state.load_state(state_path)
++    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
++        return TerminalProvenAssessment(
++            False,
++            tuple(dict.fromkeys([*blockers, "source_state_invalid"])),
++        )
++    if state.runbook_day_id != source_runbook_day_id:
++        blockers.append("source_identity_mismatch")
++    if state.frozen_context.account_id != account_id:
++        blockers.append("source_account_mismatch")
++    closure = failed_no_trade_closure.validate_closure_evidence(
++        workspace_path, state_path, state
++    )
++    if not closure["exists"]:
++        blockers.append("source_closure_missing")
++    elif not closure["valid"]:
++        blockers.extend(["source_closure_invalid", *closure.get("blockers", [])])
++    try:
++        gap_start = calendar.next_trading_day(
++            date.fromisoformat(state.frozen_context.trade_date)
++        ).isoformat()
++        gap_dates, resume = derive_canonical_gap_resume(
++            account_id=account_id,
++            gap_start_date=gap_start,
++            resume_data_date=str(resume_data_date),
++            calendar=calendar,
++        )
++    except (ValueError, RuntimeError) as exc:
++        blockers.append(str(exc))
++        gap_start = ""
++        gap_dates = ()
++        resume = {}
++    if blockers:
++        return TerminalProvenAssessment(False, tuple(dict.fromkeys(blockers)))
++
++    closure_path = Path(closure["path"]).resolve(strict=False)
++    closure_payload = closure["payload"]
++    expected_trade_ids = [
++        str(item) for item in closure_payload.get("expected_trade_ids", [])
++    ]
++    resolved_root = (
++        Path(account_root)
++        if account_root is not None
++        else build_paper_account_paths(account_id, create=False).root
++    )
++    domain = scan_domain_no_write(
++        account_id=account_id,
++        trading_dates=gap_dates,
++        expected_trade_ids=expected_trade_ids,
++        account_root=resolved_root,
++    )
++    if not domain["valid"]:
++        return TerminalProvenAssessment(False, tuple(domain["blockers"]))
++    source = {
++        "account_id": account_id,
++        "identity": source_runbook_day_id,
++        "lifecycle": failed_no_trade_closure.TERMINAL_CLASSIFICATION,
++        "state_ref": _workspace_ref(workspace_path, state_path),
++        "closure_ref": _workspace_ref(workspace_path, closure_path),
++        "source_trade_date": state.frozen_context.trade_date,
++        "first_legal_gap_date": gap_start,
++        "refs": [
++            {
++                "path": _workspace_ref(workspace_path, state_path),
++                "sha256": sha256_file(state_path),
++            },
++            {
++                "path": _workspace_ref(workspace_path, closure_path),
++                "sha256": sha256_file(closure_path),
++            },
++        ],
++    }
++    registry = build_recovery_policy_registry(
++        workspace_path,
++        calendar=calendar,
++        account_mode_resolver=account_mode_resolver,
++    )
++    eligibility = registry.resolve(
++        TERMINAL_POLICY_TYPE, TERMINAL_POLICY_VERSION
++    ).assess_eligibility(source)
++    if not eligibility.eligible:
++        return TerminalProvenAssessment(False, eligibility.blockers)
++    payload = {
++        "schema_version": SCHEMA_VERSION,
++        "account_id": account_id,
++        "account_mode": account_mode,
++        "source_policy": {
++            "type": TERMINAL_POLICY_TYPE,
++            "version": TERMINAL_POLICY_VERSION,
++        },
++        "source": source,
++        "incident": {
++            "reason_code": "FAILED_NO_TRADE_CLOSED_GAP",
++            "reason_text": reason,
++        },
++        "gap": {
++            "start_date": gap_start,
++            "end_date": str(resume_data_date),
++            "trading_dates": list(gap_dates),
++        },
++        "calendar": {
++            "schema_version": CALENDAR_SCHEMA_VERSION,
++            "market": calendar.market,
++            "timezone": calendar.timezone,
++            "projection_sha256": calendar_projection_sha256(
++                calendar, gap_start, resume["trade_date"]
++            ),
++        },
++        "no_trade": domain["no_trade"],
++        "domain_no_write": domain["domain_no_write"],
++        "no_backfill": {"confirmed": True},
++        "resume": resume,
++        "operator": operator,
++        "created_at": datetime.now(ZoneInfo(calendar.timezone)).isoformat(),
++        "consumption": {
++            "mode": CONSUMPTION_MODE,
++            "target_state_ref": (
++                Path(runbook_state.STATE_DIRNAME) / f"{resume['runbook_day_id']}.json"
++            ).as_posix(),
++        },
++    }
++    evidence = seal_evidence(payload)
++    validation = validate_evidence(
++        evidence,
++        calendar=calendar,
++        workspace=workspace_path,
++        account_root=resolved_root,
++        registry=registry,
++        account_mode_resolver=account_mode_resolver,
++    )
++    if not validation.valid:
++        return TerminalProvenAssessment(False, validation.blockers, evidence)
++    return TerminalProvenAssessment(True, (), evidence)
++
++
++def preview_terminal_proven_no_trade_recovery(
++    *args: Any, **kwargs: Any
++) -> dict[str, Any]:
++    assessment = assess_terminal_proven_no_trade_recovery(*args, **kwargs)
++    if not assessment.eligible or assessment.evidence is None:
++        return _blocked(
++            "terminal_generic_recovery_not_eligible",
++            assessment.blockers,
++            mode="RECOVERY_PREVIEW",
++        )
++    return {
++        "runner_result": "PASS",
++        "mode": "RECOVERY_PREVIEW",
++        "eligible": True,
++        "authorized": False,
++        "producer": f"{SCHEMA_VERSION}:{TERMINAL_POLICY_TYPE}:v1",
++        "preview_sha256": preview_binding_sha256(assessment.evidence),
++        "evidence": assessment.evidence,
++        "blockers": [],
++    }
++
++
+ def _load_generic_payloads(directory: Path) -> tuple[list[dict[str, Any]], list[str]]:
+     payloads: list[dict[str, Any]] = []
+     blockers: list[str] = []
+@@ -681,7 +972,8 @@ def guard_operational_gap_boundary(
+     if (
+         resolver_state == "UNCONSUMED"
+         and matching
+-        and boundary_name in {"LIFECYCLE_ENTRY", "EXECUTION_COMMIT"}
++        and boundary_name
++        in {"LIFECYCLE_ENTRY", "EXECUTION_COMMIT", "EOD_SNAPSHOT_WRITE"}
+     ):
+         return {
+             **base,
+@@ -883,3 +1175,31 @@ def authorize_progressed_active_recovery(
+             "account_mode_resolver", resolve_authoritative_account_mode
+         ),
+     )
++
++
++def authorize_terminal_proven_no_trade_recovery(
++    *args: Any,
++    allow_test_write: bool = False,
++    **kwargs: Any,
++) -> dict[str, Any]:
++    preview = preview_terminal_proven_no_trade_recovery(*args, **kwargs)
++    if preview["runner_result"] != "PASS":
++        return preview | {"mode": "RECOVERY_AUTHORIZE"}
++    if not PRODUCTION_ACTIVATION_ENABLED and not allow_test_write:
++        return _blocked(
++            "ntg_production_activation_disabled",
++            mode="RECOVERY_AUTHORIZE",
++        ) | {
++            "producer": preview["producer"],
++            "preview_sha256": preview["preview_sha256"],
++        }
++    return write_generic_authorization(
++        kwargs.get("workspace", args[0] if args else None),
++        evidence=preview["evidence"],
++        expected_preview_sha256=preview["preview_sha256"],
++        calendar=kwargs["calendar"],
++        account_root=kwargs.get("account_root"),
++        account_mode_resolver=kwargs.get(
++            "account_mode_resolver", resolve_authoritative_account_mode
++        ),
++    )
+diff --git a/core/operational_no_trade_gap.py b/core/operational_no_trade_gap.py
+index 8d6466d..8a183af 100644
+--- a/core/operational_no_trade_gap.py
++++ b/core/operational_no_trade_gap.py
+@@ -250,6 +250,30 @@ def canonical_gap_trading_dates(
+     return tuple(values)
+ 
+ 
++def derive_canonical_gap_resume(
++    *,
++    account_id: str,
++    gap_start_date: str,
++    resume_data_date: str,
++    calendar: MarketCalendar,
++) -> tuple[tuple[str, ...], dict[str, str]]:
++    """Derive the canonical gap interval and exact resume target."""
++
++    gap_dates = canonical_gap_trading_dates(
++        calendar, gap_start_date, resume_data_date
++    )
++    resume_trade_date = calendar.next_trading_day(
++        _parse_iso_date(resume_data_date, "resume_data_date")
++    ).isoformat()
++    return gap_dates, {
++        "data_date": resume_data_date,
++        "trade_date": resume_trade_date,
++        "runbook_day_id": runbook_state.get_runbook_day_id(
++            account_id, resume_data_date, resume_trade_date
++        ),
++    }
++
++
+ def build_calendar_projection(
+     calendar: MarketCalendar,
+     start_date: str,
+@@ -577,13 +601,17 @@ def validate_evidence(
+         if end_date != data_date:
+             blockers.append("resume_data_date_must_equal_gap_end")
+         try:
+-            gap_dates = canonical_gap_trading_dates(calendar, start_date, end_date)
++            gap_dates, expected_resume = derive_canonical_gap_resume(
++                account_id=account_id,
++                gap_start_date=start_date,
++                resume_data_date=data_date,
++                calendar=calendar,
++            )
+             if list(gap_dates) != gap.get("trading_dates"):
+                 blockers.append("gap_trading_dates_mismatch")
+-            if calendar.next_trading_day(date.fromisoformat(data_date)).isoformat() != trade_date:
++            if expected_resume["trade_date"] != trade_date:
+                 blockers.append("resume_trade_date_not_next_trading_day")
+-            expected_id = runbook_state.get_runbook_day_id(account_id, data_date, trade_date)
+-            if resume.get("runbook_day_id") != expected_id:
++            if resume.get("runbook_day_id") != expected_resume["runbook_day_id"]:
+                 blockers.append("resume_runbook_day_id_mismatch")
+             expected_projection = calendar_projection_sha256(calendar, start_date, trade_date)
+             if not isinstance(calendar_data, Mapping):
+diff --git a/scripts/paper.py b/scripts/paper.py
+index f3c16af..f4f5d99 100644
+--- a/scripts/paper.py
++++ b/scripts/paper.py
+@@ -775,6 +775,10 @@ def handle_eod(args: argparse.Namespace) -> int:
+         "commit": commit,
+         "plan_path": None,
+     }
++    if "data_date" in inspect.signature(run_paper_eod_dry_run).parameters:
++        eod_kwargs["data_date"] = getattr(args, "data_date", None)
++    if "workspace" in inspect.signature(run_paper_eod_dry_run).parameters:
++        eod_kwargs["workspace"] = getattr(args, "runbook_workspace", None)
+     if "json_output" in inspect.signature(run_paper_eod_dry_run).parameters:
+         eod_kwargs["json_output"] = bool(getattr(args, "json", False))
+     return _call_with_optional_account_paths(
+@@ -1094,6 +1098,8 @@ def build_parser() -> argparse.ArgumentParser:
+     )
+     eod_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
+     eod_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
++    eod_parser.add_argument("--data-date", help="Canonical market data date required for commit mode")
++    eod_parser.add_argument("--runbook-workspace", help="Canonical runbook workspace required for commit mode")
+     eod_mode_group = eod_parser.add_mutually_exclusive_group(required=True)
+     eod_mode_group.add_argument("--dry-run", action="store_true", help="Run read-only EOD preview wrapper")
+     eod_mode_group.add_argument(
+diff --git a/scripts/run_paper_eod_update.py b/scripts/run_paper_eod_update.py
+index 5834485..7b0ed54 100644
+--- a/scripts/run_paper_eod_update.py
++++ b/scripts/run_paper_eod_update.py
+@@ -27,11 +27,17 @@ from core.paper_high_watermark import (
+     calculate_paper_high_watermarks,
+     filter_execution_rows_on_or_before,
+ )
++from core.operational_gap_recovery import (
++    GUARD_BLOCKED,
++    guard_operational_gap_boundary,
++)
+ from core.paper_daily_plan_candidates import count_daily_plan_execution_candidates
+ from core.paper_trade_preview import build_paper_trade_previews, can_resolve_paper_actual_fill
+ from core.paths import (
+     market_db_path,
+ )
++from core.runbook_calendar import load_market_calendar
++from scripts import runbook_state
+ 
+ 
+ def _display_date(date_str: str) -> str:
+@@ -284,6 +290,8 @@ def run_paper_eod_dry_run(
+     plan_path: str | Path | None = None,
+     account_paths: PaperAccountPaths | None = None,
+     json_output: bool = False,
++    data_date: str | None = None,
++    workspace: str | Path | None = None,
+ ) -> int:
+     clean_date = _normalize_date(date_str)
+     require_initialized_writer_account_paths(
+@@ -314,6 +322,7 @@ def run_paper_eod_dry_run(
+     position_snapshot_save_result: dict[str, Any] | None = None
+     market_valuation = None
+     market_valuation_error: str | None = None
++    operational_gap_guard_result: dict[str, Any] | None = None
+ 
+     target_snapshot_date = _display_date(date_str)
+     source_snapshot_date = _latest_source_snapshot_date(paths)
+@@ -387,6 +396,42 @@ def run_paper_eod_dry_run(
+                 "execution rows were found. Run Manual Execution commit first."
+             )
+ 
++    if commit and accounting_close_error is None:
++        if not str(data_date or "").strip() or workspace is None:
++            accounting_close_error = (
++                "EOD accounting close blocked: commit requires canonical data_date and "
++                "runbook workspace context."
++            )
++        else:
++            canonical_data_date = _display_date(str(data_date))
++            runbook_day_id = runbook_state.get_runbook_day_id(
++                account_paths.account_id,
++                canonical_data_date,
++                target_snapshot_date,
++            )
++            try:
++                operational_gap_guard_result = guard_operational_gap_boundary(
++                    workspace,
++                    account_id=account_paths.account_id,
++                    data_date=canonical_data_date,
++                    trade_date=target_snapshot_date,
++                    runbook_day_id=runbook_day_id,
++                    calendar=load_market_calendar(),
++                    account_root=account_paths.root,
++                    boundary="EOD_SNAPSHOT_WRITE",
++                )
++            except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
++                accounting_close_error = (
++                    "EOD accounting close blocked: operational-gap guard failed: "
++                    f"{type(exc).__name__}:{exc}"
++                )
++            else:
++                if operational_gap_guard_result["decision"] == GUARD_BLOCKED:
++                    accounting_close_error = (
++                        "EOD accounting close blocked: "
++                        f"{operational_gap_guard_result['reason']}"
++                    )
++
+     if accounting_close_error is None:
+         try:
+             paper_account_state = build_paper_account_preview_from_log(
+@@ -398,7 +443,12 @@ def run_paper_eod_dry_run(
+         except ValueError as exc:
+             account_preview_error = str(exc)
+ 
+-    if commit and account_preview_error is None and paper_account_state is not None:
++    if (
++        commit
++        and accounting_close_error is None
++        and account_preview_error is None
++        and paper_account_state is not None
++    ):
+         try:
+             paper_state_save_result = save_paper_current_state(
+                 paper_account_state,
+@@ -448,6 +498,7 @@ def run_paper_eod_dry_run(
+ 
+     if (
+         commit
++        and accounting_close_error is None
+         and account_preview_error is None
+         and paper_state_save_error is None
+         and snapshot_save_error is None
+@@ -465,6 +516,7 @@ def run_paper_eod_dry_run(
+ 
+     if (
+         commit
++        and accounting_close_error is None
+         and position_snapshot_save_error is None
+         and market_valuation is not None
+         and position_snapshot_rows is not None
+@@ -822,6 +874,7 @@ def run_paper_eod_dry_run(
+             "account_snapshot_path": str(paths["paper_account_snapshot"]),
+             "position_snapshot_path": str(paths["paper_position_snapshot"]),
+             "market_valuation_status": snapshot_row.get("market_valuation_status") if snapshot_row else None,
++            "operational_gap_guard": operational_gap_guard_result,
+         }
+         payload = _write_eod_report(payload, paths, clean_date, commit)
+         print(json.dumps(payload, ensure_ascii=False, indent=2))
+@@ -846,6 +899,14 @@ def main() -> int:
+         action="store_true",
+         help="Close paper accounting snapshots from the committed execution log without appending execution rows.",
+     )
++    parser.add_argument(
++        "--data-date",
++        help="Canonical market data date required for commit mode.",
++    )
++    parser.add_argument(
++        "--runbook-workspace",
++        help="Canonical runbook workspace required for commit mode.",
++    )
+     args = parser.parse_args()
+     try:
+         account_paths = build_paper_account_paths(args.account_id, create=False)
+@@ -855,6 +916,8 @@ def main() -> int:
+             commit=args.commit,
+             plan_path=args.plan_path,
+             account_paths=account_paths,
++            data_date=args.data_date,
++            workspace=args.runbook_workspace,
+         )
+     except ValueError as exc:
+         print(f"Paper EOD aborted: {exc}")
+diff --git a/scripts/runbook_command_registry.py b/scripts/runbook_command_registry.py
+index fc73b4b..ea203a0 100644
+--- a/scripts/runbook_command_registry.py
++++ b/scripts/runbook_command_registry.py
+@@ -522,6 +522,10 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
+             "{trade_date}",
+             "--account-id",
+             "{account_id}",
++            "--data-date",
++            "{data_date}",
++            "--runbook-workspace",
++            "{workspace}",
+             "--dry-run",
+             "--json",
+         ),
+@@ -544,6 +548,10 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
+             "{trade_date}",
+             "--account-id",
+             "{account_id}",
++            "--data-date",
++            "{data_date}",
++            "--runbook-workspace",
++            "{workspace}",
+             "--commit",
+             "--dryrun-json",
+             "{eod_dryrun_report_json}",
+diff --git a/tests/test_failed_no_trade_closure.py b/tests/test_failed_no_trade_closure.py
+index 5f30940..235c680 100644
+--- a/tests/test_failed_no_trade_closure.py
++++ b/tests/test_failed_no_trade_closure.py
+@@ -33,9 +33,16 @@ def _write_json(path: Path, payload: dict[str, object]) -> Path:
+     return path
+ 
+ 
+-def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
++def _seed_failed_attempt(
++    tmp_path: Path,
++    *,
++    account_id: str = ACCOUNT_ID,
++    data_date: str = DATA_DATE,
++    trade_date: str = TRADE_DATE,
++) -> dict[str, object]:
++    runbook_day_id = f"{account_id}_{data_date}_{trade_date}"
+     workspace = tmp_path / "workspace"
+-    account_root = tmp_path / "outputs" / "paper_accounts" / ACCOUNT_ID
++    account_root = tmp_path / "outputs" / "paper_accounts" / account_id
+     workspace.mkdir()
+     account_root.mkdir(parents=True)
+     execution_path = account_root / "paper_execution_log.csv"
+@@ -46,8 +53,8 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
+     _write_csv(position_path, ["account_id", "snapshot_date", "symbol"])
+ 
+     candidate = {
+-        "account_id": ACCOUNT_ID,
+-        "execution_date": TRADE_DATE,
++        "account_id": account_id,
++        "execution_date": trade_date,
+         "symbol": "AMD",
+         "side": "BUY",
+         "quantity": 2,
+@@ -55,32 +62,32 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
+         "note": "fixture",
+     }
+     plan_path = _write_json(
+-        workspace / "artifacts" / RUNBOOK_DAY_ID / "stage_a" / "daily_plan.json",
++        workspace / "artifacts" / runbook_day_id / "stage_a" / "daily_plan.json",
+         {
+             "schema_version": "paper_daily_plan.v1",
+-            "account_id": ACCOUNT_ID,
+-            "data_date": DATA_DATE,
+-            "trade_date": TRADE_DATE,
++            "account_id": account_id,
++            "data_date": data_date,
++            "trade_date": trade_date,
+             "items": [{"symbol": "AMD", "action": "BUY", "quantity": 2, "price": 100.0}],
+         },
+     )
+     preview_path = _write_json(
+-        workspace / "artifacts" / RUNBOOK_DAY_ID / "stage_b" / "preview.json",
++        workspace / "artifacts" / runbook_day_id / "stage_b" / "preview.json",
+         {
+-            "account_id": ACCOUNT_ID,
+-            "execution_date": TRADE_DATE,
++            "account_id": account_id,
++            "execution_date": trade_date,
+             "candidate_count": 1,
+             "candidates": [candidate],
+         },
+     )
+     reconciliation_path = _write_json(
+-        workspace / "reconciliation_runs" / RUNBOOK_DAY_ID / "preview.json",
++        workspace / "reconciliation_runs" / runbook_day_id / "preview.json",
+         {
+             "schema_version": "execution_reconciliation_preview.v1",
+             "runner_result": "PASS",
+-            "account_id": ACCOUNT_ID,
+-            "data_date": DATA_DATE,
+-            "trade_date": TRADE_DATE,
++            "account_id": account_id,
++            "data_date": data_date,
++            "trade_date": trade_date,
+             "notion_row_count": 1,
+             "actual_count": 1,
+             "planned_count": 1,
+@@ -109,7 +116,7 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
+         },
+     )
+ 
+-    state = runbook_state.create_initial_state(ACCOUNT_ID, DATA_DATE, TRADE_DATE)
++    state = runbook_state.create_initial_state(account_id, data_date, trade_date)
+     state = runbook_state.complete_stage(state, "A")
+     state = runbook_state.complete_stage(state, "GATE1")
+     for name, path in (
+@@ -121,7 +128,7 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
+     state = runbook_state.start_stage(state, "B")
+     state = runbook_state.complete_step(state, 7, "B")
+     state_path = runbook_state.get_state_path_for_context(
+-        workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE
++        workspace, account_id, data_date, trade_date
+     )
+     runbook_state.save_state(state, state_path)
+     logical = runbook_stage_b_recovery.build_stage_b_logical_operation(state, workspace)
+@@ -140,15 +147,15 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
+         precommit_evidence_ref=preseal_ref,
+     )
+     command_path = _write_json(
+-        workspace / "command_runs" / RUNBOOK_DAY_ID / "execution_commit.json",
++        workspace / "command_runs" / runbook_day_id / "execution_commit.json",
+         {
+             "schema_version": "runbook_command_result.v1",
+             "runner_result": "FAILED",
+-            "runbook_day_id": RUNBOOK_DAY_ID,
++            "runbook_day_id": runbook_day_id,
+             "frozen_context": {
+-                "account_id": ACCOUNT_ID,
+-                "data_date": DATA_DATE,
+-                "trade_date": TRADE_DATE,
++                "account_id": account_id,
++                "data_date": data_date,
++                "trade_date": trade_date,
+             },
+             "stage_id": "B",
+             "step_id": 8,
+@@ -179,6 +186,10 @@ def _seed_failed_attempt(tmp_path: Path) -> dict[str, object]:
+     runbook_state.save_state(state, state_path)
+     return {
+         "workspace": workspace,
++        "account_id": account_id,
++        "data_date": data_date,
++        "trade_date": trade_date,
++        "runbook_day_id": runbook_day_id,
+         "account_root": account_root,
+         "state_path": state_path,
+         "failed_key": failed_key,
+diff --git a/tests/test_paper_cli_account_scope.py b/tests/test_paper_cli_account_scope.py
+index e92a5c2..6c64f00 100644
+--- a/tests/test_paper_cli_account_scope.py
++++ b/tests/test_paper_cli_account_scope.py
+@@ -351,9 +351,20 @@ def test_eod_commit_path_builds_account_paths_before_preflight_without_creation(
+         captured["preflight_account_id"] = account_paths.account_id
+         return {"result": "PASS"}
+ 
+-    def fake_run_paper_eod_dry_run(date_str, *, allow_empty_journal, commit, plan_path, account_paths):
++    def fake_run_paper_eod_dry_run(
++        date_str,
++        *,
++        allow_empty_journal,
++        commit,
++        plan_path,
++        account_paths,
++        data_date,
++        workspace,
++    ):
+         captured["eod_commit"] = commit
+         captured["eod_account_id"] = account_paths.account_id
++        captured["eod_data_date"] = data_date
++        captured["eod_workspace"] = workspace
+         return 0
+ 
+     monkeypatch.setattr(paper, "build_paper_account_paths", fake_build_paper_account_paths)
+@@ -368,6 +379,8 @@ def test_eod_commit_path_builds_account_paths_before_preflight_without_creation(
+             commit=True,
+             account_id="paper_growth",
+             guard_checked=True,
++            data_date="2026-06-07",
++            runbook_workspace="runbook-workspace",
+         )
+     )
+ 
+@@ -378,6 +391,8 @@ def test_eod_commit_path_builds_account_paths_before_preflight_without_creation(
+         "preflight_account_id": "paper_growth",
+         "eod_commit": True,
+         "eod_account_id": "paper_growth",
++        "eod_data_date": "2026-06-07",
++        "eod_workspace": "runbook-workspace",
+     }
+ 
+ 
+@@ -418,6 +433,8 @@ def test_no_action_eod_commit_fixture_rolls_forward_snapshots_without_execution_
+         allow_empty_journal=True,
+         commit=True,
+         account_paths=paths,
++        data_date="2026-06-08",
++        workspace=tmp_path / "runbook_workspace",
+     )
+ 
+     after_log_rows = list(csv.DictReader(paths.execution_log_path.open("r", encoding="utf-8-sig", newline="")))
+@@ -465,6 +482,8 @@ def test_no_action_roll_forward_allows_status_review_done_without_commit_recomme
+         allow_empty_journal=True,
+         commit=True,
+         account_paths=paths,
++        data_date="2026-06-08",
++        workspace=tmp_path / "runbook_workspace",
+     ) == 0
+ 
+     status = run_paper_status("2026-06-09", account_paths=paths)
+diff --git a/tests/test_paper_eod_accounting_close.py b/tests/test_paper_eod_accounting_close.py
+index d51d325..1c57239 100644
+--- a/tests/test_paper_eod_accounting_close.py
++++ b/tests/test_paper_eod_accounting_close.py
+@@ -5,12 +5,29 @@ import json
+ import sqlite3
+ from pathlib import Path
+ 
++import pytest
++
+ from core.paper_account_paths import PaperAccountPaths
+ from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
+ from core.paper_market_valuation import PaperAccountValuation, PaperPositionValuation
+ from scripts import run_paper_eod_update
+ 
+ 
++@pytest.fixture(autouse=True)
++def _bind_canonical_eod_context(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    original = run_paper_eod_update.run_paper_eod_dry_run
++
++    def bound(*args, **kwargs):
++        if kwargs.get("commit"):
++            kwargs.setdefault("data_date", "2026-06-14")
++            kwargs.setdefault("workspace", tmp_path / "runbook_workspace")
++        return original(*args, **kwargs)
++
++    monkeypatch.setattr(run_paper_eod_update, "run_paper_eod_dry_run", bound)
++
++
+ def _account_paths(root: Path, account_id: str = "paper_eod_accounting") -> PaperAccountPaths:
+     return PaperAccountPaths(
+         account_id=account_id,
+diff --git a/tests/test_paper_eod_operational_gap_guard.py b/tests/test_paper_eod_operational_gap_guard.py
+new file mode 100644
+index 0000000..939e848
+--- /dev/null
++++ b/tests/test_paper_eod_operational_gap_guard.py
+@@ -0,0 +1,151 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++from core import operational_gap_recovery
++from scripts import run_paper_eod_update
++from tests.test_paper_eod_accounting_close import (
++    _account_paths,
++    _fake_valuation,
++    _seed_account,
++)
++
++
++def _seed_eod(tmp_path: Path):
++    paths = _account_paths(
++        tmp_path / "paper_accounts" / "paper_eod_ntg",
++        account_id="paper_eod_ntg",
++    )
++    _seed_account(paths, plan_items=[], trades=[])
++    return paths
++
++
++def test_eod_guard_block_prevents_all_snapshot_writers(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    paths = _seed_eod(tmp_path)
++    monkeypatch.setattr(run_paper_eod_update, "value_paper_account_state", _fake_valuation)
++    monkeypatch.setattr(
++        run_paper_eod_update,
++        "guard_operational_gap_boundary",
++        lambda *args, **kwargs: {
++            "decision": operational_gap_recovery.GUARD_BLOCKED,
++            "reason": "operational_gap_authorization_invalid",
++            "blockers": ["late_contradiction"],
++        },
++    )
++    writer_calls: list[str] = []
++
++    def unexpected_writer(*args, **kwargs):
++        writer_calls.append("called")
++        raise AssertionError("snapshot writer reached after EOD NTG block")
++
++    for name in (
++        "save_paper_current_state",
++        "save_paper_account_snapshot",
++        "save_paper_position_snapshot",
++    ):
++        monkeypatch.setattr(run_paper_eod_update, name, unexpected_writer)
++
++    result = run_paper_eod_update.run_paper_eod_dry_run(
++        "2026-06-15",
++        allow_empty_journal=True,
++        commit=True,
++        account_paths=paths,
++        data_date="2026-06-14",
++        workspace=tmp_path / "runbook_workspace",
++    )
++
++    assert result == 1
++    assert writer_calls == []
++    assert not paths.current_state_snapshot_path("2026-06-15").exists()
++
++
++def test_eod_valid_guard_allows_existing_snapshot_semantics(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    paths = _seed_eod(tmp_path)
++    monkeypatch.setattr(run_paper_eod_update, "value_paper_account_state", _fake_valuation)
++    captured: dict[str, object] = {}
++
++    def allow_guard(workspace, **kwargs):
++        captured["workspace"] = Path(workspace)
++        captured.update(kwargs)
++        return {
++            "decision": operational_gap_recovery.GUARD_ALLOW,
++            "reason": "operational_gap_exact_target_valid",
++            "blockers": [],
++        }
++
++    monkeypatch.setattr(
++        run_paper_eod_update, "guard_operational_gap_boundary", allow_guard
++    )
++    workspace = tmp_path / "runbook_workspace"
++    result = run_paper_eod_update.run_paper_eod_dry_run(
++        "2026-06-15",
++        allow_empty_journal=True,
++        commit=True,
++        account_paths=paths,
++        data_date="2026-06-14",
++        workspace=workspace,
++    )
++
++    assert result == 0
++    assert captured["workspace"] == workspace
++    assert captured["account_id"] == paths.account_id
++    assert captured["data_date"] == "2026-06-14"
++    assert captured["trade_date"] == "2026-06-15"
++    assert captured["runbook_day_id"] == "paper_eod_ntg_2026-06-14_2026-06-15"
++    assert captured["account_root"] == paths.root
++    assert captured["boundary"] == "EOD_SNAPSHOT_WRITE"
++    assert paths.current_state_snapshot_path("2026-06-15").exists()
++
++
++def test_eod_non_ntg_not_applicable_keeps_existing_behavior(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    paths = _seed_eod(tmp_path)
++    monkeypatch.setattr(run_paper_eod_update, "value_paper_account_state", _fake_valuation)
++    workspace = tmp_path / "empty_runbook_workspace"
++
++    result = run_paper_eod_update.run_paper_eod_dry_run(
++        "2026-06-15",
++        allow_empty_journal=True,
++        commit=True,
++        account_paths=paths,
++        data_date="2026-06-14",
++        workspace=workspace,
++    )
++
++    assert result == 0
++    assert paths.current_state_snapshot_path("2026-06-15").exists()
++    assert "2026-06-15" in paths.account_snapshot_path.read_text(encoding="utf-8-sig")
++
++
++def test_eod_commit_without_canonical_context_fails_before_writers(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    paths = _seed_eod(tmp_path)
++    monkeypatch.setattr(run_paper_eod_update, "value_paper_account_state", _fake_valuation)
++    writer_calls: list[str] = []
++
++    def unexpected_writer(*args, **kwargs):
++        writer_calls.append("called")
++        raise AssertionError("writer reached without canonical runbook context")
++
++    for name in (
++        "save_paper_current_state",
++        "save_paper_account_snapshot",
++        "save_paper_position_snapshot",
++    ):
++        monkeypatch.setattr(run_paper_eod_update, name, unexpected_writer)
++
++    assert run_paper_eod_update.run_paper_eod_dry_run(
++        "2026-06-15",
++        allow_empty_journal=True,
++        commit=True,
++        account_paths=paths,
++    ) == 1
++    assert writer_calls == []
+diff --git a/tests/test_terminal_proven_no_trade.py b/tests/test_terminal_proven_no_trade.py
+new file mode 100644
+index 0000000..d042327
+--- /dev/null
++++ b/tests/test_terminal_proven_no_trade.py
+@@ -0,0 +1,350 @@
++from __future__ import annotations
++
++import csv
++import json
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++from core import operational_gap_recovery, operational_no_trade_gap, runbook_day_rollover
++from core.operational_gap_recovery import (
++    TerminalProvenNoTradePolicy,
++    preview_terminal_proven_no_trade_recovery,
++    resolve_operational_gap_authorizations,
++    write_generic_authorization,
++)
++from core.runbook_calendar import load_market_calendar
++from core.paper_account_paths import build_paper_account_paths
++from scripts import runbook_state
++from tests.test_failed_no_trade_closure import _seed_failed_attempt
++
++
++ACCOUNT_ID = "paper_terminal_gap"
++SOURCE_DATA_DATE = "2026-09-09"
++SOURCE_TRADE_DATE = "2026-09-10"
++RESUME_DATA_DATE = "2026-09-11"
++RESUME_TRADE_DATE = "2026-09-14"
++
++
++def _close_terminal(fixture: dict[str, object]) -> None:
++    from core import failed_no_trade_closure
++
++    result = failed_no_trade_closure.close_failed_no_trade(
++        workspace=fixture["workspace"],
++        account_id=str(fixture["account_id"]),
++        data_date=str(fixture["data_date"]),
++        trade_date=str(fixture["trade_date"]),
++        failed_idempotency_key=str(fixture["failed_key"]),
++        operator="terminal-test",
++        reason="confirmed failed day with no execution or domain writes",
++        confirm_no_actual_trades=True,
++        confirm_no_reexecution=True,
++        account_root=fixture["account_root"],
++    )
++    assert result["runner_result"] == "PASS", result
++
++
++def _fixture(
++    tmp_path: Path,
++    *,
++    account_id: str = ACCOUNT_ID,
++    data_date: str = SOURCE_DATA_DATE,
++    trade_date: str = SOURCE_TRADE_DATE,
++) -> dict[str, object]:
++    fixture = _seed_failed_attempt(
++        tmp_path,
++        account_id=account_id,
++        data_date=data_date,
++        trade_date=trade_date,
++    )
++    _close_terminal(fixture)
++    return fixture
++
++
++def _preview(
++    fixture: dict[str, object],
++    *,
++    resume_data_date: str = RESUME_DATA_DATE,
++    mode: str = "PAPER",
++) -> dict[str, object]:
++    return preview_terminal_proven_no_trade_recovery(
++        fixture["workspace"],
++        account_id=str(fixture["account_id"]),
++        source_runbook_day_id=str(fixture["runbook_day_id"]),
++        resume_data_date=resume_data_date,
++        reason="resume after terminal no-trade gap",
++        calendar=load_market_calendar(),
++        confirm_paper_test=True,
++        confirm_no_real_trades=True,
++        confirm_gap_without_backfill=True,
++        account_root=fixture["account_root"],
++        account_mode_resolver=lambda _account_id: mode,
++        operator="terminal-test",
++    )
++
++
++def _authorize(fixture: dict[str, object]) -> dict[str, object]:
++    preview = _preview(fixture)
++    assert preview["runner_result"] == "PASS", preview
++    evidence = preview["evidence"]
++    result = write_generic_authorization(
++        fixture["workspace"],
++        evidence=evidence,
++        expected_preview_sha256=str(preview["preview_sha256"]),
++        calendar=load_market_calendar(),
++        account_root=fixture["account_root"],
++        account_mode_resolver=lambda _account_id: "PAPER",
++    )
++    assert result["runner_result"] == "PASS", result
++    return evidence
++
++
++def _append_domain_row(path: Path, values: dict[str, str]) -> None:
++    with path.open("r", encoding="utf-8-sig", newline="") as handle:
++        fieldnames = list(csv.DictReader(handle).fieldnames or [])
++    with path.open("a", encoding="utf-8-sig", newline="") as handle:
++        writer = csv.DictWriter(handle, fieldnames=fieldnames)
++        writer.writerow({name: values.get(name, "") for name in fieldnames})
++
++
++def test_terminal_policy_accepts_only_valid_bound_closed_source(tmp_path: Path) -> None:
++    fixture = _fixture(tmp_path)
++    preview = _preview(fixture)
++
++    assert preview["runner_result"] == "PASS"
++    evidence = preview["evidence"]
++    assert evidence["source_policy"] == {
++        "type": "TERMINAL_PROVEN_NO_TRADE",
++        "version": 1,
++    }
++    policy = TerminalProvenNoTradePolicy(
++        Path(fixture["workspace"]),
++        load_market_calendar(),
++        account_mode_resolver=lambda _account_id: "PAPER",
++    )
++    assert policy.assess_eligibility(evidence["source"]).eligible is True
++
++    wrong_lifecycle = dict(evidence["source"], lifecycle="COMPLETED")
++    wrong = policy.assess_eligibility(wrong_lifecycle)
++    assert wrong.eligible is False
++    assert "source_lifecycle_not_accepted" in wrong.blockers
++
++    mismatch = dict(evidence["source"], identity="wrong-source")
++    mismatched = policy.assess_eligibility(mismatch)
++    assert mismatched.eligible is False
++    assert "source_identity_mismatch" in mismatched.blockers
++
++    unsupported = _preview(fixture, mode="LIVE")
++    assert unsupported["runner_result"] == "BLOCKED"
++    assert "paper_or_test_account_required" in unsupported["blockers"]
++
++
++@pytest.mark.parametrize("problem", ["missing", "tampered"])
++def test_terminal_policy_rejects_missing_or_invalid_closure(
++    tmp_path: Path, problem: str
++) -> None:
++    fixture = _fixture(tmp_path)
++    closure_path = (
++        Path(fixture["workspace"])
++        / "failed_no_trade_closures"
++        / f"{fixture['runbook_day_id']}.json"
++    )
++    if problem == "missing":
++        closure_path.unlink()
++    else:
++        payload = json.loads(closure_path.read_text(encoding="utf-8"))
++        payload["reason"] = "tampered"
++        closure_path.write_text(json.dumps(payload), encoding="utf-8")
++
++    result = _preview(fixture)
++    assert result["runner_result"] == "BLOCKED"
++    assert any("closure" in item for item in result["blockers"])
++
++
++def test_terminal_gap_excludes_source_day_and_derives_canonical_resume(tmp_path: Path) -> None:
++    fixture = _fixture(tmp_path)
++    preview = _preview(fixture)
++    assert preview["runner_result"] == "PASS"
++    evidence = preview["evidence"]
++
++    assert SOURCE_TRADE_DATE not in evidence["gap"]["trading_dates"]
++    assert evidence["gap"] == {
++        "start_date": "2026-09-11",
++        "end_date": "2026-09-11",
++        "trading_dates": ["2026-09-11"],
++    }
++    assert evidence["resume"] == {
++        "data_date": RESUME_DATA_DATE,
++        "trade_date": RESUME_TRADE_DATE,
++        "runbook_day_id": runbook_state.get_runbook_day_id(
++            ACCOUNT_ID, RESUME_DATA_DATE, RESUME_TRADE_DATE
++        ),
++    }
++
++
++def test_terminal_gap_start_skips_weekend_and_market_holiday(tmp_path: Path) -> None:
++    fixture = _fixture(
++        tmp_path,
++        account_id="paper_terminal_holiday",
++        data_date="2026-09-03",
++        trade_date="2026-09-04",
++    )
++    preview = _preview(fixture, resume_data_date="2026-09-08")
++    assert preview["runner_result"] == "PASS", preview
++    evidence = preview["evidence"]
++    assert evidence["gap"]["start_date"] == "2026-09-08"
++    assert evidence["gap"]["trading_dates"] == ["2026-09-08"]
++    assert evidence["resume"]["trade_date"] == "2026-09-09"
++
++
++def test_terminal_authorization_uses_generic_resolver_and_lifecycle(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    fixture = _fixture(tmp_path)
++    evidence = _authorize(fixture)
++    calendar = load_market_calendar()
++    workspace = Path(fixture["workspace"])
++    paths = build_paper_account_paths(
++        ACCOUNT_ID, account_root=Path(fixture["account_root"]), create=False
++    )
++    monkeypatch.setattr(
++        operational_gap_recovery,
++        "build_paper_account_paths",
++        lambda _account_id, create=False: paths,
++    )
++    monkeypatch.setattr(
++        runbook_day_rollover,
++        "build_paper_account_paths",
++        lambda _account_id, create=False: paths,
++    )
++    monkeypatch.setattr(
++        operational_no_trade_gap,
++        "resolve_paper_account_profile",
++        lambda _account_id: SimpleNamespace(account_type="PAPER"),
++    )
++
++    unconsumed = resolve_operational_gap_authorizations(
++        workspace,
++        account_id=ACCOUNT_ID,
++        calendar=calendar,
++        account_root=fixture["account_root"],
++        account_mode_resolver=lambda _account_id: "PAPER",
++    )
++    assert unconsumed["state"] == "UNCONSUMED"
++    rollover = runbook_day_rollover.preview_rollover(
++        workspace, ACCOUNT_ID, calendar, confirm_paper_test=True
++    )
++    assert rollover["runner_result"] == "PASS", rollover
++    assert {
++        "data_date": rollover["next_data_date"],
++        "trade_date": rollover["next_trade_date"],
++        "runbook_day_id": rollover["next_runbook_day_id"],
++    } == evidence["resume"]
++
++    uninitialized_eod = operational_gap_recovery.guard_operational_gap_boundary(
++        workspace,
++        account_id=ACCOUNT_ID,
++        data_date=RESUME_DATA_DATE,
++        trade_date=RESUME_TRADE_DATE,
++        calendar=calendar,
++        account_root=fixture["account_root"],
++        account_mode_resolver=lambda _account_id: "PAPER",
++        boundary="EOD_SNAPSHOT_WRITE",
++    )
++    assert uninitialized_eod["decision"] == operational_gap_recovery.GUARD_BLOCKED
++    assert uninitialized_eod["reason"] == "operational_gap_target_not_initialized"
++
++    assert runbook_state.init_state_file_for_context(
++        workspace,
++        ACCOUNT_ID,
++        RESUME_DATA_DATE,
++        RESUME_TRADE_DATE,
++    )[0] == "CREATED"
++    consumed = resolve_operational_gap_authorizations(
++        workspace,
++        account_id=ACCOUNT_ID,
++        calendar=calendar,
++        account_root=fixture["account_root"],
++        account_mode_resolver=lambda _account_id: "PAPER",
++    )
++    assert consumed["state"] == "CONSUMED"
++    for boundary in ("LIFECYCLE_ENTRY", "EXECUTION_COMMIT", "EOD_SNAPSHOT_WRITE"):
++        guard = operational_gap_recovery.guard_operational_gap_boundary(
++            workspace,
++            account_id=ACCOUNT_ID,
++            data_date=RESUME_DATA_DATE,
++            trade_date=RESUME_TRADE_DATE,
++            calendar=calendar,
++            account_root=fixture["account_root"],
++            account_mode_resolver=lambda _account_id: "PAPER",
++            boundary=boundary,
++        )
++        assert guard["decision"] == operational_gap_recovery.GUARD_ALLOW
++
++
++@pytest.mark.parametrize(
++    "contradiction",
++    ["execution", "account", "position", "current_state", "closure", "source_state"],
++)
++def test_terminal_late_contradiction_blocks_common_boundary(
++    tmp_path: Path, contradiction: str
++) -> None:
++    fixture = _fixture(tmp_path)
++    evidence = _authorize(fixture)
++    gap_date = str(evidence["gap"]["trading_dates"][0])
++    if contradiction == "execution":
++        _append_domain_row(
++            Path(fixture["execution_path"]),
++            {"date": gap_date, "trade_id": "late-gap-trade"},
++        )
++    elif contradiction == "account":
++        _append_domain_row(Path(fixture["account_path"]), {"snapshot_date": gap_date})
++    elif contradiction == "position":
++        _append_domain_row(Path(fixture["position_path"]), {"snapshot_date": gap_date})
++    elif contradiction == "current_state":
++        Path(fixture["account_root"], "paper_current_state_20260911.json").write_text(
++            "{}", encoding="utf-8"
++        )
++    elif contradiction == "closure":
++        path = Path(fixture["workspace"], evidence["source"]["closure_ref"])
++        payload = json.loads(path.read_text(encoding="utf-8"))
++        payload["reason"] = "late tamper"
++        path.write_text(json.dumps(payload), encoding="utf-8")
++    else:
++        path = Path(fixture["state_path"])
++        payload = json.loads(path.read_text(encoding="utf-8"))
++        payload["updated_at"] = "2099-01-01T00:00:00+00:00"
++        path.write_text(json.dumps(payload), encoding="utf-8")
++
++    guard = operational_gap_recovery.guard_operational_gap_boundary(
++        fixture["workspace"],
++        account_id=ACCOUNT_ID,
++        data_date=RESUME_DATA_DATE,
++        trade_date=RESUME_TRADE_DATE,
++        calendar=load_market_calendar(),
++        account_root=fixture["account_root"],
++        account_mode_resolver=lambda _account_id: "PAPER",
++        boundary="EOD_SNAPSHOT_WRITE",
++    )
++    assert guard["decision"] == operational_gap_recovery.GUARD_BLOCKED
++
++
++def test_terminal_production_activation_remains_disabled(tmp_path: Path) -> None:
++    fixture = _fixture(tmp_path)
++    result = operational_gap_recovery.authorize_terminal_proven_no_trade_recovery(
++        fixture["workspace"],
++        account_id=ACCOUNT_ID,
++        source_runbook_day_id=str(fixture["runbook_day_id"]),
++        resume_data_date=RESUME_DATA_DATE,
++        reason="production must stay disabled",
++        calendar=load_market_calendar(),
++        confirm_paper_test=True,
++        confirm_no_real_trades=True,
++        confirm_gap_without_backfill=True,
++        account_root=fixture["account_root"],
++        account_mode_resolver=lambda _account_id: "PAPER",
++        operator="terminal-test",
++    )
++    assert result["runner_result"] == "BLOCKED"
++    assert result["reason"] == "ntg_production_activation_disabled"

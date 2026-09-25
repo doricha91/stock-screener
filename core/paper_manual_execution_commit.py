@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core import operational_gap_recovery
 from core.notion_manual_execution_importer import (
     FAIL,
     PASS,
@@ -52,6 +53,7 @@ from core.paper_position_snapshot import (
 )
 from core.paper_trade_preview import PaperTradePreview
 from core.paths import market_db_path
+from core.runbook_calendar import load_market_calendar
 
 
 MANUAL_EXECUTION_REGIME = "MANUAL"
@@ -89,6 +91,7 @@ def commit_manual_execution_preview(
     data_date: str | None = None,
     reconciliation_preview_json_path: Path | None = None,
     reconciliation_preview_sha256: str | None = None,
+    workspace: str | Path | None = None,
 ) -> ManualExecutionCommitResult:
     preview_payload = _load_preview_payload(preview_json_path)
     resolved_account_id = _resolve_preview_account_id(
@@ -103,6 +106,25 @@ def commit_manual_execution_preview(
         )
     except ValueError as exc:
         raise ManualExecutionCommitError(str(exc)) from exc
+    if workspace is not None:
+        if data_date is None:
+            raise ManualExecutionCommitError(
+                "Operational-gap commit guard requires data_date when workspace is provided."
+            )
+        ntg_guard = operational_gap_recovery.guard_operational_gap_boundary(
+            workspace,
+            account_id=resolved_account_id,
+            data_date=data_date,
+            trade_date=execution_date,
+            calendar=load_market_calendar(),
+            account_root=account_paths.root,
+            boundary="EXECUTION_COMMIT",
+        )
+        if ntg_guard["decision"] == operational_gap_recovery.GUARD_BLOCKED:
+            raise ManualExecutionCommitError(
+                "Execution commit blocked by operational-gap guard before any write: "
+                + ",".join(str(item) for item in ntg_guard["blockers"])
+            )
     v2_evidence: dict[str, Any] | None = None
     if eligible_candidate_keys is not None:
         v2_evidence = _validate_v2_reconciliation_evidence(

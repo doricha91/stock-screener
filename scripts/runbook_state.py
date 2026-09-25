@@ -1160,6 +1160,30 @@ def get_state_path_for_context(
     )
 
 
+def _assert_operational_gap_lifecycle_allowed(
+    workspace: Path,
+    state: RunbookState,
+) -> None:
+    from core import operational_gap_recovery, runbook_recovery
+    from core.runbook_calendar import load_market_calendar
+
+    guard = operational_gap_recovery.guard_operational_gap_boundary(
+        workspace,
+        account_id=state.frozen_context.account_id,
+        data_date=state.frozen_context.data_date,
+        trade_date=state.frozen_context.trade_date,
+        runbook_day_id=state.runbook_day_id,
+        calendar=load_market_calendar(),
+        account_mode_resolver=runbook_recovery.resolve_authoritative_account_mode,
+        boundary="LIFECYCLE_ENTRY",
+    )
+    if guard["decision"] == operational_gap_recovery.GUARD_BLOCKED:
+        raise ValueError(
+            "operational_gap_lifecycle_blocked:"
+            + ",".join(str(item) for item in guard["blockers"])
+        )
+
+
 def init_state_file(
     workspace: Path,
     account_id: str,
@@ -1200,10 +1224,12 @@ def init_state_file_for_context(
             load_market_calendar(),
         )
         save_state(requested_state, path)
+        _assert_operational_gap_lifecycle_allowed(workspace, requested_state)
         return "CREATED", path, requested_state
 
     existing_state = load_state(path)
     if context_matches_state(existing_state, account_id, data_date, trade_date):
+        _assert_operational_gap_lifecycle_allowed(workspace, existing_state)
         return "EXISTING", path, existing_state
     raise ValueError("context_mismatch_existing_runbook_state")
 

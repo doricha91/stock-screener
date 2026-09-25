@@ -775,6 +775,10 @@ def handle_eod(args: argparse.Namespace) -> int:
         "commit": commit,
         "plan_path": None,
     }
+    if "data_date" in inspect.signature(run_paper_eod_dry_run).parameters:
+        eod_kwargs["data_date"] = getattr(args, "data_date", None)
+    if "workspace" in inspect.signature(run_paper_eod_dry_run).parameters:
+        eod_kwargs["workspace"] = getattr(args, "runbook_workspace", None)
     if "json_output" in inspect.signature(run_paper_eod_dry_run).parameters:
         eod_kwargs["json_output"] = bool(getattr(args, "json", False))
     return _call_with_optional_account_paths(
@@ -1094,6 +1098,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eod_parser.add_argument("--date", required=True, help="Target date (YYYYMMDD or YYYY-MM-DD)")
     eod_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
+    eod_parser.add_argument("--data-date", help="Canonical market data date required for commit mode")
+    eod_parser.add_argument("--runbook-workspace", help="Canonical runbook workspace required for commit mode")
     eod_mode_group = eod_parser.add_mutually_exclusive_group(required=True)
     eod_mode_group.add_argument("--dry-run", action="store_true", help="Run read-only EOD preview wrapper")
     eod_mode_group.add_argument(

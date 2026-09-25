@@ -351,9 +351,20 @@ def test_eod_commit_path_builds_account_paths_before_preflight_without_creation(
         captured["preflight_account_id"] = account_paths.account_id
         return {"result": "PASS"}
 
-    def fake_run_paper_eod_dry_run(date_str, *, allow_empty_journal, commit, plan_path, account_paths):
+    def fake_run_paper_eod_dry_run(
+        date_str,
+        *,
+        allow_empty_journal,
+        commit,
+        plan_path,
+        account_paths,
+        data_date,
+        workspace,
+    ):
         captured["eod_commit"] = commit
         captured["eod_account_id"] = account_paths.account_id
+        captured["eod_data_date"] = data_date
+        captured["eod_workspace"] = workspace
         return 0
 
     monkeypatch.setattr(paper, "build_paper_account_paths", fake_build_paper_account_paths)
@@ -368,6 +379,8 @@ def test_eod_commit_path_builds_account_paths_before_preflight_without_creation(
             commit=True,
             account_id="paper_growth",
             guard_checked=True,
+            data_date="2026-06-07",
+            runbook_workspace="runbook-workspace",
         )
     )
 
@@ -378,6 +391,8 @@ def test_eod_commit_path_builds_account_paths_before_preflight_without_creation(
         "preflight_account_id": "paper_growth",
         "eod_commit": True,
         "eod_account_id": "paper_growth",
+        "eod_data_date": "2026-06-07",
+        "eod_workspace": "runbook-workspace",
     }
 
 
@@ -418,6 +433,8 @@ def test_no_action_eod_commit_fixture_rolls_forward_snapshots_without_execution_
         allow_empty_journal=True,
         commit=True,
         account_paths=paths,
+        data_date="2026-06-08",
+        workspace=tmp_path / "runbook_workspace",
     )
 
     after_log_rows = list(csv.DictReader(paths.execution_log_path.open("r", encoding="utf-8-sig", newline="")))
@@ -465,6 +482,8 @@ def test_no_action_roll_forward_allows_status_review_done_without_commit_recomme
         allow_empty_journal=True,
         commit=True,
         account_paths=paths,
+        data_date="2026-06-08",
+        workspace=tmp_path / "runbook_workspace",
     ) == 0
 
     status = run_paper_status("2026-06-09", account_paths=paths)

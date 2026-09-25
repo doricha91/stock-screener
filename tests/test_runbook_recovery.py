@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from core import runbook_day_rollover, runbook_recovery
+from core import operational_gap_recovery, runbook_day_rollover, runbook_recovery
 from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
 from core.runbook_calendar import load_market_calendar
 from core.runbook_day_prep import prepare_runbook_day_local, read_runbook_day_local
@@ -62,6 +62,14 @@ def _patch_account_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(runbook_day_rollover, "build_paper_account_paths", fake_paths)
     monkeypatch.setattr(runbook_recovery, "build_paper_account_paths", fake_paths)
+    monkeypatch.setattr(
+        operational_gap_recovery, "build_paper_account_paths", fake_paths
+    )
+    monkeypatch.setattr(
+        runbook_recovery,
+        "resolve_authoritative_account_mode",
+        lambda _account_id: "PAPER",
+    )
 
 
 def _seed_incident(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -1171,4 +1179,8 @@ def test_cli_preview_and_status_are_readable(tmp_path: Path, capsys: pytest.Capt
         "--confirm-no-real-trades", "--confirm-gap-without-backfill",
     ])
     authorized = json.loads(capsys.readouterr().out)
-    assert authorize_code == 0 and authorized["authorized"] is True
+    assert authorize_code == 2
+    assert authorized["runner_result"] == "BLOCKED"
+    assert authorized["reason"] == "ntg_production_activation_disabled"
+    assert authorized["authorized"] is False
+    assert not operational_gap_recovery.generic_evidence_dir(workspace).exists()
