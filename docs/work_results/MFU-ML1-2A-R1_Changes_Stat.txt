@@ -1,0 +1,22 @@
+MFU-ML1-2A-R1 source/test/TRD patch
+Base: 808d14cb889a90ebbbe90b307acb640b4dc8198c
+
+ core/paper_account_profile.py               |   37 ++
+ core/paths.py                               |    4
+ scripts/runbook_state.py                    |   86 ++++
+ tests/test_runbook_state.py                 |    2
+ core/paper_account_binding.py               |  326 +++++++++++++++++
+ core/paper_account_fresh.py                 |  240 ++++++++++++
+ tests/test_ml1_2a_binding_fresh.py          |  525 +++++++++++++++++++++++++++
+ docs/TRD/mfu_ml1_2a_binding_frozen_fresh.md |  124 ++++++
+ 8 files changed, 1332 insertions(+), 12 deletions(-)
+
+R1-specific revisions are concentrated in:
+- core/paper_account_binding.py
+- core/paper_account_profile.py
+- core/paper_account_fresh.py
+- tests/test_ml1_2a_binding_fresh.py
+- docs/TRD/mfu_ml1_2a_binding_frozen_fresh.md
+
+The patch is the complete BASE + ML1-2A + R1 source/test/TRD diff.
+Review evidence and synthetic output files are excluded.

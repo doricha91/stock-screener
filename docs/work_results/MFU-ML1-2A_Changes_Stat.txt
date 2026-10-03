@@ -1,0 +1,9 @@
+ core/paper_account_profile.py               |   27 ++
+ core/paths.py                               |    4 
+ scripts/runbook_state.py                    |   86 +++++-
+ tests/test_runbook_state.py                 |    2 
+ core/paper_account_binding.py               |  184 +++++++++++++
+ core/paper_account_fresh.py                 |  216 +++++++++++++++
+ tests/test_ml1_2a_binding_fresh.py          |  396 +++++++++++++++++++++++++++
+ docs/TRD/mfu_ml1_2a_binding_frozen_fresh.md |  108 +++++++
+ 8 files changed, 1011 insertions(+), 12 deletions(-)

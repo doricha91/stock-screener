@@ -1,0 +1,50 @@
+diff --git a/core/paper_account_fresh.py b/core/paper_account_fresh.py
+index 3d72536..141a194 100644
+--- a/core/paper_account_fresh.py
++++ b/core/paper_account_fresh.py
+@@ -59,9 +59,12 @@ def _history_blockers(workspace: Path, account_id: str) -> list[str]:
+     }
+     for dirname in sorted(directories):
+         root = workspace / dirname
++        if root.is_symlink():
++            blockers.append(f"unreadable_history:{dirname}")
++            continue
+         if not root.exists():
+             continue
+-        if not root.is_dir() or root.is_symlink():
++        if not root.is_dir():
+             blockers.append(f"unreadable_history:{dirname}")
+             continue
+         for path in root.rglob("*"):
+diff --git a/tests/test_ml1_2a_binding_fresh.py b/tests/test_ml1_2a_binding_fresh.py
+index 28f4616..e733986 100644
+--- a/tests/test_ml1_2a_binding_fresh.py
++++ b/tests/test_ml1_2a_binding_fresh.py
+@@ -443,6 +443,27 @@ def test_fresh_other_account_history_nonimpact(fresh):
+     assert validate_prepare_first_request(**fresh)["eligible"]
+ 
+ 
++@pytest.mark.parametrize("target_exists", [False, True], ids=["dangling", "live"])
++def test_lifecycle_root_symlink_fails_closed(fresh, monkeypatch, target_exists):
++    target = fresh["workspace"] / "operational_no_trade_gaps"
++    original_exists = Path.exists
++    original_is_symlink = Path.is_symlink
++
++    def modeled_exists(path):
++        return target_exists if path == target else original_exists(path)
++
++    def modeled_is_symlink(path):
++        return True if path == target else original_is_symlink(path)
++
++    monkeypatch.setattr(Path, "exists", modeled_exists)
++    monkeypatch.setattr(Path, "is_symlink", modeled_is_symlink)
++    assert target.exists() is target_exists
++
++    result = validate_prepare_first_request(**fresh)
++    assert not result["eligible"]
++    assert "unreadable_history:operational_no_trade_gaps" in result["blockers"]
++
++
+ @pytest.mark.parametrize("name,content", [
+     ("orphan.txt", "unknown"),
+     ("hash.json.tmp", '{"account_id":"synthetic_a"}'),

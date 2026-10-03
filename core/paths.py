@@ -141,3 +141,7 @@ def paper_replay_diff_config_snapshot_archive_dir() -> Path:
     path = paper_replay_diff_dir() / "archive" / "config_snapshots"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def paper_binding_registry_path() -> Path:
+    return ROOT / "config" / "paper_binding_profiles.json"

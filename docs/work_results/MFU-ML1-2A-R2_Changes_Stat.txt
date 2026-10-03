@@ -1,0 +1,38 @@
+MFU-ML1-2A-R2 patch inventory
+Base: 808d14cb889a90ebbbe90b307acb640b4dc8198c
+
+MFU-ML1-2A-R2_Changes.patch
+- Scope: complete BASE + ML1-2A + R1 + R2 source/test/TRD diff
+- 8 files changed, 1356 insertions(+), 12 deletions(-)
+
+  core/paper_account_binding.py                +326  -0
+  core/paper_account_fresh.py                  +243  -0
+  core/paper_account_profile.py                +37   -0
+  core/paths.py                                +4    -0
+  docs/TRD/mfu_ml1_2a_binding_frozen_fresh.md  +124  -0
+  scripts/runbook_state.py                     +75   -11
+  tests/test_ml1_2a_binding_fresh.py            +546  -0
+  tests/test_runbook_state.py                  +1    -1
+
+MFU-ML1-2A-R2_Delta.patch
+- Scope: R1-to-R2 delta only
+- 2 files changed, 25 insertions(+), 1 deletion(-)
+
+  core/paper_account_fresh.py                  +4    -1
+  tests/test_ml1_2a_binding_fresh.py            +21   -0
+
+R2 source change:
+- core/paper_account_fresh.py
+
+R2 test change:
+- tests/test_ml1_2a_binding_fresh.py
+
+Inherited ML1-2A/R1 files unchanged by R2:
+- core/paper_account_binding.py
+- core/paper_account_profile.py
+- core/paths.py
+- docs/TRD/mfu_ml1_2a_binding_frozen_fresh.md
+- scripts/runbook_state.py
+- tests/test_runbook_state.py
+
+Review evidence files are excluded from both source/test patches.

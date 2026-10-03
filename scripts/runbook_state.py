@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -9,6 +10,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 DEFAULT_WORKSPACE = Path(r"D:\n8n\workspace\stock_screener_ops")
@@ -19,6 +23,7 @@ STATE_DIRNAME = "runbook_states"
 # It does not replace the existing n8n runner context.json contract.
 # It shares account_id/data_date/trade_date concepts but owns controller state.
 SCHEMA_VERSION = "runbook_state.v1"
+BINDING_STATE_SCHEMA_VERSION = "runbook_state.v2"
 EXECUTION_CONTRACT_V1 = "execution_reconciliation_preview.v1"
 EXECUTION_CONTRACT_V2 = "execution_reconciliation_preview.v2"
 EXECUTION_CONTRACT_V3 = "execution_reconciliation_preview.v3"
@@ -43,6 +48,11 @@ class FrozenRunbookContext:
     account_id: str
     data_date: str
     trade_date: str
+
+
+@dataclass(frozen=True)
+class BindingFrozenRunbookContext(FrozenRunbookContext):
+    binding: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -117,14 +127,22 @@ def create_initial_state(
         raise ValueError("account_id is required")
     data_date_norm = _normalize_date(data_date, "data_date")
     trade_date_norm = _normalize_date(trade_date, "trade_date")
+    from core.paper_account_profile import load_paper_account_profiles, VERSIONED_ACCOUNT_PROFILE_SCHEMA
+    from core.paper_account_binding import resolve_account_binding
+
+    profiles = load_paper_account_profiles(allow_missing=True)
+    binding = (
+        resolve_account_binding(account_id, profiles=profiles)
+        if profiles.schema_version == VERSIONED_ACCOUNT_PROFILE_SCHEMA else None
+    )
     timestamp = _now_iso(timezone)
-    context = FrozenRunbookContext(
-        account_id=account_id,
-        data_date=data_date_norm,
-        trade_date=trade_date_norm,
+    context_values = dict(account_id=account_id, data_date=data_date_norm, trade_date=trade_date_norm)
+    context = (
+        BindingFrozenRunbookContext(**context_values, binding=copy.deepcopy(binding))
+        if binding is not None else FrozenRunbookContext(**context_values)
     )
     return RunbookState(
-        schema_version=SCHEMA_VERSION,
+        schema_version=BINDING_STATE_SCHEMA_VERSION if binding is not None else SCHEMA_VERSION,
         runbook_day_id=get_runbook_day_id(account_id, data_date_norm, trade_date_norm),
         created_at=timestamp,
         updated_at=timestamp,
@@ -152,6 +170,12 @@ def _state_from_dict(data: dict[str, Any]) -> RunbookState:
     frozen_context_data = data.get("frozen_context")
     if not isinstance(frozen_context_data, dict):
         frozen_context_data = {}
+    from core.paper_account_binding import validate_binding, BindingError
+    schema = data.get("schema_version")
+    if schema == BINDING_STATE_SCHEMA_VERSION:
+        validate_binding(frozen_context_data.get("binding"))
+    elif "binding" in frozen_context_data:
+        raise BindingError("binding requires runbook_state.v2")
     stage_status = dict(data.get("stage_status", {})) if isinstance(data.get("stage_status"), dict) else {}
     stage_status.setdefault("F", "PENDING")
     return RunbookState(
@@ -160,11 +184,16 @@ def _state_from_dict(data: dict[str, Any]) -> RunbookState:
         created_at=str(data.get("created_at", "")),
         updated_at=str(data.get("updated_at", "")),
         timezone=str(data.get("timezone", "")),
-        frozen_context=FrozenRunbookContext(
+        frozen_context=(BindingFrozenRunbookContext(
             account_id=str(frozen_context_data.get("account_id", "")),
             data_date=str(frozen_context_data.get("data_date", "")),
             trade_date=str(frozen_context_data.get("trade_date", "")),
-        ),
+            binding=copy.deepcopy(frozen_context_data["binding"]),
+        ) if schema == BINDING_STATE_SCHEMA_VERSION else FrozenRunbookContext(
+            account_id=str(frozen_context_data.get("account_id", "")),
+            data_date=str(frozen_context_data.get("data_date", "")),
+            trade_date=str(frozen_context_data.get("trade_date", "")),
+        )),
         current_stage=str(data.get("current_stage", "")),
         current_status=str(data.get("current_status", "")),
         last_completed_step=data.get("last_completed_step"),
@@ -199,6 +228,13 @@ def load_state(path: Path) -> RunbookState:
 
 
 def save_state(state: RunbookState, path: Path) -> None:
+    assert_current_binding(state)
+    if path.is_file():
+        previous = load_state(path)
+        if BINDING_STATE_SCHEMA_VERSION in {previous.schema_version, state.schema_version}:
+            if (previous.schema_version != state.schema_version
+                    or previous.to_dict()["frozen_context"] != state.to_dict()["frozen_context"]):
+                raise ValueError("existing_frozen_binding_rewrite_forbidden")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(
@@ -224,6 +260,27 @@ def context_matches_state(
         and state.frozen_context.data_date == data_date_norm
         and state.frozen_context.trade_date == trade_date_norm
     )
+
+
+def _validate_frozen_binding(state: RunbookState) -> None:
+    from core.paper_account_binding import validate_binding, BindingError
+
+    if state.schema_version == BINDING_STATE_SCHEMA_VERSION:
+        validate_binding(getattr(state.frozen_context, "binding", None))
+    elif hasattr(state.frozen_context, "binding"):
+        raise BindingError("binding requires runbook_state.v2")
+
+
+def assert_current_binding(state: RunbookState) -> None:
+    """Validate new state integrity and drift before writes; never migrate legacy."""
+    from core.paper_account_binding import assert_binding_matches, resolve_account_binding
+
+    _validate_frozen_binding(state)
+    if state.schema_version == BINDING_STATE_SCHEMA_VERSION:
+        assert_binding_matches(
+            state.frozen_context.binding,
+            resolve_account_binding(state.frozen_context.account_id),
+        )
 
 
 def get_execution_contract(state: RunbookState) -> dict[str, Any]:
@@ -329,8 +386,12 @@ def finalize_execution_input(state: RunbookState) -> RunbookState:
 
 def validate_state(state: RunbookState) -> list[str]:
     errors: list[str] = []
-    if state.schema_version != SCHEMA_VERSION:
-        errors.append(f"schema_version must be {SCHEMA_VERSION}")
+    if state.schema_version not in {SCHEMA_VERSION, BINDING_STATE_SCHEMA_VERSION}:
+        errors.append(f"schema_version must be {SCHEMA_VERSION} or {BINDING_STATE_SCHEMA_VERSION}")
+    try:
+        _validate_frozen_binding(state)
+    except ValueError as exc:
+        errors.append(str(exc))
     if not state.frozen_context.account_id:
         errors.append("frozen_context.account_id is required")
     if not state.frozen_context.data_date:
@@ -936,6 +997,7 @@ def _ensure_step_id(step_id: int) -> None:
 
 
 def start_stage(state: RunbookState, stage_id: str) -> RunbookState:
+    assert_current_binding(state)
     _ensure_stage_id(stage_id)
     timestamp = _next_updated_at(state)
     stage_status = dict(state.stage_status)
@@ -1167,6 +1229,7 @@ def _assert_operational_gap_lifecycle_allowed(
     from core import operational_gap_recovery, runbook_recovery
     from core.runbook_calendar import load_market_calendar
 
+    assert_current_binding(state)
     guard = operational_gap_recovery.guard_operational_gap_boundary(
         workspace,
         account_id=state.frozen_context.account_id,
@@ -1192,13 +1255,14 @@ def init_state_file(
     timezone: str = "Asia/Seoul",
 ) -> tuple[str, RunbookState]:
     path = get_state_path(workspace)
-    requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
     if not path.exists():
+        requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
         save_state(requested_state, path)
         return "CREATED", requested_state
 
     existing_state = load_state(path)
     if context_matches_state(existing_state, account_id, data_date, trade_date):
+        assert_current_binding(existing_state)
         return "EXISTING", existing_state
     raise ValueError("context_mismatch_existing_runbook_state")
 
@@ -1211,8 +1275,8 @@ def init_state_file_for_context(
     timezone: str = "Asia/Seoul",
 ) -> tuple[str, Path, RunbookState]:
     path = get_state_path_for_context(workspace, account_id, data_date, trade_date)
-    requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
     if not path.exists():
+        requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
         from core.runbook_calendar import load_market_calendar
         from core.runbook_recovery import assert_initialization_allowed
 

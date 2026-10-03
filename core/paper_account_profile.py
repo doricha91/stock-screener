@@ -18,6 +18,12 @@ RESERVED_ACCOUNT_IDS = {
     "outputs",
 }
 ACCOUNT_PROFILE_SCHEMA_VERSION = "paper_account_profiles.v1"
+VERSIONED_ACCOUNT_PROFILE_SCHEMA = "paper_account_profiles.v2"
+VERSIONED_ACCOUNT_FIELDS = frozenset({
+    "account_id", "display_name", "currency", "initial_cash", "account_type",
+    "is_default", "strategy_profile", "strategy_version", "universe_profile",
+    "universe_version", "benchmark_profile", "notion_profile",
+})
 
 
 class PaperAccountProfileError(RuntimeError):
@@ -57,6 +63,8 @@ class PaperAccountProfile:
     universe_profile: str | None = None
     benchmark_profile: str | None = None
     notion_profile: str | None = None
+    strategy_version: str | None = None
+    universe_version: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "account_id", validate_account_id(self.account_id))
@@ -89,6 +97,10 @@ class PaperAccountProfile:
         object.__setattr__(self, "universe_profile", _normalize_optional(self.universe_profile))
         object.__setattr__(self, "benchmark_profile", _normalize_optional(self.benchmark_profile))
         object.__setattr__(self, "notion_profile", _normalize_optional(self.notion_profile))
+        for name in ("strategy_version", "universe_version"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise PaperAccountProfileError(f"{name} must be an explicit nonempty string")
 
 
 @dataclass(frozen=True)
@@ -101,6 +113,8 @@ class PaperAccountProfileConfig:
     def __post_init__(self) -> None:
         schema_version = str(self.schema_version or "").strip() or ACCOUNT_PROFILE_SCHEMA_VERSION
         object.__setattr__(self, "schema_version", schema_version)
+        if schema_version not in {ACCOUNT_PROFILE_SCHEMA_VERSION, VERSIONED_ACCOUNT_PROFILE_SCHEMA}:
+            raise PaperAccountProfileError("unsupported account profile schema")
 
         default_account_id = validate_account_id(self.default_account_id)
         object.__setattr__(self, "default_account_id", default_account_id)
@@ -109,6 +123,14 @@ class PaperAccountProfileConfig:
         if not accounts:
             raise PaperAccountProfileError("accounts must contain at least one profile.")
         object.__setattr__(self, "accounts", accounts)
+        if schema_version == VERSIONED_ACCOUNT_PROFILE_SCHEMA:
+            for profile in accounts:
+                for name in ("strategy_profile", "strategy_version", "universe_profile", "universe_version"):
+                    value = getattr(profile, name)
+                    if not isinstance(value, str) or not value.strip():
+                        raise PaperAccountProfileError(f"{profile.account_id}: {name} required for v2")
+        elif any(p.strategy_version is not None or p.universe_version is not None for p in accounts):
+            raise PaperAccountProfileError("versioned references require paper_account_profiles.v2")
 
         account_ids = [profile.account_id for profile in accounts]
         duplicate_ids = sorted({account_id for account_id in account_ids if account_ids.count(account_id) > 1})
@@ -201,6 +223,19 @@ def load_paper_account_profiles(
     if not default_account_id:
         raise PaperAccountProfileError("default_account_id is required.")
 
+    schema_version = str(payload.get("schema_version") or ACCOUNT_PROFILE_SCHEMA_VERSION).strip()
+    if schema_version == VERSIONED_ACCOUNT_PROFILE_SCHEMA:
+        for item in accounts_payload:
+            if not isinstance(item, dict):
+                raise PaperAccountProfileError("account entry must be an object")
+            unknown = set(item) - VERSIONED_ACCOUNT_FIELDS
+            if unknown:
+                raise PaperAccountProfileError(
+                    f"unknown v2 account fields: {', '.join(sorted(unknown))}"
+                )
+            for name in ("strategy_profile", "strategy_version", "universe_profile", "universe_version"):
+                if not isinstance(item.get(name), str) or not item[name].strip():
+                    raise PaperAccountProfileError(f"malformed binding: {name}")
     profiles = tuple(_build_profile(item) for item in accounts_payload)
     return PaperAccountProfileConfig(
         schema_version=str(payload.get("schema_version") or ACCOUNT_PROFILE_SCHEMA_VERSION).strip(),
@@ -240,4 +275,6 @@ def _build_profile(payload: object) -> PaperAccountProfile:
         universe_profile=payload.get("universe_profile"),
         benchmark_profile=payload.get("benchmark_profile"),
         notion_profile=payload.get("notion_profile"),
+        strategy_version=payload.get("strategy_version"),
+        universe_version=payload.get("universe_version"),
     )

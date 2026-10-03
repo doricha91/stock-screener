@@ -244,7 +244,7 @@ def test_validate_state_reports_schema_errors() -> None:
 
     errors = runbook_state.validate_state(broken)
 
-    assert "schema_version must be runbook_state.v1" in errors
+    assert "schema_version must be runbook_state.v1 or runbook_state.v2" in errors
     assert "current_stage must be one of A/GATE1/B/C/GATE2/D/E/F" in errors
     assert "last_completed_step must be null or 0..21" in errors
 

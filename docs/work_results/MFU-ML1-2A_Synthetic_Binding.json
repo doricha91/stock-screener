@@ -1,0 +1,166 @@
+{
+  "schema_version": "paper_account_binding.v1",
+  "semantics": {
+    "account_type": "paper",
+    "currency": "USD",
+    "shared_policy": {
+      "risk_per_trade": 0.05,
+      "max_positions": 10,
+      "max_long_positions": 10,
+      "entry_period": 12,
+      "exit_period": 20,
+      "score_threshold": 1.5,
+      "turtle_weight": 1,
+      "rs_weight": 3,
+      "rsi_weight": 1,
+      "sma_weight": 1,
+      "bbands_weight": 1,
+      "macd_weight": 1,
+      "bbs_weight": 1,
+      "dema_weight": 1,
+      "obv_weight": 0.5,
+      "mfi_weight": 0.5,
+      "vol_spike_weight": 0.5,
+      "atr_period": 20,
+      "rsi_period": 14,
+      "sma_short_period": 50,
+      "sma_long_period": 200,
+      "bbands_period": 20,
+      "macd_fast_period": 12,
+      "macd_slow_period": 26,
+      "dema_short_period": 20,
+      "mfi_period": 14,
+      "rs_lookback": 30,
+      "trailing_stop_multiplier": 2.5,
+      "SWITCHING_PREMIUM": 1,
+      "ALLOW_PROFIT_SWITCH": false,
+      "SWITCHING_MAX_COUNT": 2,
+      "USE_HEDGE_MODE": true,
+      "HEDGE_TICKERS": [
+        "SH",
+        "SDS",
+        "SPXU",
+        "PSQ",
+        "QID",
+        "SQQQ",
+        "SOXS",
+        "BIL"
+      ],
+      "HEDGE_ASSET": "SQQQ",
+      "HEDGE_RATIO_BEAR": 0.3,
+      "HEDGE_RATIO_PANIC": 1,
+      "HEDGE_LIQUIDATION_PRIORITY": "rs_low",
+      "MIN_MODE_MAINTAIN_DAYS": 5,
+      "USE_CIRCUIT_BREAKER": true,
+      "USE_MA_CROSS": true,
+      "USE_MARKET_BREADTH": true,
+      "USE_DRAWDOWN_TRIGGER": true,
+      "USE_VIX_BREAKOUT": true,
+      "CB_DROP_THRESHOLD": -3,
+      "CB_COOLDOWN_DAYS": 3,
+      "MA_CROSS_FAST": 50,
+      "MA_CROSS_SLOW": 200,
+      "BREADTH_THRESHOLD": 40,
+      "BREADTH_OVERSOLD_THRESHOLD": 15,
+      "DD_LOOKBACK": 252,
+      "DD_THRESHOLD": -15,
+      "VIX_MA_PERIOD": 20,
+      "VIX_MULTIPLIER": 1.5,
+      "MARKET_BENCHMARK_SYMBOL": "SPY",
+      "REGIME_SMA_PERIOD": 200,
+      "REGIME_SMA_SHORT_PERIOD": 50,
+      "REGIME_ADX_PERIOD": 14,
+      "REGIME_ADX_THRESHOLD": 25,
+      "REGIME_RULES": {
+        "BULL": {
+          "target_cash_ratio": 0.05,
+          "SWITCHING_PREMIUM": 1.5,
+          "trailing_stop_multiplier": 3.25,
+          "weights": {
+            "turtle": 1.5,
+            "sma": 1,
+            "rsi": 0.5,
+            "bbands": 1,
+            "dema": 1.2,
+            "obv": 0.5,
+            "mfi": 0.5,
+            "vol_spike": 0.5
+          }
+        },
+        "BEAR": {
+          "target_cash_ratio": 0.7,
+          "SWITCHING_PREMIUM": 2.5,
+          "trailing_stop_multiplier": 1.5,
+          "weights": {
+            "turtle": 0,
+            "sma": 0,
+            "rsi": 0.2,
+            "bbands": 0.2,
+            "dema": 0,
+            "obv": 0.8,
+            "mfi": 0.8,
+            "vol_spike": 1
+          }
+        },
+        "UNSTABLE": {
+          "target_cash_ratio": 0.3,
+          "SWITCHING_PREMIUM": 1.5,
+          "trailing_stop_multiplier": 2.5,
+          "weights": {
+            "turtle": 0,
+            "sma": 0,
+            "rsi": 1.5,
+            "bbands": 1.2,
+            "dema": 0,
+            "obv": 0.8,
+            "mfi": 1,
+            "vol_spike": 0.8
+          }
+        },
+        "PANIC": {
+          "target_cash_ratio": 1,
+          "SWITCHING_PREMIUM": 5,
+          "trailing_stop_multiplier": 0.5,
+          "weights": {
+            "turtle": 0,
+            "sma": 0,
+            "rsi": 0,
+            "bbands": 0,
+            "dema": 0,
+            "obv": 0,
+            "mfi": 0,
+            "vol_spike": 0
+          }
+        }
+      },
+      "REBALANCE_FREQUENCY": "D",
+      "use_market_regime": true
+    },
+    "strategy": {
+      "reference": {
+        "id": "synthetic_strategy",
+        "version": "v1"
+      },
+      "content": {
+        "parameters": {
+          "entry_period": 12,
+          "rsi_weight": 1
+        }
+      }
+    },
+    "universe": {
+      "reference": {
+        "id": "synthetic_universe",
+        "version": "v1"
+      },
+      "content": {
+        "kind": "symbols",
+        "symbols": [
+          "AAA",
+          "BBB"
+        ]
+      }
+    }
+  },
+  "digest": "sha256:d0ae0d53237aeeecd86ff2dbd529b5ae925b327a79f25bd94695dc7ef28206fc"
+}

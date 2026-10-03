@@ -1,0 +1,1232 @@
+diff --git a/core/paper_account_profile.py b/core/paper_account_profile.py
+index 7d03b0d..d6a6177 100644
+--- a/core/paper_account_profile.py
++++ b/core/paper_account_profile.py
+@@ -18,6 +18,7 @@ RESERVED_ACCOUNT_IDS = {
+     "outputs",
+ }
+ ACCOUNT_PROFILE_SCHEMA_VERSION = "paper_account_profiles.v1"
++VERSIONED_ACCOUNT_PROFILE_SCHEMA = "paper_account_profiles.v2"
+ 
+ 
+ class PaperAccountProfileError(RuntimeError):
+@@ -57,6 +58,8 @@ class PaperAccountProfile:
+     universe_profile: str | None = None
+     benchmark_profile: str | None = None
+     notion_profile: str | None = None
++    strategy_version: str | None = None
++    universe_version: str | None = None
+ 
+     def __post_init__(self) -> None:
+         object.__setattr__(self, "account_id", validate_account_id(self.account_id))
+@@ -89,6 +92,10 @@ class PaperAccountProfile:
+         object.__setattr__(self, "universe_profile", _normalize_optional(self.universe_profile))
+         object.__setattr__(self, "benchmark_profile", _normalize_optional(self.benchmark_profile))
+         object.__setattr__(self, "notion_profile", _normalize_optional(self.notion_profile))
++        for name in ("strategy_version", "universe_version"):
++            value = getattr(self, name)
++            if value is not None and (not isinstance(value, str) or not value.strip()):
++                raise PaperAccountProfileError(f"{name} must be an explicit nonempty string")
+ 
+ 
+ @dataclass(frozen=True)
+@@ -101,6 +108,8 @@ class PaperAccountProfileConfig:
+     def __post_init__(self) -> None:
+         schema_version = str(self.schema_version or "").strip() or ACCOUNT_PROFILE_SCHEMA_VERSION
+         object.__setattr__(self, "schema_version", schema_version)
++        if schema_version not in {ACCOUNT_PROFILE_SCHEMA_VERSION, VERSIONED_ACCOUNT_PROFILE_SCHEMA}:
++            raise PaperAccountProfileError("unsupported account profile schema")
+ 
+         default_account_id = validate_account_id(self.default_account_id)
+         object.__setattr__(self, "default_account_id", default_account_id)
+@@ -109,6 +118,14 @@ class PaperAccountProfileConfig:
+         if not accounts:
+             raise PaperAccountProfileError("accounts must contain at least one profile.")
+         object.__setattr__(self, "accounts", accounts)
++        if schema_version == VERSIONED_ACCOUNT_PROFILE_SCHEMA:
++            for profile in accounts:
++                for name in ("strategy_profile", "strategy_version", "universe_profile", "universe_version"):
++                    value = getattr(profile, name)
++                    if not isinstance(value, str) or not value.strip():
++                        raise PaperAccountProfileError(f"{profile.account_id}: {name} required for v2")
++        elif any(p.strategy_version is not None or p.universe_version is not None for p in accounts):
++            raise PaperAccountProfileError("versioned references require paper_account_profiles.v2")
+ 
+         account_ids = [profile.account_id for profile in accounts]
+         duplicate_ids = sorted({account_id for account_id in account_ids if account_ids.count(account_id) > 1})
+@@ -201,6 +218,14 @@ def load_paper_account_profiles(
+     if not default_account_id:
+         raise PaperAccountProfileError("default_account_id is required.")
+ 
++    schema_version = str(payload.get("schema_version") or ACCOUNT_PROFILE_SCHEMA_VERSION).strip()
++    if schema_version == VERSIONED_ACCOUNT_PROFILE_SCHEMA:
++        for item in accounts_payload:
++            if not isinstance(item, dict):
++                raise PaperAccountProfileError("account entry must be an object")
++            for name in ("strategy_profile", "strategy_version", "universe_profile", "universe_version"):
++                if not isinstance(item.get(name), str) or not item[name].strip():
++                    raise PaperAccountProfileError(f"malformed binding: {name}")
+     profiles = tuple(_build_profile(item) for item in accounts_payload)
+     return PaperAccountProfileConfig(
+         schema_version=str(payload.get("schema_version") or ACCOUNT_PROFILE_SCHEMA_VERSION).strip(),
+@@ -240,4 +265,6 @@ def _build_profile(payload: object) -> PaperAccountProfile:
+         universe_profile=payload.get("universe_profile"),
+         benchmark_profile=payload.get("benchmark_profile"),
+         notion_profile=payload.get("notion_profile"),
++        strategy_version=payload.get("strategy_version"),
++        universe_version=payload.get("universe_version"),
+     )
+diff --git a/core/paths.py b/core/paths.py
+index 9fae6e6..32d5389 100644
+--- a/core/paths.py
++++ b/core/paths.py
+@@ -141,3 +141,7 @@ def paper_replay_diff_config_snapshot_archive_dir() -> Path:
+     path = paper_replay_diff_dir() / "archive" / "config_snapshots"
+     path.mkdir(parents=True, exist_ok=True)
+     return path
++
++
++def paper_binding_registry_path() -> Path:
++    return ROOT / "config" / "paper_binding_profiles.json"
+diff --git a/scripts/runbook_state.py b/scripts/runbook_state.py
+index dae89e4..d857965 100644
+--- a/scripts/runbook_state.py
++++ b/scripts/runbook_state.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import argparse
++import copy
+ import json
+ import re
+ import sys
+@@ -10,6 +11,9 @@ from pathlib import Path
+ from typing import Any, Sequence
+ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+ 
++if __package__ in (None, ""):
++    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
+ 
+ DEFAULT_WORKSPACE = Path(r"D:\n8n\workspace\stock_screener_ops")
+ STATE_FILENAME = "runbook_state.json"
+@@ -19,6 +23,7 @@ STATE_DIRNAME = "runbook_states"
+ # It does not replace the existing n8n runner context.json contract.
+ # It shares account_id/data_date/trade_date concepts but owns controller state.
+ SCHEMA_VERSION = "runbook_state.v1"
++BINDING_STATE_SCHEMA_VERSION = "runbook_state.v2"
+ EXECUTION_CONTRACT_V1 = "execution_reconciliation_preview.v1"
+ EXECUTION_CONTRACT_V2 = "execution_reconciliation_preview.v2"
+ EXECUTION_CONTRACT_V3 = "execution_reconciliation_preview.v3"
+@@ -45,6 +50,11 @@ class FrozenRunbookContext:
+     trade_date: str
+ 
+ 
++@dataclass(frozen=True)
++class BindingFrozenRunbookContext(FrozenRunbookContext):
++    binding: dict[str, Any]
++
++
+ @dataclass(frozen=True)
+ class RunbookState:
+     schema_version: str
+@@ -117,14 +127,22 @@ def create_initial_state(
+         raise ValueError("account_id is required")
+     data_date_norm = _normalize_date(data_date, "data_date")
+     trade_date_norm = _normalize_date(trade_date, "trade_date")
++    from core.paper_account_profile import load_paper_account_profiles, VERSIONED_ACCOUNT_PROFILE_SCHEMA
++    from core.paper_account_binding import resolve_account_binding
++
++    profiles = load_paper_account_profiles(allow_missing=True)
++    binding = (
++        resolve_account_binding(account_id, profiles=profiles)
++        if profiles.schema_version == VERSIONED_ACCOUNT_PROFILE_SCHEMA else None
++    )
+     timestamp = _now_iso(timezone)
+-    context = FrozenRunbookContext(
+-        account_id=account_id,
+-        data_date=data_date_norm,
+-        trade_date=trade_date_norm,
++    context_values = dict(account_id=account_id, data_date=data_date_norm, trade_date=trade_date_norm)
++    context = (
++        BindingFrozenRunbookContext(**context_values, binding=copy.deepcopy(binding))
++        if binding is not None else FrozenRunbookContext(**context_values)
+     )
+     return RunbookState(
+-        schema_version=SCHEMA_VERSION,
++        schema_version=BINDING_STATE_SCHEMA_VERSION if binding is not None else SCHEMA_VERSION,
+         runbook_day_id=get_runbook_day_id(account_id, data_date_norm, trade_date_norm),
+         created_at=timestamp,
+         updated_at=timestamp,
+@@ -152,6 +170,12 @@ def _state_from_dict(data: dict[str, Any]) -> RunbookState:
+     frozen_context_data = data.get("frozen_context")
+     if not isinstance(frozen_context_data, dict):
+         frozen_context_data = {}
++    from core.paper_account_binding import validate_binding, BindingError
++    schema = data.get("schema_version")
++    if schema == BINDING_STATE_SCHEMA_VERSION:
++        validate_binding(frozen_context_data.get("binding"))
++    elif "binding" in frozen_context_data:
++        raise BindingError("binding requires runbook_state.v2")
+     stage_status = dict(data.get("stage_status", {})) if isinstance(data.get("stage_status"), dict) else {}
+     stage_status.setdefault("F", "PENDING")
+     return RunbookState(
+@@ -160,11 +184,16 @@ def _state_from_dict(data: dict[str, Any]) -> RunbookState:
+         created_at=str(data.get("created_at", "")),
+         updated_at=str(data.get("updated_at", "")),
+         timezone=str(data.get("timezone", "")),
+-        frozen_context=FrozenRunbookContext(
++        frozen_context=(BindingFrozenRunbookContext(
+             account_id=str(frozen_context_data.get("account_id", "")),
+             data_date=str(frozen_context_data.get("data_date", "")),
+             trade_date=str(frozen_context_data.get("trade_date", "")),
+-        ),
++            binding=copy.deepcopy(frozen_context_data["binding"]),
++        ) if schema == BINDING_STATE_SCHEMA_VERSION else FrozenRunbookContext(
++            account_id=str(frozen_context_data.get("account_id", "")),
++            data_date=str(frozen_context_data.get("data_date", "")),
++            trade_date=str(frozen_context_data.get("trade_date", "")),
++        )),
+         current_stage=str(data.get("current_stage", "")),
+         current_status=str(data.get("current_status", "")),
+         last_completed_step=data.get("last_completed_step"),
+@@ -199,6 +228,13 @@ def load_state(path: Path) -> RunbookState:
+ 
+ 
+ def save_state(state: RunbookState, path: Path) -> None:
++    assert_current_binding(state)
++    if path.is_file():
++        previous = load_state(path)
++        if BINDING_STATE_SCHEMA_VERSION in {previous.schema_version, state.schema_version}:
++            if (previous.schema_version != state.schema_version
++                    or previous.to_dict()["frozen_context"] != state.to_dict()["frozen_context"]):
++                raise ValueError("existing_frozen_binding_rewrite_forbidden")
+     path.parent.mkdir(parents=True, exist_ok=True)
+     tmp_path = path.with_name(f"{path.name}.tmp")
+     tmp_path.write_text(
+@@ -226,6 +262,27 @@ def context_matches_state(
+     )
+ 
+ 
++def _validate_frozen_binding(state: RunbookState) -> None:
++    from core.paper_account_binding import validate_binding, BindingError
++
++    if state.schema_version == BINDING_STATE_SCHEMA_VERSION:
++        validate_binding(getattr(state.frozen_context, "binding", None))
++    elif hasattr(state.frozen_context, "binding"):
++        raise BindingError("binding requires runbook_state.v2")
++
++
++def assert_current_binding(state: RunbookState) -> None:
++    """Validate new state integrity and drift before writes; never migrate legacy."""
++    from core.paper_account_binding import assert_binding_matches, resolve_account_binding
++
++    _validate_frozen_binding(state)
++    if state.schema_version == BINDING_STATE_SCHEMA_VERSION:
++        assert_binding_matches(
++            state.frozen_context.binding,
++            resolve_account_binding(state.frozen_context.account_id),
++        )
++
++
+ def get_execution_contract(state: RunbookState) -> dict[str, Any]:
+     """Return the effective execution contract without migrating legacy state."""
+     if not state.execution_contract:
+@@ -329,8 +386,12 @@ def finalize_execution_input(state: RunbookState) -> RunbookState:
+ 
+ def validate_state(state: RunbookState) -> list[str]:
+     errors: list[str] = []
+-    if state.schema_version != SCHEMA_VERSION:
+-        errors.append(f"schema_version must be {SCHEMA_VERSION}")
++    if state.schema_version not in {SCHEMA_VERSION, BINDING_STATE_SCHEMA_VERSION}:
++        errors.append(f"schema_version must be {SCHEMA_VERSION} or {BINDING_STATE_SCHEMA_VERSION}")
++    try:
++        _validate_frozen_binding(state)
++    except ValueError as exc:
++        errors.append(str(exc))
+     if not state.frozen_context.account_id:
+         errors.append("frozen_context.account_id is required")
+     if not state.frozen_context.data_date:
+@@ -936,6 +997,7 @@ def _ensure_step_id(step_id: int) -> None:
+ 
+ 
+ def start_stage(state: RunbookState, stage_id: str) -> RunbookState:
++    assert_current_binding(state)
+     _ensure_stage_id(stage_id)
+     timestamp = _next_updated_at(state)
+     stage_status = dict(state.stage_status)
+@@ -1167,6 +1229,7 @@ def _assert_operational_gap_lifecycle_allowed(
+     from core import operational_gap_recovery, runbook_recovery
+     from core.runbook_calendar import load_market_calendar
+ 
++    assert_current_binding(state)
+     guard = operational_gap_recovery.guard_operational_gap_boundary(
+         workspace,
+         account_id=state.frozen_context.account_id,
+@@ -1192,13 +1255,14 @@ def init_state_file(
+     timezone: str = "Asia/Seoul",
+ ) -> tuple[str, RunbookState]:
+     path = get_state_path(workspace)
+-    requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
+     if not path.exists():
++        requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
+         save_state(requested_state, path)
+         return "CREATED", requested_state
+ 
+     existing_state = load_state(path)
+     if context_matches_state(existing_state, account_id, data_date, trade_date):
++        assert_current_binding(existing_state)
+         return "EXISTING", existing_state
+     raise ValueError("context_mismatch_existing_runbook_state")
+ 
+@@ -1211,8 +1275,8 @@ def init_state_file_for_context(
+     timezone: str = "Asia/Seoul",
+ ) -> tuple[str, Path, RunbookState]:
+     path = get_state_path_for_context(workspace, account_id, data_date, trade_date)
+-    requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
+     if not path.exists():
++        requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
+         from core.runbook_calendar import load_market_calendar
+         from core.runbook_recovery import assert_initialization_allowed
+ 
+diff --git a/tests/test_runbook_state.py b/tests/test_runbook_state.py
+index c97d4bc..c6e606c 100644
+--- a/tests/test_runbook_state.py
++++ b/tests/test_runbook_state.py
+@@ -244,7 +244,7 @@ def test_validate_state_reports_schema_errors() -> None:
+ 
+     errors = runbook_state.validate_state(broken)
+ 
+-    assert "schema_version must be runbook_state.v1" in errors
++    assert "schema_version must be runbook_state.v1 or runbook_state.v2" in errors
+     assert "current_stage must be one of A/GATE1/B/C/GATE2/D/E/F" in errors
+     assert "last_completed_step must be null or 0..21" in errors
+ 
+diff --git a/core/paper_account_binding.py b/core/paper_account_binding.py
+new file mode 100644
+index 0000000..213454d
+--- /dev/null
++++ b/core/paper_account_binding.py
+@@ -0,0 +1,184 @@
++"""Exact version binding contracts. This module does not activate runtime profiles."""
++from __future__ import annotations
++
++import copy
++import json
++import math
++import re
++from pathlib import Path
++from typing import Any
++
++from core.config_factory import make_config
++from core.paper_account_profile import (
++    PaperAccountProfileConfig, VERSIONED_ACCOUNT_PROFILE_SCHEMA,
++    load_paper_account_profiles, resolve_paper_account_profile,
++)
++from core.paths import paper_binding_registry_path
++from core.stage_a_asof_contract import sha256_payload
++
++REGISTRY_SCHEMA = "paper_binding_profiles.v1"
++BINDING_SCHEMA = "paper_account_binding.v1"
++# Deliberately excludes risk, capital, hedge, routing and portfolio safety switches.
++STRATEGY_PARAMETERS = frozenset({
++    "entry_period", "exit_period", "score_threshold", "atr_period", "rsi_period",
++    "sma_short_period", "sma_long_period", "bbands_period", "macd_fast_period",
++    "macd_slow_period", "dema_short_period", "mfi_period", "rs_lookback",
++    "turtle_weight", "rs_weight", "rsi_weight", "sma_weight", "bbands_weight",
++    "macd_weight", "bbs_weight", "dema_weight", "obv_weight", "mfi_weight",
++    "vol_spike_weight",
++})
++
++
++class BindingError(ValueError):
++    pass
++
++
++def _canonical(value: Any) -> Any:
++    """Validate JSON values and normalize equivalent integral numbers."""
++    if value is None or isinstance(value, (str, bool, int)):
++        return value
++    if isinstance(value, float):
++        if not math.isfinite(value):
++            raise BindingError("nonfinite binding value")
++        return int(value) if value.is_integer() else value
++    if isinstance(value, list):
++        return [_canonical(item) for item in value]
++    if isinstance(value, dict) and all(isinstance(k, str) for k in value):
++        return {k: _canonical(v) for k, v in value.items()}
++    raise BindingError("binding must contain JSON values only")
++
++
++def _reference(profile_id: Any, version: Any) -> dict[str, str]:
++    if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", v)
++           for v in (profile_id, version)):
++        raise BindingError("malformed profile ID/version")
++    return {"id": profile_id, "version": version}
++
++
++def _content(kind: str, value: Any) -> dict[str, Any]:
++    if not isinstance(value, dict):
++        raise BindingError(f"{kind} content must be an object")
++    if kind == "strategy":
++        if set(value) != {"parameters"} or not isinstance(value["parameters"], dict):
++            raise BindingError("strategy requires parameters object")
++        params = value["parameters"]
++        if set(params) - STRATEGY_PARAMETERS:
++            raise BindingError("unsupported or safety-policy override parameter")
++        for key, val in params.items():
++            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val):
++                raise BindingError(f"invalid strategy parameter: {key}")
++            if key.endswith("period") or key == "rs_lookback":
++                if val <= 0 or int(val) != val:
++                    raise BindingError(f"positive integer required: {key}")
++            elif val < 0:
++                raise BindingError(f"negative strategy parameter: {key}")
++        return _canonical(value)
++    if value == {"kind": "shared_snapshot"}:
++        return dict(value)
++    if set(value) != {"kind", "symbols"} or value["kind"] != "symbols":
++        raise BindingError("unsupported universe definition")
++    symbols = value["symbols"]
++    if not isinstance(symbols, list) or not symbols or any(
++        not isinstance(s, str) or not re.fullmatch(r"[A-Z0-9][A-Z0-9.^-]*", s) for s in symbols
++    ) or len(symbols) != len(set(symbols)):
++        raise BindingError("invalid universe symbols")
++    return {"kind": "symbols", "symbols": sorted(symbols)}
++
++
++def load_binding_registry(path: Path | None = None) -> dict[str, Any]:
++    with (Path(path) if path is not None else paper_binding_registry_path()).open(encoding="utf-8") as handle:
++        payload = json.load(handle)
++    _registry_index(payload)
++    return payload
++
++
++def _registry_index(registry: Any) -> dict[tuple[str, str, str], dict[str, Any]]:
++    if not isinstance(registry, dict) or registry.get("schema_version") != REGISTRY_SCHEMA:
++        raise BindingError("unsupported binding registry schema")
++    if set(registry) != {"schema_version", "strategy", "universe"}:
++        raise BindingError("malformed binding registry")
++    index = {}
++    for kind in ("strategy", "universe"):
++        rows = registry[kind]
++        if not isinstance(rows, list):
++            raise BindingError(f"{kind} registry must be a list")
++        for row in rows:
++            if not isinstance(row, dict) or set(row) != {"id", "version", "content"}:
++                raise BindingError("malformed registry entry")
++            ref = _reference(row["id"], row["version"])
++            key = (kind, ref["id"], ref["version"])
++            if key in index:
++                raise BindingError("duplicate profile ID/version")
++            index[key] = _content(kind, row["content"])
++    return index
++
++
++def shared_binding_policy() -> dict[str, Any]:
++    # Capture SSOT policy without injecting account strategy or mutating globals.
++    base = copy.deepcopy(make_config({}, "", ""))
++    for key in ("start_date", "end_date", "initial_capital", "enable_decision_logging"):
++        base.pop(key, None)
++    regime = base.get("REGIME_RULES", {})
++    for content in regime.values():
++        if isinstance(content, dict):
++            content.pop("description", None)
++    return _canonical(base)
++
++
++def resolve_account_binding(
++    account_id: str, *, profiles: PaperAccountProfileConfig | None = None,
++    registry: dict[str, Any] | None = None,
++) -> dict[str, Any]:
++    profiles = profiles if profiles is not None else load_paper_account_profiles(allow_missing=False)
++    if profiles.schema_version != VERSIONED_ACCOUNT_PROFILE_SCHEMA:
++        raise BindingError("versioned account registry required")
++    profile = resolve_paper_account_profile(account_id, config=profiles)
++    index = _registry_index(registry if registry is not None else load_binding_registry())
++    semantics = {"account_type": profile.account_type, "currency": profile.currency,
++                 "shared_policy": shared_binding_policy()}
++    for kind in ("strategy", "universe"):
++        ref = _reference(getattr(profile, f"{kind}_profile"), getattr(profile, f"{kind}_version"))
++        try:
++            content = index[(kind, ref["id"], ref["version"])]
++        except KeyError as exc:
++            raise BindingError(f"unknown {kind} profile/version: {ref}") from exc
++        semantics[kind] = {"reference": ref, "content": content}
++    payload = {"schema_version": BINDING_SCHEMA, "semantics": _canonical(semantics)}
++    return {**payload, "digest": sha256_payload(payload)}
++
++
++def validate_binding(binding: Any) -> None:
++    if not isinstance(binding, dict) or set(binding) != {"schema_version", "semantics", "digest"}:
++        raise BindingError("binding evidence required")
++    if binding["schema_version"] != BINDING_SCHEMA:
++        raise BindingError("unsupported binding schema")
++    semantics = binding["semantics"]
++    if not isinstance(semantics, dict) or set(semantics) != {
++        "account_type", "currency", "strategy", "universe", "shared_policy"
++    }:
++        raise BindingError("malformed binding semantics")
++    for key in ("account_type", "currency"):
++        if not isinstance(semantics[key], str) or not semantics[key]:
++            raise BindingError(f"binding {key} required")
++    if not isinstance(semantics["shared_policy"], dict) or not semantics["shared_policy"]:
++        raise BindingError("shared policy required")
++    for kind in ("strategy", "universe"):
++        entry = semantics[kind]
++        if not isinstance(entry, dict) or set(entry) != {"reference", "content"}:
++            raise BindingError("malformed resolved profile")
++        ref = entry["reference"]
++        if not isinstance(ref, dict) or set(ref) != {"id", "version"}:
++            raise BindingError("malformed resolved reference")
++        _reference(ref["id"], ref["version"])
++        if _content(kind, entry["content"]) != entry["content"]:
++            raise BindingError("noncanonical profile content")
++    payload = {"schema_version": BINDING_SCHEMA, "semantics": _canonical(semantics)}
++    if binding["digest"] != sha256_payload(payload):
++        raise BindingError("binding evidence tamper")
++
++
++def assert_binding_matches(frozen: Any, current: Any) -> None:
++    validate_binding(frozen)
++    validate_binding(current)
++    if frozen["digest"] != current["digest"]:
++        raise BindingError("binding drift")
+diff --git a/core/paper_account_fresh.py b/core/paper_account_fresh.py
+new file mode 100644
+index 0000000..15e9b63
+--- /dev/null
++++ b/core/paper_account_fresh.py
+@@ -0,0 +1,216 @@
++"""Read-only first-run eligibility. No bootstrap, prepare, or ready-marker writes."""
++from __future__ import annotations
++
++import csv
++import json
++import math
++from datetime import date
++from pathlib import Path
++from typing import Any
++
++from core.paper_account_binding import assert_binding_matches, resolve_account_binding
++from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
++from core.paper_account_profile import load_paper_account_profiles, resolve_paper_account_profile
++from core.paper_account_snapshot import PAPER_ACCOUNT_SNAPSHOT_COLUMNS
++from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
++from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
++from core.paper_snapshot_identity import validate_snapshot_account_identity
++from core.runbook_calendar import MarketCalendar
++
++
++def _rows(path: Path, columns: list[str]) -> list[dict[str, str]]:
++    with path.open(encoding="utf-8-sig", newline="") as handle:
++        reader = csv.DictReader(handle)
++        if reader.fieldnames != columns:
++            raise ValueError(f"invalid_bootstrap_header:{path.name}")
++        rows = list(reader)
++    if any(None in row or any(value is None for value in row.values()) for row in rows):
++        raise ValueError(f"invalid_bootstrap_row:{path.name}")
++    return rows
++
++
++def _number(value: Any) -> float:
++    if isinstance(value, bool):
++        raise ValueError("invalid_bootstrap_number")
++    result = float(value)
++    if not math.isfinite(result):
++        raise ValueError("invalid_bootstrap_number")
++    return result
++
++
++def _history_blockers(workspace: Path, account_id: str) -> list[str]:
++    from core import failed_no_trade_closure, operational_gap_recovery, runbook_recovery, runbook_retirement
++    from core.runbook_day_rollover import _load_account_states, DUPLICATE_DIRS
++    from scripts import runbook_state
++
++    records, errors = _load_account_states(workspace, account_id)
++    blockers = [f"runbook_history_invalid:{e}" for e in errors if e != "runbook_states_directory_not_found"]
++    if records:
++        # Any run (including READY, NO_ACTION, FAILED or terminal) is non-fresh.
++        blockers.append("runbook_history_present")
++        if any(r.state.current_status == "FAILED" or r.state.last_error for r in records):
++            blockers.append("failed_history_present")
++        if any(r.state.recovery_authorizations for r in records):
++            blockers.append("recovery_history_present")
++    directories = set(DUPLICATE_DIRS) | set(runbook_recovery.TARGET_EVIDENCE_DIRS) | {
++        runbook_state.STATE_DIRNAME, runbook_recovery.RECOVERY_DIRNAME,
++        runbook_retirement.RETIREMENT_DIRNAME, failed_no_trade_closure.CLOSURE_DIRNAME,
++        operational_gap_recovery.GENERIC_EVIDENCE_DIRNAME,
++    }
++    for dirname in sorted(directories):
++        root = workspace / dirname
++        if not root.exists():
++            continue
++        if not root.is_dir() or root.is_symlink():
++            blockers.append(f"unreadable_history:{dirname}")
++            continue
++        for path in root.rglob("*"):
++            if path.is_symlink():
++                blockers.append(f"unexplained_history_link:{dirname}")
++                continue
++            if any(part.startswith(account_id + "_") or part == account_id for part in path.relative_to(root).parts):
++                blockers.append(f"lifecycle_history_present:{dirname}")
++            if path.is_file() and path.suffix == ".json":
++                try:
++                    payload = json.loads(path.read_text(encoding="utf-8-sig"))
++                except (OSError, ValueError):
++                    # Hashed gap filenames cannot be attributed safely when corrupt.
++                    blockers.append(f"unreadable_history:{dirname}")
++                    continue
++                if _contains_account(payload, account_id):
++                    blockers.append(f"lifecycle_history_present:{dirname}")
++    legacy_state = workspace / runbook_state.STATE_FILENAME
++    if legacy_state.exists():
++        try:
++            if _contains_account(json.loads(legacy_state.read_text(encoding="utf-8-sig")), account_id):
++                blockers.append("runbook_history_present")
++        except (OSError, ValueError):
++            blockers.append("unreadable_legacy_state")
++    return blockers
++
++
++def _contains_account(value: Any, account_id: str) -> bool:
++    if isinstance(value, dict):
++        return value.get("account_id") == account_id or any(_contains_account(v, account_id) for v in value.values())
++    if isinstance(value, list):
++        return any(_contains_account(v, account_id) for v in value)
++    return False
++
++
++def validate_prepare_first_request(
++    *, account_id: str, account_paths: PaperAccountPaths, workspace: Path,
++    authoritative_workspace: Path, data_date: str, trade_date: str,
++    calendar: MarketCalendar, expected_binding: dict[str, Any] | None = None,
++) -> dict[str, Any]:
++    """Inspect canonical local evidence without creating, repairing or advancing it.
++
++    Market readiness/actual prepare are later gates (ML1-3/4). An eligible result
++    is not a prepared/ready marker and is not authority to execute Stage A.
++    """
++    blockers: list[str] = []
++    binding = None
++    context = {"account_id": account_id, "data_date": data_date, "trade_date": trade_date}
++    try:
++        from scripts.runbook_state import get_runbook_day_id
++        profiles = load_paper_account_profiles(allow_missing=False)
++        profile = resolve_paper_account_profile(account_id, config=profiles)
++        if profile.account_type not in {"paper", "test"}:
++            raise ValueError("fresh_paper_account_mode_required")
++        binding = resolve_account_binding(account_id, profiles=profiles)
++        if expected_binding is not None:
++            assert_binding_matches(expected_binding, binding)
++        canonical = build_paper_account_paths(account_id, create=False)
++        if account_paths.account_id != account_id or account_paths.legacy_default_used:
++            raise ValueError("account_context_mismatch")
++        if account_paths.root.resolve() != canonical.root.resolve():
++            raise ValueError("account_root_mismatch")
++        for field in ("execution_log_path", "account_snapshot_path", "position_snapshot_path"):
++            if getattr(account_paths, field).resolve() != getattr(canonical, field).resolve():
++                raise ValueError("account_artifact_path_mismatch")
++        workspace = Path(workspace)
++        if workspace.resolve() != Path(authoritative_workspace).resolve() or not workspace.is_dir():
++            raise ValueError("workspace_mismatch")
++        first_data, first_trade = date.fromisoformat(data_date), date.fromisoformat(trade_date)
++        if first_data.isoformat() != data_date or first_trade.isoformat() != trade_date:
++            raise ValueError("noncanonical_dates")
++        calendar.require_coverage(first_data)
++        if calendar.next_trading_day(first_data) != first_trade:
++            raise ValueError("first_trade_date_must_be_next_trading_day")
++        context["runbook_day_id"] = get_runbook_day_id(account_id, data_date, trade_date)
++        current_path = canonical.current_state_snapshot_path(data_date)
++        files = [canonical.account_snapshot_path, canonical.position_snapshot_path,
++                 canonical.execution_log_path, current_path]
++        if not canonical.root.is_dir() or canonical.root.is_symlink():
++            raise ValueError("bootstrap_root_missing_or_unsafe")
++        if any(not p.is_file() for p in files):
++            blockers.append("partial_initialization")
++        if any(p.is_symlink() or p.resolve().parent != canonical.root.resolve() for p in files):
++            raise ValueError("bootstrap_path_mismatch")
++        known = {p.resolve() for p in files}
++        from core.paper_account_bootstrap import build_account_bootstrap_plan
++        plan = build_account_bootstrap_plan(
++            account_id=account_id, initial_cash=profile.initial_cash, currency=profile.currency,
++            date_str=data_date, allow_existing=True, account_root=canonical.root,
++        )
++        known_dirs = {Path(p).resolve() for p in plan.would_create_dirs}
++        if any(p.is_symlink() or (p.is_file() and p.resolve() not in known)
++               or (p.is_dir() and p.resolve() not in known_dirs) for p in canonical.root.rglob("*")):
++            blockers.append("unexplained_account_artifacts")
++        blockers.extend(_history_blockers(workspace, account_id))
++        if "partial_initialization" not in blockers:
++            account_rows = _rows(canonical.account_snapshot_path, PAPER_ACCOUNT_SNAPSHOT_COLUMNS)
++            validate_snapshot_account_identity(
++                account_rows, fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS,
++                allowed_fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS,
++                expected_account_id=account_id, source_path=canonical.account_snapshot_path,
++                account_root=canonical.root,
++            )
++            if len(account_rows) != 1:
++                raise ValueError("bootstrap_account_history_or_missing_seed")
++            row = account_rows[0]
++            if row["snapshot_date"] != data_date:
++                blockers.append("bootstrap_date_mismatch")
++            if row["currency"] != profile.currency:
++                blockers.append("bootstrap_currency_mismatch")
++            initial = _number(profile.initial_cash)
++            if initial <= 0 or any(_number(row[k]) != initial for k in
++                                  ("initial_cash", "cash", "total_equity_cost_basis", "total_equity_market_value")):
++                blockers.append("bootstrap_cash_mismatch")
++            if any(_number(row[k]) != 0 for k in
++                   ("position_count", "applied_trade_count", "positions_cost_value", "positions_market_value",
++                    "unrealized_pnl", "unrealized_pnl_pct", "realized_pnl", "total_pnl", "total_pnl_pct")) or row["symbols"]:
++                blockers.append("bootstrap_not_initial")
++            if (any(_number(row[k]) != 1 for k in ("cash_ratio_cost_basis", "cash_ratio_market_value"))
++                    or json.loads(row["realized_pnl_by_symbol"]) != {}):
++                blockers.append("bootstrap_not_initial")
++            if row["valuation_method"] != "init" or row["market_valuation_status"] != "INIT":
++                blockers.append("bootstrap_source_mismatch")
++            if row["source_current_state"] != current_path.name or row["source_execution_log"]:
++                blockers.append("bootstrap_source_mismatch")
++            if _rows(canonical.execution_log_path, PAPER_EXECUTION_LOG_COLUMNS):
++                blockers.append("execution_history_present")
++            if _rows(canonical.position_snapshot_path, PAPER_POSITION_SNAPSHOT_COLUMNS):
++                blockers.append("position_history_present")
++            current = json.loads(current_path.read_text(encoding="utf-8-sig"))
++            if not isinstance(current, dict):
++                raise ValueError("invalid_current_state")
++            from core.paper_account_bootstrap import BOOTSTRAP_CURRENT_STATE_SCHEMA_VERSION, BOOTSTRAP_SOURCE
++            if current.get("account_id") != account_id or current.get("snapshot_date") != data_date:
++                blockers.append("bootstrap_current_identity_mismatch")
++            if current.get("schema_version") != BOOTSTRAP_CURRENT_STATE_SCHEMA_VERSION or current.get("source") != BOOTSTRAP_SOURCE:
++                blockers.append("bootstrap_current_source_mismatch")
++            if "currency" in current and current["currency"] != profile.currency:
++                blockers.append("bootstrap_currency_mismatch")
++            if _number(current.get("absolute_cash")) != initial or _number(current.get("current_cash_ratio")) != 1:
++                blockers.append("bootstrap_current_cash_mismatch")
++            if _number(current.get("current_hedge_ratio")) != 0:
++                blockers.append("bootstrap_current_position_mismatch")
++            empty_fields = {"current_symbols": [], "shares": {}, "avg_price": {}, "highest_prices": {},
++                            "highest_price_meta": {}, "hedge_symbols": [], "applied_trade_ids": []}
++            if any(current.get(k) != v for k, v in empty_fields.items()):
++                blockers.append("bootstrap_current_history_present")
++    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
++        blockers.append(str(exc) or type(exc).__name__)
++    return {"eligible": not blockers, "blockers": sorted(set(blockers)),
++            "context": context, "binding": binding,
++            "next_action": "VALIDATED_NOT_PREPARED" if not blockers else "RESOLVE_BLOCKERS"}
+diff --git a/tests/test_ml1_2a_binding_fresh.py b/tests/test_ml1_2a_binding_fresh.py
+new file mode 100644
+index 0000000..8c7d339
+--- /dev/null
++++ b/tests/test_ml1_2a_binding_fresh.py
+@@ -0,0 +1,396 @@
++from __future__ import annotations
++
++import copy
++import csv
++import json
++from dataclasses import replace
++from datetime import date
++from pathlib import Path
++
++import pytest
++
++from core import paper_account_binding as binding
++from core import paper_account_profile as profiles
++from core import paper_account_paths as paths
++from core.paper_account_bootstrap import initialize_paper_account
++from core.paper_account_fresh import validate_prepare_first_request
++from core.runbook_calendar import MarketCalendar
++from scripts import runbook_state as states
++
++
++def write_json(path, payload):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(payload), encoding="utf-8")
++
++
++@pytest.fixture
++def environment(tmp_path, monkeypatch):
++    account_file = tmp_path / "profiles.json"
++    registry_file = tmp_path / "registry.json"
++    account = {"account_id": "synthetic_a", "display_name": "Synthetic A", "currency": "USD",
++               "initial_cash": 12345, "account_type": "paper", "is_default": True,
++               "strategy_profile": "synthetic_strategy", "strategy_version": "v1",
++               "universe_profile": "synthetic_universe", "universe_version": "v1"}
++    account_config = {"schema_version": profiles.VERSIONED_ACCOUNT_PROFILE_SCHEMA,
++                      "default_account_id": "synthetic_a", "accounts": [account]}
++    registry = {"schema_version": binding.REGISTRY_SCHEMA,
++                "strategy": [{"id": "synthetic_strategy", "version": "v1",
++                              "content": {"parameters": {"entry_period": 12, "rsi_weight": 1.0}}}],
++                "universe": [{"id": "synthetic_universe", "version": "v1",
++                              "content": {"kind": "symbols", "symbols": ["BBB", "AAA"]}}]}
++    write_json(account_file, account_config)
++    write_json(registry_file, registry)
++    monkeypatch.setattr(profiles, "_default_settings_path", lambda: account_file)
++    monkeypatch.setattr(binding, "paper_binding_registry_path", lambda: registry_file)
++    monkeypatch.setattr(paths, "PAPER_ACCOUNTS_ROOT", tmp_path / "accounts")
++    return account_file, registry_file, account_config, registry
++
++
++def resolve():
++    return binding.resolve_account_binding("synthetic_a")
++
++
++def test_exact_resolve_and_evidence(environment):
++    result = resolve()
++    binding.validate_binding(result)
++    assert result["semantics"]["strategy"]["reference"] == {"id": "synthetic_strategy", "version": "v1"}
++    assert result["semantics"]["universe"]["content"]["symbols"] == ["AAA", "BBB"]
++    assert result["semantics"]["shared_policy"]["max_long_positions"] == 10
++    assert "initial_capital" not in result["semantics"]["shared_policy"]
++    assert "account_id" not in result["semantics"]
++
++
++@pytest.mark.parametrize("field,value", [
++    ("strategy_profile", "unknown"), ("strategy_version", "unknown"),
++    ("universe_profile", "unknown"), ("universe_version", "unknown"),
++    ("strategy_version", None), ("universe_version", ""), ("strategy_profile", {"id": "bad"}),
++    ("strategy_version", 1), ("strategy_profile", "../bad"),
++])
++def test_invalid_reference_no_fallback(environment, field, value):
++    path, _, payload, _ = environment
++    payload["accounts"][0][field] = value
++    write_json(path, payload)
++    with pytest.raises((ValueError, profiles.PaperAccountProfileError)):
++        resolve()
++
++
++def test_missing_registry_unknown_account(environment):
++    with pytest.raises(profiles.PaperAccountProfileError):
++        binding.resolve_account_binding("unknown_account")
++    environment[0].unlink()
++    with pytest.raises(profiles.PaperAccountProfileError):
++        resolve()
++    assert profiles.load_paper_account_profiles().default_account_id == "paper_default"
++
++
++@pytest.mark.parametrize("key", ["max_long_positions", "risk_per_trade", "USE_HEDGE_MODE",
++                                  "BULL_hedge_ratio", "runtime_overrides", "unknown"])
++def test_safety_and_unknown_parameters_blocked(environment, key):
++    _, path, _, registry = environment
++    registry["strategy"][0]["content"]["parameters"][key] = 100
++    write_json(path, registry)
++    with pytest.raises(binding.BindingError, match="unsupported|safety"):
++        resolve()
++
++
++def test_digest_metadata_order_and_account_nonimpact(environment):
++    account_path, registry_path, account_config, registry = environment
++    before = resolve()
++    account_config["accounts"][0].update(display_name="Renamed", initial_cash=99999, notion_profile="other")
++    other = {**account_config["accounts"][0], "account_id": "synthetic_b", "is_default": False}
++    account_config["accounts"].insert(0, other)
++    write_json(account_path, account_config)
++    registry["strategy"].insert(0, {"id": "other_strategy", "version": "v9", "content": {"parameters": {}}})
++    registry["universe"][0]["content"]["symbols"].reverse()
++    registry["strategy"][1]["content"]["parameters"]["rsi_weight"] = 1
++    write_json(registry_path, registry)
++    assert resolve() == before
++    assert binding.resolve_account_binding("synthetic_b") == before
++
++
++@pytest.mark.parametrize("kind", ["strategy", "universe", "policy"])
++def test_semantic_change_changes_digest(environment, monkeypatch, kind):
++    before = resolve()
++    if kind == "policy":
++        original = binding.shared_binding_policy
++        monkeypatch.setattr(binding, "shared_binding_policy", lambda: {**original(), "MARKET_BENCHMARK_SYMBOL": "QQQ"})
++    else:
++        _, path, _, registry = environment
++        if kind == "strategy":
++            registry[kind][0]["content"]["parameters"]["entry_period"] = 20
++        else:
++            registry[kind][0]["content"]["symbols"].append("CCC")
++        write_json(path, registry)
++    current = resolve()
++    assert current["digest"] != before["digest"]
++    with pytest.raises(binding.BindingError, match="drift"):
++        binding.assert_binding_matches(before, current)
++
++
++def test_state_round_trip_unchanged_identity(environment, tmp_path):
++    state = states.create_initial_state("synthetic_a", "2026-09-28", "2026-09-29")
++    assert state.schema_version == states.BINDING_STATE_SCHEMA_VERSION
++    assert state.runbook_day_id == "synthetic_a_2026-09-28_2026-09-29"
++    path = tmp_path / "state.json"
++    states.save_state(state, path)
++    first = path.read_bytes()
++    reloaded = states.load_state(path)
++    assert not states.validate_state(reloaded)
++    states.save_state(reloaded, path)
++    assert path.read_bytes() == first
++    assert states.load_state(path) == state
++
++
++def test_legacy_omission_and_no_migration(environment, tmp_path):
++    path, _, payload, _ = environment
++    payload["schema_version"] = profiles.ACCOUNT_PROFILE_SCHEMA_VERSION
++    for key in ("strategy_version", "universe_version"):
++        payload["accounts"][0].pop(key)
++    write_json(path, payload)
++    state = states.create_initial_state("synthetic_a", "2026-09-28", "2026-09-29")
++    assert state.schema_version == states.SCHEMA_VERSION
++    assert "binding" not in state.to_dict()["frozen_context"]
++    target = tmp_path / "legacy.json"
++    states.save_state(state, target)
++    original = target.read_bytes()
++    assert states.load_state(target) == state
++    assert target.read_bytes() == original
++    states.save_state(states.load_state(target), target)
++    assert target.read_bytes() == original
++
++
++def test_drift_blocks_save_and_stage_start_without_write(environment, tmp_path):
++    state = states.create_initial_state("synthetic_a", "2026-09-28", "2026-09-29")
++    path = tmp_path / "state.json"
++    states.save_state(state, path)
++    original = path.read_bytes()
++    _, registry_path, _, registry = environment
++    registry["strategy"][0]["content"]["parameters"]["entry_period"] = 20
++    write_json(registry_path, registry)
++    for operation in (lambda: states.save_state(state, path), lambda: states.start_stage(state, "A")):
++        with pytest.raises(binding.BindingError, match="drift"):
++            operation()
++    assert path.read_bytes() == original
++    # Historical evidence remains readable, independently from live registry drift.
++    assert states.load_state(path) == state
++
++
++@pytest.mark.parametrize("mutation", ["missing", "tamper", "downgrade"])
++def test_frozen_missing_tamper_and_schema_downgrade_blocked(environment, tmp_path, mutation):
++    state = states.create_initial_state("synthetic_a", "2026-09-28", "2026-09-29")
++    payload = state.to_dict()
++    if mutation == "missing":
++        payload["frozen_context"].pop("binding")
++    elif mutation == "downgrade":
++        payload["schema_version"] = states.SCHEMA_VERSION
++    else:
++        payload["frozen_context"]["binding"]["semantics"]["currency"] = "EUR"
++    path = tmp_path / "bad.json"
++    write_json(path, payload)
++    with pytest.raises(binding.BindingError):
++        states.load_state(path)
++
++
++def edit_csv(path, mutator):
++    with path.open(encoding="utf-8-sig", newline="") as handle:
++        reader = csv.DictReader(handle)
++        columns = reader.fieldnames
++        rows = list(reader)
++    mutator(rows)
++    with path.open("w", encoding="utf-8-sig", newline="") as handle:
++        writer = csv.DictWriter(handle, fieldnames=columns)
++        writer.writeheader()
++        writer.writerows(rows)
++
++
++@pytest.fixture
++def fresh(environment, tmp_path):
++    account_paths = paths.build_paper_account_paths("synthetic_a")
++    # Only synthetic tmp artifacts. The production seed writer is deliberately unchanged.
++    initialize_paper_account(account_id="synthetic_a", initial_cash=12345, currency="USD",
++                             date_str="2026-09-28", confirm_create=True, account_root=account_paths.root)
++    edit_csv(account_paths.account_snapshot_path, lambda rows: rows[0].update(account_id="synthetic_a"))
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    return dict(account_id="synthetic_a", account_paths=account_paths, workspace=workspace,
++                authoritative_workspace=workspace, data_date="2026-09-28", trade_date="2026-09-29",
++                calendar=MarketCalendar("US", "America/New_York", date(2026, 1, 1), date(2026, 12, 31), frozenset()))
++
++
++def tree_bytes(root):
++    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
++
++
++def test_fresh_eligible_no_mutation(fresh, tmp_path):
++    before = tree_bytes(tmp_path)
++    result = validate_prepare_first_request(**fresh)
++    assert result["eligible"], result
++    assert result["next_action"] == "VALIDATED_NOT_PREPARED"
++    assert tree_bytes(tmp_path) == before
++
++
++@pytest.mark.parametrize("field,value", [("account_id", ""), ("account_id", "synthetic_b"),
++    ("currency", "EUR"), ("cash", "12344"), ("initial_cash", "999"),
++    ("snapshot_date", "2026-09-27"), ("cash", "nan"), ("position_count", "1")])
++def test_invalid_bootstrap_blocked(fresh, field, value):
++    edit_csv(fresh["account_paths"].account_snapshot_path, lambda rows: rows[0].update({field: value}))
++    assert not validate_prepare_first_request(**fresh)["eligible"]
++
++
++@pytest.mark.parametrize("artifact", ["execution_log_path", "position_snapshot_path"])
++def test_execution_or_position_history_blocked(fresh, artifact):
++    path = getattr(fresh["account_paths"], artifact)
++    def add(rows):
++        with path.open(encoding="utf-8-sig") as handle:
++            columns = next(csv.reader(handle))
++        rows.append({key: "old" for key in columns})
++    edit_csv(path, add)
++    result = validate_prepare_first_request(**fresh)
++    assert not result["eligible"]
++    assert any("history_present" in reason for reason in result["blockers"])
++
++
++@pytest.mark.parametrize("kind", ["completed", "no_action", "failed", "recovery", "gap", "prepared"])
++def test_run_and_recovery_history_never_fresh(fresh, kind):
++    workspace = fresh["workspace"]
++    state = states.create_initial_state("synthetic_a", "2026-09-28", "2026-09-29")
++    if kind in ("completed", "no_action", "failed", "prepared"):
++        payload = state.to_dict()
++        if kind == "failed":
++            payload["current_status"] = "FAILED"
++        elif kind in ("completed", "no_action"):
++            payload.update(current_stage="F", current_status="PASS", last_completed_step=21,
++                           last_completed_stage="F", stage_status={k: "PASS" for k in states.STAGE_IDS})
++        write_json(states.get_state_path_for_context(workspace, "synthetic_a", "2026-09-28", "2026-09-29"), payload)
++    else:
++        dirname = "operational_no_trade_gaps" if kind == "gap" else "runbook_recoveries"
++        write_json(workspace / dirname / "hash.json", {"account_id": "synthetic_a"})
++    assert not validate_prepare_first_request(**fresh)["eligible"]
++
++
++@pytest.mark.parametrize("kind", ["missing", "extra", "wrong_workspace", "wrong_root", "wrong_date", "binding", "current"])
++def test_partial_and_context_conflicts_blocked(fresh, tmp_path, kind):
++    if kind == "missing":
++        fresh["account_paths"].execution_log_path.unlink()
++    elif kind == "extra":
++        (fresh["account_paths"].root / "partial.tmp").write_text("partial")
++    elif kind == "wrong_workspace":
++        fresh["authoritative_workspace"] = tmp_path / "other_workspace"
++    elif kind == "wrong_root":
++        fresh["account_paths"] = replace(fresh["account_paths"], root=tmp_path / "other_account")
++    elif kind == "wrong_date":
++        fresh["trade_date"] = "2026-09-30"
++    elif kind == "binding":
++        fresh["expected_binding"] = resolve()
++        fresh["expected_binding"]["digest"] = "bad"
++    else:
++        path = fresh["account_paths"].current_state_snapshot_path(fresh["data_date"])
++        payload = json.loads(path.read_text())
++        payload["applied_trade_ids"] = ["old"]
++        write_json(path, payload)
++    assert not validate_prepare_first_request(**fresh)["eligible"]
++
++@pytest.mark.parametrize("kind", ["duplicate", "unknown_schema", "noninteger", "nan", "universe_extra"])
++def test_registry_contract_rejects_malformed_content(environment, kind):
++    _, path, _, registry = environment
++    if kind == "duplicate":
++        registry["strategy"].append(copy.deepcopy(registry["strategy"][0]))
++    elif kind == "unknown_schema":
++        registry["schema_version"] = "unknown"
++    elif kind == "universe_extra":
++        registry["universe"][0]["content"]["safety_override"] = True
++    else:
++        registry["strategy"][0]["content"]["parameters"]["entry_period"] = 1.5 if kind == "noninteger" else float("nan")
++    write_json(path, registry)
++    with pytest.raises(binding.BindingError):
++        resolve()
++
++
++def test_existing_frozen_state_cannot_be_replaced_after_profile_change(environment, tmp_path):
++    first = states.create_initial_state("synthetic_a", "2026-09-28", "2026-09-29")
++    path = tmp_path / "state.json"
++    states.save_state(first, path)
++    before = path.read_bytes()
++    _, registry_path, _, registry = environment
++    registry["strategy"][0]["content"]["parameters"]["entry_period"] = 22
++    write_json(registry_path, registry)
++    replacement = states.create_initial_state("synthetic_a", "2026-09-28", "2026-09-29")
++    with pytest.raises(ValueError, match="rewrite_forbidden"):
++        states.save_state(replacement, path)
++    assert path.read_bytes() == before
++
++
++def test_bound_state_requires_binding_at_save(environment, tmp_path):
++    state = states.create_initial_state("synthetic_a", "2026-09-28", "2026-09-29")
++    state = replace(state, frozen_context=replace(state.frozen_context, binding=None))
++    with pytest.raises(binding.BindingError):
++        states.save_state(state, tmp_path / "missing" / "state.json")
++    assert not (tmp_path / "missing").exists()
++
++
++def test_fresh_other_account_history_nonimpact(fresh):
++    write_json(fresh["workspace"] / "runbook_recoveries" / "other.json", {"account_id": "synthetic_b"})
++    assert validate_prepare_first_request(**fresh)["eligible"]
++
++
++def test_unmodified_bootstrap_blank_seed_is_rejected(environment, tmp_path):
++    ap = paths.build_paper_account_paths("synthetic_a")
++    initialize_paper_account(account_id="synthetic_a", initial_cash=12345, currency="USD",
++                             date_str="2026-09-28", confirm_create=True, account_root=ap.root)
++    workspace = tmp_path / "workspace"
++    workspace.mkdir()
++    result = validate_prepare_first_request(
++        account_id="synthetic_a", account_paths=ap, workspace=workspace, authoritative_workspace=workspace,
++        data_date="2026-09-28", trade_date="2026-09-29",
++        calendar=MarketCalendar("US", "America/New_York", date(2026, 1, 1), date(2026, 12, 31), frozenset()),
++    )
++    assert not result["eligible"]
++    assert any("blank_account_id" in e for e in result["blockers"])
++
++
++def test_binding_aware_recovery_preserves_evidence(environment, tmp_path, monkeypatch):
++    from core import runbook_recovery, runbook_day_rollover
++    from tests.test_runbook_recovery import _seed_incident, _arguments, ACCOUNT_ID
++    account_path, _, payload, _ = environment
++    payload["accounts"][0]["account_id"] = ACCOUNT_ID
++    payload["default_account_id"] = ACCOUNT_ID
++    write_json(account_path, payload)
++    monkeypatch.setattr(paths, "PAPER_ACCOUNTS_ROOT", tmp_path / "outputs" / "paper_accounts")
++    workspace, state_path, _ = _seed_incident(tmp_path)
++    state = states.load_state(state_path)
++    assert state.schema_version == states.BINDING_STATE_SCHEMA_VERSION
++    source_bytes = state_path.read_bytes()
++    result = runbook_recovery.authorize_recovery(**_arguments(workspace))
++    assert result["runner_result"] == "PASS", result
++    validation = runbook_recovery.validate_recovery_evidence(workspace, state_path, state, _arguments(workspace)["calendar"])
++    assert validation["valid"], validation
++    assert state_path.read_bytes() == source_bytes
++    assert validation["payload"]["source_frozen_context"]["binding"] == state.frozen_context.binding
++    rollover = runbook_day_rollover.preview_rollover(workspace, ACCOUNT_ID, _arguments(workspace)["calendar"], confirm_paper_test=True)
++    assert rollover["runner_result"] == "PASS", rollover
++
++@pytest.mark.parametrize("field,value", [("cash_ratio_cost_basis", "0.5"), ("cash_ratio_market_value", "0"),
++                                          ("realized_pnl_by_symbol", '{"AAA":1}'), ("unrealized_pnl_pct", "0.1")])
++def test_bootstrap_initial_metrics_must_agree(fresh, field, value):
++    edit_csv(fresh["account_paths"].account_snapshot_path, lambda rows: rows[0].update({field: value}))
++    assert not validate_prepare_first_request(**fresh)["eligible"]
++
++
++def test_live_account_not_fresh_paper_eligible(fresh, environment):
++    path, _, payload, _ = environment
++    payload["accounts"][0]["account_type"] = "live"
++    write_json(path, payload)
++    assert "fresh_paper_account_mode_required" in validate_prepare_first_request(**fresh)["blockers"]
++
++
++def test_legacy_context_dict_and_asdict_have_no_new_field():
++    from dataclasses import asdict
++    context = states.FrozenRunbookContext("synthetic_a", "2026-09-28", "2026-09-29")
++    expected = {"account_id": "synthetic_a", "data_date": "2026-09-28", "trade_date": "2026-09-29"}
++    assert context.__dict__ == expected
++    assert asdict(context) == expected
++
++
++def test_unknown_new_account_state_cannot_fall_back(environment):
++    with pytest.raises(profiles.PaperAccountProfileError):
++        states.create_initial_state("unknown_account", "2026-09-28", "2026-09-29")
+diff --git a/docs/TRD/mfu_ml1_2a_binding_frozen_fresh.md b/docs/TRD/mfu_ml1_2a_binding_frozen_fresh.md
+new file mode 100644
+index 0000000..2dc6e1e
+--- /dev/null
++++ b/docs/TRD/mfu_ml1_2a_binding_frozen_fresh.md
+@@ -0,0 +1,108 @@
++# MFU-ML1-2A: versioned binding, frozen state, and fresh eligibility
++
++## Scope and activation
++
++This contract resolves and freezes configuration evidence. It does not inject
++strategy parameters into make_config/screener/Daily Plan or change runtime universe
++selection. Runtime consumption and pre-plan consumed-value verification belong to
++ML1-2B. No operational account or production profile is registered by this change.
++
++## Account and registry schema
++
++Existing paper_account_profiles.v1 loading/default fallback remains the legacy
++path. paper_account_profiles.v2 requires strategy_profile + strategy_version and
++universe_profile + universe_version on every entry. Versions are explicit strings;
++there is no latest lookup. Unknown schema, missing references, unknown account,
++unknown registry version and unsupported parameters fail closed on the new path.
++
++The canonical registry is config/paper_binding_profiles.json, resolved through
++core.paths.paper_binding_registry_path. It is not created automatically. Schema:
++
++```json
++{
++  "schema_version": "paper_binding_profiles.v1",
++  "strategy": [{"id": "synthetic_strategy", "version": "v1",
++                "content": {"parameters": {"entry_period": 12}}}],
++  "universe": [{"id": "synthetic_universe", "version": "v1",
++                "content": {"kind": "symbols", "symbols": ["AAA", "BBB"]}}]
++}
++```
++
++This is a synthetic illustration, not a production configuration. An alternate
++universe definition is {"kind":"shared_snapshot"}; its actual as-of membership
++remains the later runtime integration's responsibility. Unknown universe fields
++are rejected. Symbol sets are sorted and duplicate/invalid symbols rejected.
++
++The strategy allowlist is deliberately limited to existing indicator periods,
++weights and score threshold. Risk/capital/hedge/routing/safety overrides, unknown
++keys, nonfinite numbers, negative weights and noninteger periods are rejected.
++No defaults are invented for missing strategy keys: the existing base policy is
++captured separately, and runtime assembly remains make_config's responsibility.
++
++## Resolved evidence and digest
++
++core.paper_account_binding.resolve_account_binding returns paper_account_binding.v1
++with semantics and digest. Semantics contain account type/currency, exact refs,
++resolved strategy/universe content, and a detached copy of common SSOT base/regime/
++risk/benchmark/safety policy obtained from make_config without account overrides.
++It is expected-policy evidence, not proof of runtime account strategy consumption.
++
++sha256_payload is reused. Equivalent integral numeric values and universe ordering
++are normalized. Account ID is checked separately through frozen runbook identity.
++Other accounts, display names, Notion profile, timestamps, paths, bootstrap cash,
++registry order, descriptive regime text and logging switches are excluded. The
++base policy excludes simulation initial_capital and start/end dates. Meaningful
++policy changes alter the digest. Existing config objects are never mutated.
++
++## Frozen state and compatibility
++
++Legacy runbook_state.v1 keeps the original three-field FrozenRunbookContext,
++including its __dict__/asdict form. No new field is synthesized on load or save.
++
++A new run created against a v2 account registry uses runbook_state.v2 and
++BindingFrozenRunbookContext (the existing context extended with binding).
++The ID remains account_id + DATA_DATE + TRADE_DATE; execution contract v3 is unchanged.
++Deserializer verifies binding presence/shape/digest; validate_state also verifies
++integrity. save_state, start_stage and lifecycle entry compare new-state binding
++with the current canonical resolver. save_state rejects replacing existing frozen
++identity/binding or changing an existing file between v1 and v2.
++
++Historical reads validate internal evidence, without looking up today's registry.
++Already-existing legacy contexts are loaded before resolving a prospective new
++state, so profile registration cannot silently migrate progressed/completed runs.
++Recovery still uses its existing source context and file hashes. A synthetic
++binding-aware recovery/rollover test confirms the full frozen evidence round-trip.
++No recovery schema or identity migration is introduced.
++
++There is no shared code-version provider; code baseline audit is recorded in the
++review bundle only. Runtime code-SHA compatibility remains an unresolved design
++item, separate from the binding digest. No Git subprocess/provider was added.
++
++## Read-only first-run validation
++
++core.paper_account_fresh.validate_prepare_first_request checks canonical profile,
++binding, PAPER/TEST mode, account paths, authoritative workspace, calendar/date pair,
++bootstrap completeness and content, identity/currency/cash consistency, empty
++execution/position/current-state evidence, and absence of lifecycle/recovery/gap
++history. It reuses existing snapshot identity, bootstrap manifest, state loading,
++calendar and lifecycle directory contracts. Unattributable corrupt history fails
++closed. Valid history belonging only to another account is not a blocker.
++
++DATA_DATE equals the seed effective date; TRADE_DATE must be the calendar's next
++trading day. Missing bootstrap files, unexpected account files/directories,
++completed/NO_ACTION/failed/READY runs, recovery evidence, nonempty ledgers,
++identity or cash mismatch, and invalid headers/values are non-fresh. Any run
++history makes a new fresh request ineligible; duplicate prepared-request reuse
++is a separate ML1-3 responsibility.
++
++A successful result says VALIDATED_NOT_PREPARED, never ready. It performs no writes,
++repairs, market refresh, ready-marker creation or account initialization. Bootstrap's
++known blank account_id seed is rejected, not repaired. The writer fix and actual
++multi-file prepare/resume belong to ML1-3. Market readiness is a separate later gate.
++
++## Tests
++
++See tests/test_ml1_2a_binding_fresh.py for synthetic-only binding, frozen state,
++drift, recovery and fresh eligibility coverage. Existing profile/state/recovery/
++NTG/rollover/retirement and Stage B recovery/failed closure tests form the focused
++regression scope. Review artifacts record exact commands and failures/resolutions.
