@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
 
 import config
 import market_analyzer
-from screener.screener import build_screener_results
+from screener.screener import DEFAULT_SCREEN_START_DATE, build_screener_results
 from core.portfolio_state_manager import load_current_state
 from core.target_portfolio_state import (
     build_target_portfolio_state, 
@@ -26,9 +26,15 @@ from core.target_portfolio_state import (
 from core.paths import front_daily_action_plan_path, market_db_path
 from core.backtest_engine import evaluate_switching_opportunity
 from core.config_factory import make_config, get_regime_config
-from core.decision_core import compute_candidate_score
+from core.decision_core import compute_candidate_score, is_enterable_candidate
 from core.paper_config_snapshot import save_paper_config_snapshot
 from core.paper_config_hash import PAPER_CONFIG_HASH_POLICY, compute_paper_config_hash_from_file
+from core.paper_runtime_binding import (
+    build_runtime_config,
+    record_runtime_universe,
+    validate_pinned_runtime_evidence,
+    validate_runtime_consumption,
+)
 from core.paper_execution_intent import build_execution_intent
 from core.stage_a_asof_contract import (
     StageAAsOfContext,
@@ -140,6 +146,28 @@ def resolve_official_universe_membership(
         }
     )
     return symbols, lineage
+
+
+def materialize_explicit_entry_universe(
+    symbols: List[str],
+    *,
+    end_date: str,
+    minimum_rows: int = 200,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Resolve explicit entry symbols with enough as-of market data to screen."""
+    materialized: list[str] = []
+    excluded: list[dict[str, str]] = []
+    for symbol in sorted(set(symbols)):
+        frame = data_manager.get_price_data(
+            symbol,
+            start_date=DEFAULT_SCREEN_START_DATE,
+            end_date=end_date,
+        )
+        if frame is None or len(frame) < minimum_rows:
+            excluded.append({"symbol": symbol, "reason": "missing_market_data"})
+        else:
+            materialized.append(symbol)
+    return materialized, excluded
 
 
 def calculate_candidate_rs_val(
@@ -694,6 +722,7 @@ def build_daily_plan_json_payload(
     config_snapshot_path: str | Path | None = None,
     state_snapshot_path: str | Path | None = None,
     as_of_lineage: Dict[str, Any] | None = None,
+    runtime_binding: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     resolved_fingerprints = build_daily_plan_fingerprints(
         fingerprints=fingerprints,
@@ -716,6 +745,8 @@ def build_daily_plan_json_payload(
     }
     if as_of_lineage is not None:
         payload["as_of_lineage"] = as_of_lineage
+    if runtime_binding is not None:
+        payload["runtime_binding"] = runtime_binding
     return payload
 
 
@@ -753,8 +784,12 @@ def write_daily_plan_json_sidecar(
     return output_path
 
 
-def is_buy_signal_candidate(candidate: Dict[str, Any], score_threshold: float) -> bool:
-    """Match the backtest buy_signal gate: score >= threshold and rs_val > 0."""
+def is_buy_signal_candidate(
+    candidate: Dict[str, Any],
+    score_threshold: float,
+    regime: str = "BULL",
+) -> bool:
+    """Apply the shared regime/score gate and the positive-RS buy requirement."""
     score = candidate.get("score")
     rs_val = candidate.get("rs_val")
 
@@ -767,12 +802,13 @@ def is_buy_signal_candidate(candidate: Dict[str, Any], score_threshold: float) -
     if pd.isna(score) or pd.isna(rs_val):
         return False
 
-    return bool(score >= float(score_threshold) and rs_val > 0)
+    return bool(is_enterable_candidate(score, float(score_threshold), regime) and rs_val > 0)
 
 
 def filter_switch_candidates_for_daily_plan(
     df_candidates: pd.DataFrame,
     score_threshold: float,
+    regime: str = "BULL",
 ) -> pd.DataFrame:
     """Restrict switching candidates to backtest-like buy_signal candidates only."""
     if df_candidates.empty:
@@ -783,7 +819,7 @@ def filter_switch_candidates_for_daily_plan(
         switch_candidates["rs_val"] = 0.0
 
     mask = switch_candidates.apply(
-        lambda row: is_buy_signal_candidate(row, score_threshold),
+        lambda row: is_buy_signal_candidate(row, score_threshold, regime),
         axis=1,
     )
     return switch_candidates.loc[mask].copy()
@@ -1150,6 +1186,7 @@ def generate_daily_plan(
     asof_context: StageAAsOfContext | None = None,
     pinned_config_snapshot: Dict[str, Any] | None = None,
     account_lineage: Dict[str, Any] | None = None,
+    account_binding: Dict[str, Any] | None = None,
 ) -> str:
     """
     일일 판단 산출물(Action Plan)을 생성하고 파일로 저장합니다.
@@ -1188,7 +1225,26 @@ def generate_daily_plan(
             f"market selected date {data_date} is after DATA_DATE {asof_context.data_date}",
             source="market",
         )
-    if pinned_config_snapshot is not None:
+    runtime_binding_evidence: Dict[str, Any] | None = None
+    if account_binding is not None:
+        derived_config, runtime_binding_evidence = build_runtime_config(
+            account_binding,
+            active_regime=regime,
+            start_date=data_date,
+            end_date=data_date,
+        )
+        runtime_binding_evidence["account_id"] = account_id
+        if pinned_config_snapshot is not None:
+            merged_config = dict(pinned_config_snapshot["full_config"])
+            validate_runtime_consumption(merged_config, runtime_binding_evidence)
+            validate_pinned_runtime_evidence(
+                pinned_config_snapshot.get("runtime_binding"),
+                runtime_binding_evidence,
+                include_materialization=False,
+            )
+        else:
+            merged_config = derived_config
+    elif pinned_config_snapshot is not None:
         merged_config = dict(pinned_config_snapshot["full_config"])
     else:
         base_config = make_config({}, data_date, data_date)
@@ -1202,17 +1258,66 @@ def generate_daily_plan(
         end_date=data_date,
         start_date=bench_start,
     )
-    universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
-    universe_snapshot = universe_selection.get("snapshot", {})
-    universe_metadata = universe_selection.get("metadata", {})
     universe_lineage: Dict[str, Any] | None = None
     official_universe_symbols: list[str] | None = None
-    if asof_context is not None:
-        official_universe_symbols, universe_lineage = resolve_official_universe_membership(
-            universe_snapshot,
-            universe_metadata,
-            asof_context,
-        )
+    universe_exclusions: list[dict[str, str]] = []
+    requested_entry_universe: list[str] = []
+    if runtime_binding_evidence is not None:
+        universe_definition = runtime_binding_evidence["entry_universe_definition"]
+        if universe_definition["kind"] == "shared_snapshot":
+            universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
+            universe_snapshot = universe_selection.get("snapshot", {})
+            universe_metadata = dict(universe_selection.get("metadata", {}))
+            if asof_context is not None:
+                official_universe_symbols, universe_lineage = resolve_official_universe_membership(
+                    universe_snapshot,
+                    universe_metadata,
+                    asof_context,
+                )
+            else:
+                official_universe_symbols = sorted({
+                    str(symbol).strip().upper()
+                    for symbol in universe_snapshot.get("active_symbols", [])
+                    if str(symbol).strip()
+                })
+            requested_entry_universe = list(official_universe_symbols)
+        else:
+            universe_snapshot = {"removed": []}
+            requested_entry_universe = list(universe_definition["symbols"])
+            official_universe_symbols, universe_exclusions = materialize_explicit_entry_universe(
+                requested_entry_universe,
+                end_date=signal_date,
+            )
+            reference = runtime_binding_evidence["universe_reference"]
+            universe_metadata = {
+                "policy": "account_binding_explicit",
+                "source": f"binding:{reference['id']}:{reference['version']}",
+                "binding_digest": runtime_binding_evidence["binding_digest"],
+                "requested_entry_universe": requested_entry_universe,
+                "materialized_entry_universe": official_universe_symbols,
+                "excluded_symbols": universe_exclusions,
+                "warning": None,
+            }
+            if asof_context is not None:
+                universe_lineage = {
+                    "source": universe_metadata["source"],
+                    "effective_as_of": asof_context.data_date,
+                    "selected_max_date": asof_context.data_date,
+                    "observed_at": asof_context.observed_at,
+                    "revision": runtime_binding_evidence["binding_digest"],
+                    "capture_mode": "frozen_account_binding",
+                    "validator_result": "PASS",
+                }
+    else:
+        universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
+        universe_snapshot = universe_selection.get("snapshot", {})
+        universe_metadata = universe_selection.get("metadata", {})
+        if asof_context is not None:
+            official_universe_symbols, universe_lineage = resolve_official_universe_membership(
+                universe_snapshot,
+                universe_metadata,
+                asof_context,
+            )
     removed_universe_symbols = {
         str(symbol).strip().upper()
         for symbol in universe_snapshot.get("removed", [])
@@ -1220,6 +1325,36 @@ def generate_daily_plan(
     }
     removed_candidate_exclusions: List[Dict[str, Any]] = []
     stale_holdings_alert: List[str] = []
+    if runtime_binding_evidence is not None:
+        materialized_entry_universe = list(official_universe_symbols or [])
+        existing_holdings = [str(symbol).strip().upper() for symbol in current_state.current_symbols]
+        managed_symbols = sorted({
+            *materialized_entry_universe,
+            *existing_holdings,
+            *(str(symbol).strip().upper() for symbol in current_state.hedge_symbols),
+            str(benchmark_symbol).strip().upper(),
+        })
+        runtime_binding_evidence = record_runtime_universe(
+            runtime_binding_evidence,
+            requested=requested_entry_universe,
+            materialized=materialized_entry_universe,
+            excluded=universe_exclusions,
+            existing_holdings=existing_holdings,
+            managed_symbols=managed_symbols,
+        )
+        validate_runtime_consumption(merged_config, runtime_binding_evidence)
+        if pinned_config_snapshot is not None:
+            validate_pinned_runtime_evidence(
+                pinned_config_snapshot.get("runtime_binding"),
+                runtime_binding_evidence,
+                include_materialization=True,
+            )
+        universe_metadata = {
+            **universe_metadata,
+            "requested_entry_universe": runtime_binding_evidence["requested_entry_universe"],
+            "materialized_entry_universe": runtime_binding_evidence["materialized_entry_universe"],
+            "excluded_symbols": runtime_binding_evidence["excluded_symbols"],
+        }
     
     # 3. 신규 매수 후보 스크리닝 (Raw Signals)
     screener_kwargs: Dict[str, Any] = {
@@ -1228,6 +1363,11 @@ def generate_daily_plan(
     }
     if official_universe_symbols is not None:
         screener_kwargs["tickers"] = official_universe_symbols
+    if runtime_binding_evidence is not None:
+        screener_kwargs["runtime_config"] = merged_config
+        # Bound plans defer entry filtering until the final score includes all
+        # frozen strategy signals plus relative strength below.
+        screener_kwargs["apply_entry_filter"] = False
     df_candidates = build_screener_results(**screener_kwargs)
     if asof_context is not None and not df_candidates.empty:
         candidate_date_col = "Date" if "Date" in df_candidates.columns else "date" if "date" in df_candidates.columns else None
@@ -1353,7 +1493,7 @@ def generate_daily_plan(
             'rs_val': c.get('rs_val', 0.0),
             'rs_calc_success': c.get('rs_calc_success', True),
             'latest_price_date': latest_price_date,
-            'entry_signal': is_buy_signal_candidate(c, score_threshold),
+            'entry_signal': is_buy_signal_candidate(c, score_threshold, regime),
             'price': c['close']
         })
     print(
@@ -1425,8 +1565,6 @@ def generate_daily_plan(
         # 국면별 가중치 가져오기 (config.REGIME_RULES 참조)
         candidates_by_symbol = df_candidates.set_index('symbol', drop=False) if 'symbol' in df_candidates.columns else pd.DataFrame()
         
-        from core.decision_core import compute_candidate_score
-        
         for s in non_hedge_symbols:
             try:
                 # 최신 지표가 포함된 데이터 필요 (screener/indicator.py 활용 권장하나, 여기서는 후보군 생성 시 계산된 값 참조가 어려우므로 단순화된 비교 수행)
@@ -1484,8 +1622,8 @@ def generate_daily_plan(
                 for row in holding_score_results
                 if row["valid"] and row["position_return"] is not None
             ]
-            c_df = filter_switch_candidates_for_daily_plan(df_candidates, score_threshold)
-            if switching_scores and not df_candidates.empty:
+            c_df = filter_switch_candidates_for_daily_plan(df_candidates, score_threshold, regime)
+            if switching_scores and not c_df.empty:
                 switch_pairs = evaluate_switching_opportunity(c_df, switching_scores, merged_config)
             else:
                 print("[WARN] Skipping active switching: no valid holding scores could be computed.")
@@ -1738,6 +1876,7 @@ def generate_daily_plan(
                 universe_metadata=universe_metadata,
                 asof_context=asof_context,
                 immutable=asof_context is not None,
+                runtime_binding=runtime_binding_evidence,
             )
 
     if asof_context is not None:
@@ -1825,6 +1964,7 @@ def generate_daily_plan(
             config_snapshot_path=config_snapshot_path,
             state_snapshot_path=state_snapshot_path,
             as_of_lineage=as_of_lineage,
+            runtime_binding=runtime_binding_evidence,
         )
         write_daily_plan_json_sidecar(path=sidecar_path, payload=sidecar_payload)
         

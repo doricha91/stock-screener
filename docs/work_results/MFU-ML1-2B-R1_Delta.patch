@@ -1,0 +1,418 @@
+diff --git a/core/daily_plan_generator.py b/core/daily_plan_generator.py
+index 381bba8..48cc025 100644
+--- a/core/daily_plan_generator.py
++++ b/core/daily_plan_generator.py
+@@ -158,14 +158,11 @@ def materialize_explicit_entry_universe(
+     materialized: list[str] = []
+     excluded: list[dict[str, str]] = []
+     for symbol in sorted(set(symbols)):
+-        try:
+-            frame = data_manager.get_price_data(
+-                symbol,
+-                start_date=DEFAULT_SCREEN_START_DATE,
+-                end_date=end_date,
+-            )
+-        except Exception:
+-            frame = pd.DataFrame()
++        frame = data_manager.get_price_data(
++            symbol,
++            start_date=DEFAULT_SCREEN_START_DATE,
++            end_date=end_date,
++        )
+         if frame is None or len(frame) < minimum_rows:
+             excluded.append({"symbol": symbol, "reason": "missing_market_data"})
+         else:
+@@ -1363,6 +1360,9 @@ def generate_daily_plan(
+         screener_kwargs["tickers"] = official_universe_symbols
+     if runtime_binding_evidence is not None:
+         screener_kwargs["runtime_config"] = merged_config
++        # Bound plans defer entry filtering until the final score includes all
++        # frozen strategy signals plus relative strength below.
++        screener_kwargs["apply_entry_filter"] = False
+     df_candidates = build_screener_results(**screener_kwargs)
+     if asof_context is not None and not df_candidates.empty:
+         candidate_date_col = "Date" if "Date" in df_candidates.columns else "date" if "date" in df_candidates.columns else None
+@@ -1560,8 +1560,6 @@ def generate_daily_plan(
+         # 국면별 가중치 가져오기 (config.REGIME_RULES 참조)
+         candidates_by_symbol = df_candidates.set_index('symbol', drop=False) if 'symbol' in df_candidates.columns else pd.DataFrame()
+         
+-        from core.decision_core import compute_candidate_score
+-        
+         for s in non_hedge_symbols:
+             try:
+                 # 최신 지표가 포함된 데이터 필요 (screener/indicator.py 활용 권장하나, 여기서는 후보군 생성 시 계산된 값 참조가 어려우므로 단순화된 비교 수행)
+diff --git a/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md b/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
+index b0b5e3c..600c93e 100644
+--- a/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
++++ b/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
+@@ -32,7 +32,9 @@ The only account strategy base is `semantics.effective_strategy_base`. Runtime v
+ 
+ The runtime assembler verifies effective strategy values, the complete regime policy, and shared constraints before consumers run. Pinned config snapshots are checked against the same values. Config dictionaries are copied and passed as call arguments; module globals are not patched.
+ 
+-The screener accepts an optional per-call runtime config. Indicator preparation, strategy application, scoring weights, and the entry threshold use that config only for the bound path. Calls without runtime injection retain the prior defaults.
++The screener accepts an optional per-call runtime config. Bound calls prepare and expose the complete ensemble signal set (`turtle`, `rsi`, `sma`, `bbands`, `macd`, `bbs`, `dema`, `obv`, `mfi`, and `vol_spike`) and score it with the frozen runtime weights. Calls without runtime injection retain the prior seven-weight defaults and filtering behavior.
++
++For a bound Daily Plan, the screener does not apply its preliminary entry threshold. It returns the complete scored signal rows, and Daily Plan is the authoritative final scoring and threshold location: it recomputes the ten-weight ensemble score, adds the configured positive-RS weight, and only then applies `score_threshold` and the existing positive-RS entry gate. This prevents a candidate that can pass the final frozen-strategy-plus-RS semantics from being discarded by an incomplete preliminary score. Other screener callers keep the existing immediate threshold behavior.
+ 
+ ## Universe contract
+ 
+@@ -44,6 +46,8 @@ An explicit-symbol binding sorts and checks each requested symbol against the sa
+ reason = missing_market_data
+ ```
+ 
++Only normal data insufficiency (`None`, an empty frame, or fewer than 200 rows) receives this exclusion. Database, permission, read, and other unexpected exceptions propagate and abort Daily Plan generation; they are not converted into `missing_market_data` evidence.
++
+ Entry eligibility and position management remain separate:
+ 
+ ```text
+diff --git a/screener/screener.py b/screener/screener.py
+index ea73d49..80a7612 100644
+--- a/screener/screener.py
++++ b/screener/screener.py
+@@ -23,6 +23,19 @@ STRATEGY_WEIGHTS = {
+     "dema": 1.0,
+ }
+ 
++RUNTIME_STRATEGY_WEIGHTS = {
++    "turtle": 1.0,
++    "rsi": 1.0,
++    "sma": 1.0,
++    "bbands": 1.0,
++    "macd": 1.0,
++    "bbs": 1.0,
++    "dema": 1.0,
++    "obv": 0.5,
++    "mfi": 0.5,
++    "vol_spike": 0.5,
++}
++
+ DEFAULT_PARAMS = {
+     "entry_period": 20,
+     "exit_period": 10,
+@@ -65,6 +78,8 @@ def _prepare_data_for_ensemble(
+         df = indicator.add_macd_indicators(df, effective_params)
+         df = indicator.add_bbs_indicators(df, effective_params)
+         df = indicator.add_dema_indicators(df, effective_params)
++        if params is not None:
++            df = indicator.add_volume_indicators(df, effective_params)
+     except Exception:
+         return None
+ 
+@@ -83,6 +98,7 @@ def build_screener_results(
+     start_date: str = DEFAULT_SCREEN_START_DATE,
+     end_date: str | None = None,
+     runtime_config: dict | None = None,
++    apply_entry_filter: bool = True,
+ ) -> pd.DataFrame:
+     state = _resolve_market_state(market_state)
+     regime = state["regime"]
+@@ -105,9 +121,10 @@ def build_screener_results(
+     print(f"  Total tickers: {len(tickers)}")
+     recommendations: list[dict] = []
+     effective_params = {**DEFAULT_PARAMS, **(runtime_config or {})}
++    weight_defaults = RUNTIME_STRATEGY_WEIGHTS if runtime_config is not None else STRATEGY_WEIGHTS
+     effective_weights = {
+         name: effective_params.get(f"{name}_weight", weight)
+-        for name, weight in STRATEGY_WEIGHTS.items()
++        for name, weight in weight_defaults.items()
+     }
+     effective_threshold = effective_params.get("score_threshold", SCORE_THRESHOLD)
+ 
+@@ -137,17 +154,25 @@ def build_screener_results(
+             latest_row = df.iloc[-1]
+             score, reasons = compute_candidate_score(latest_row, effective_weights)
+ 
+-            if is_enterable_candidate(score, effective_threshold, regime):
+-                recommendations.append(
++            if apply_entry_filter and not is_enterable_candidate(score, effective_threshold, regime):
++                continue
++
++            recommendation = {
++                "Symbol": symbol,
++                "Date": latest_row.name.strftime("%Y-%m-%d"),
++                "Price": latest_row["close"],
++                "Score": score,
++                "Strategies": ", ".join(reasons),
++                "Market": regime,
++            }
++            if runtime_config is not None:
++                recommendation.update(
+                     {
+-                        "Symbol": symbol,
+-                        "Date": latest_row.name.strftime("%Y-%m-%d"),
+-                        "Price": latest_row["close"],
+-                        "Score": score,
+-                        "Strategies": ", ".join(reasons),
+-                        "Market": regime,
++                        f"signal_{name}": latest_row.get(f"signal_{name}", 0)
++                        for name in effective_weights
+                     }
+                 )
++            recommendations.append(recommendation)
+         except Exception:
+             continue
+ 
+diff --git a/tests/test_ml1_2b_runtime_binding.py b/tests/test_ml1_2b_runtime_binding.py
+index d423ed5..9ebd2ab 100644
+--- a/tests/test_ml1_2b_runtime_binding.py
++++ b/tests/test_ml1_2b_runtime_binding.py
+@@ -18,6 +18,11 @@ from scripts import run_paper_daily_plan, runbook_command_registry, runbook_stag
+ from tests.paper_account_test_support import create_initialized_account_paths
+ 
+ 
++RUNTIME_SIGNAL_NAMES = (
++    "turtle", "rsi", "sma", "bbands", "macd", "bbs", "dema", "obv", "mfi", "vol_spike",
++)
++
++
+ def _write_json(path: Path, payload: dict) -> None:
+     path.write_text(json.dumps(payload), encoding="utf-8")
+ 
+@@ -187,6 +192,36 @@ def test_explicit_universe_materialization_records_missing_data(monkeypatch):
+     assert excluded == [{"symbol": "BBB", "reason": "missing_market_data"}]
+ 
+ 
++@pytest.mark.parametrize(
++    "frame",
++    [None, pd.DataFrame(), pd.DataFrame(index=range(199))],
++    ids=["none", "empty", "below-minimum"],
++)
++def test_explicit_universe_normal_data_insufficiency_is_missing_market_data(monkeypatch, frame):
++    monkeypatch.setattr(daily_plan.data_manager, "get_price_data", lambda *args, **kwargs: frame)
++
++    materialized, excluded = daily_plan.materialize_explicit_entry_universe(
++        ["AAA"], end_date="2026-10-01"
++    )
++
++    assert materialized == []
++    assert excluded == [{"symbol": "AAA", "reason": "missing_market_data"}]
++
++
++def test_explicit_universe_unexpected_market_data_exception_propagates(monkeypatch):
++    failure = RuntimeError("market store unavailable")
++
++    def fail(*args, **kwargs):
++        raise failure
++
++    monkeypatch.setattr(daily_plan.data_manager, "get_price_data", fail)
++
++    with pytest.raises(RuntimeError, match="market store unavailable") as exc_info:
++        daily_plan.materialize_explicit_entry_universe(["AAA"], end_date="2026-10-01")
++
++    assert exc_info.value is failure
++
++
+ def test_existing_holdings_are_preserved_outside_entry_universe(binding_environment):
+     frozen = runtime.resolve_runtime_binding("synthetic_a")
+     _, evidence = runtime.build_runtime_config(
+@@ -231,7 +266,14 @@ def test_screener_consumes_per_call_runtime_config(monkeypatch):
+     monkeypatch.setattr(screener, "compute_candidate_score", score)
+     monkeypatch.setattr(screener, "is_enterable_candidate", enterable)
+ 
+-    config = {"entry_period": 7, "turtle_weight": 8.0, "score_threshold": 6.0}
++    config = {
++        "entry_period": 7,
++        "turtle_weight": 8.0,
++        "obv_weight": 2.0,
++        "mfi_weight": 3.0,
++        "vol_spike_weight": 4.0,
++        "score_threshold": 6.0,
++    }
+     result = screener.build_screener_results(
+         tickers=["AAA"], market_state={"regime": "BULL", "plan": {}}, runtime_config=config
+     )
+@@ -239,9 +281,117 @@ def test_screener_consumes_per_call_runtime_config(monkeypatch):
+     assert captured["params"]["entry_period"] == 7
+     assert captured["strategy_params"]["entry_period"] == 7
+     assert captured["weights"]["turtle"] == 8.0
++    assert captured["weights"]["obv"] == 2.0
++    assert captured["weights"]["mfi"] == 3.0
++    assert captured["weights"]["vol_spike"] == 4.0
+     assert captured["threshold"] == 6.0
+ 
+ 
++def _patch_screener_signals(monkeypatch, active_signals: set[str]) -> None:
++    index = pd.date_range("2026-01-01", periods=210)
++    frame = pd.DataFrame({"close": range(210)}, index=index)
++    monkeypatch.setattr(screener.data_manager, "get_price_data", lambda *args, **kwargs: frame.copy())
++    monkeypatch.setattr(screener, "_prepare_data_for_ensemble", lambda df, params=None: df)
++
++    def apply_strategy(df, params):
++        result = df.copy()
++        for name in RUNTIME_SIGNAL_NAMES:
++            result[f"signal_{name}"] = int(name in active_signals)
++        return result
++
++    monkeypatch.setattr(screener.strategy, "apply_ensemble_strategy", apply_strategy)
++
++
++def test_bound_screener_actual_score_uses_all_runtime_weights_without_cross_call_contamination(
++    binding_environment, monkeypatch,
++):
++    _patch_screener_signals(monkeypatch, set(RUNTIME_SIGNAL_NAMES))
++    frozen_a = runtime.resolve_runtime_binding("synthetic_a")
++    frozen_b = runtime.resolve_runtime_binding("synthetic_b")
++    config_a, _ = runtime.build_runtime_config(
++        frozen_a, active_regime="BULL", start_date="x", end_date="x"
++    )
++    config_b, _ = runtime.build_runtime_config(
++        frozen_b, active_regime="BEAR", start_date="x", end_date="x"
++    )
++
++    a_first = screener.build_screener_results(
++        tickers=["AAA"], market_state={"regime": "BULL", "plan": {}},
++        runtime_config=config_a, apply_entry_filter=False,
++    )
++    b_result = screener.build_screener_results(
++        tickers=["AAA"], market_state={"regime": "BEAR", "plan": {}},
++        runtime_config=config_b, apply_entry_filter=False,
++    )
++    a_second = screener.build_screener_results(
++        tickers=["AAA"], market_state={"regime": "BULL", "plan": {}},
++        runtime_config=config_a, apply_entry_filter=False,
++    )
++
++    expected_a = sum(config_a[f"{name}_weight"] for name in RUNTIME_SIGNAL_NAMES)
++    expected_b = sum(config_b[f"{name}_weight"] for name in RUNTIME_SIGNAL_NAMES)
++    assert a_first.iloc[0]["Score"] == expected_a
++    assert b_result.iloc[0]["Score"] == expected_b
++    assert expected_a != expected_b
++    assert a_second.iloc[0]["Score"] == a_first.iloc[0]["Score"]
++    for name in RUNTIME_SIGNAL_NAMES:
++        assert a_first.iloc[0][f"signal_{name}"] == 1
++
++
++def test_bound_screener_can_defer_premature_threshold_for_final_daily_plan_scoring(monkeypatch):
++    _patch_screener_signals(monkeypatch, {"obv"})
++    config = {
++        **{f"{name}_weight": 0.0 for name in RUNTIME_SIGNAL_NAMES},
++        "obv_weight": 1.0,
++        "score_threshold": 2.0,
++    }
++
++    filtered = screener.build_screener_results(
++        tickers=["AAA"], market_state={"regime": "BULL", "plan": {}}, runtime_config=config,
++    )
++    deferred = screener.build_screener_results(
++        tickers=["AAA"], market_state={"regime": "BULL", "plan": {}},
++        runtime_config=config, apply_entry_filter=False,
++    )
++
++    assert filtered.empty
++    assert deferred.iloc[0]["Score"] == 1.0
++    assert deferred.iloc[0]["signal_obv"] == 1
++
++
++def test_unbound_screener_preserves_legacy_seven_weight_scoring(monkeypatch):
++    _patch_screener_signals(monkeypatch, set(RUNTIME_SIGNAL_NAMES))
++
++    result = screener.build_screener_results(
++        tickers=["AAA"], market_state={"regime": "BULL", "plan": {}},
++    )
++
++    assert result.iloc[0]["Score"] == sum(screener.STRATEGY_WEIGHTS.values())
++    assert "signal_obv" not in result.columns
++
++
++def test_bound_indicator_preparation_adds_volume_indicators_without_changing_legacy(monkeypatch):
++    calls: list[str] = []
++    for name in (
++        "add_turtle_indicators", "add_rsi_indicators", "add_sma_indicators",
++        "add_bollinger_band_indicators", "add_macd_indicators", "add_bbs_indicators",
++        "add_dema_indicators",
++    ):
++        monkeypatch.setattr(screener.indicator, name, lambda df, params: df)
++
++    def add_volume(df, params):
++        calls.append("volume")
++        return df
++
++    monkeypatch.setattr(screener.indicator, "add_volume_indicators", add_volume)
++    frame = pd.DataFrame({"close": [1.0]})
++
++    assert screener._prepare_data_for_ensemble(frame, {"obv_weight": 0.5}) is not None
++    assert calls == ["volume"]
++    assert screener._prepare_data_for_ensemble(frame) is not None
++    assert calls == ["volume"]
++
++
+ def _patch_daily_plan_dependencies(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
+     monkeypatch.setattr(daily_plan.market_analyzer, "get_market_state", lambda **kwargs: {
+         "date": "2026-10-01", "regime": "BULL", "trade_halted": False,
+@@ -280,6 +430,7 @@ def test_daily_plan_explicit_binding_controls_entry_stream_and_evidence(
+     payload = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
+     assert captured["screener"]["tickers"] == ["AAA"]
+     assert captured["screener"]["runtime_config"]["entry_period"] == 12
++    assert captured["screener"]["apply_entry_filter"] is False
+     assert payload["runtime_binding"]["requested_entry_universe"] == ["AAA", "BBB"]
+     assert payload["runtime_binding"]["account_id"] == "synthetic_a"
+     assert payload["runtime_binding"]["materialized_entry_universe"] == ["AAA"]
+@@ -310,6 +461,68 @@ def test_daily_plan_shared_snapshot_binding_controls_entry_stream(
+     assert payload["runtime_binding"]["excluded_symbols"] == []
+ 
+ 
++def test_bound_daily_plan_applies_threshold_after_complete_score_and_rs(
++    binding_environment, monkeypatch, tmp_path,
++):
++    captured: dict = {}
++    real_build_target = daily_plan.build_target_portfolio_state
++    _patch_daily_plan_dependencies(monkeypatch, captured)
++
++    def build_candidates(**kwargs):
++        captured["screener"] = kwargs
++        row = {
++            "Symbol": "AAA", "Date": "2026-10-01", "Price": 100.0, "Score": 0.5,
++            **{f"signal_{name}": 0 for name in RUNTIME_SIGNAL_NAMES},
++        }
++        row["signal_obv"] = 1
++        return pd.DataFrame([row])
++
++    def capture_target(regime, candidates, config):
++        captured["final_candidates"] = copy.deepcopy(candidates)
++        captured["final_config"] = config
++        target = real_build_target(regime, candidates, config)
++        captured["target"] = target
++        return target
++
++    monkeypatch.setattr(daily_plan, "build_screener_results", build_candidates)
++    monkeypatch.setattr(daily_plan, "calculate_candidate_rs_val", lambda *args, **kwargs: 0.1)
++    monkeypatch.setattr(daily_plan, "build_target_portfolio_state", capture_target)
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++
++    daily_plan.generate_daily_plan(
++        date_str="2026-10-02", data_date="2026-10-01", current_state=_empty_state(),
++        output_path=tmp_path / "final-score.md", account_id="synthetic_a", account_binding=frozen,
++    )
++
++    assert captured["screener"]["apply_entry_filter"] is False
++    assert captured["final_candidates"][0]["score"] >= captured["final_config"]["score_threshold"]
++    assert captured["final_candidates"][0]["entry_signal"] is True
++    assert captured["target"].target_symbols == ["AAA"]
++
++
++def test_bound_daily_plan_unexpected_materialization_error_aborts_without_exclusion_evidence(
++    binding_environment, monkeypatch, tmp_path,
++):
++    captured: dict = {}
++    _patch_daily_plan_dependencies(monkeypatch, captured)
++
++    def fail(*args, **kwargs):
++        raise PermissionError("market data read denied")
++
++    monkeypatch.setattr(daily_plan.data_manager, "get_price_data", fail)
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    output = tmp_path / "must-not-exist.md"
++
++    with pytest.raises(PermissionError, match="market data read denied"):
++        daily_plan.generate_daily_plan(
++            date_str="2026-10-02", data_date="2026-10-01", current_state=_empty_state(),
++            output_path=output, account_id="synthetic_a", account_binding=frozen,
++        )
++
++    assert "screener" not in captured
++    assert not output.exists()
++
++
+ def test_config_snapshot_preserves_runtime_consumed_value_evidence(binding_environment):
+     frozen = runtime.resolve_runtime_binding("synthetic_a")
+     config, evidence = runtime.build_runtime_config(

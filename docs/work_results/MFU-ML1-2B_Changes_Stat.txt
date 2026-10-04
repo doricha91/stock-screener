@@ -1,0 +1,22 @@
+MFU-ML1-2B Changes Stat
+Base: f9ce53662e6cacab8df642895bfd2e83df40bf46
+Patch scope: source and tests only; review evidence files excluded
+Total: 10 files changed, 864 insertions(+), 25 deletions(-)
+
+148	11	core/daily_plan_generator.py
+7	1	core/paper_config_snapshot.py
+29	12	screener/screener.py
+5	0	scripts/paper.py
+29	0	scripts/run_paper_daily_plan.py
+2	0	scripts/runbook_command_registry.py
+8	1	scripts/runbook_stage_runner.py
+160	0	core/paper_runtime_binding.py (new)
+400	0	tests/test_ml1_2b_runtime_binding.py (new)
+76	0	docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md (new)
+
+Evidence files generated outside the source/test patch:
+- docs/work_results/MFU-ML1-2B_Result.md
+- docs/work_results/MFU-ML1-2B_Review.md
+- docs/work_results/MFU-ML1-2B_Changes.patch
+- docs/work_results/MFU-ML1-2B_Changes_Stat.txt
+- docs/work_results/MFU-ML1-2B_Synthetic_Runtime.json

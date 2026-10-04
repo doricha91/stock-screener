@@ -1,0 +1,27 @@
+MFU-ML1-2B-R1 delta relative to the pre-R1 uncommitted ML1-2B implementation
+Base repository HEAD: f9ce53662e6cacab8df642895bfd2e83df40bf46
+Patch SHA-256: 51AC5302CA6B6D6C9AA48852DB67D22D3182960B3C01C01F202E67D6E8C9F558
+
+Changed files:
+  core/daily_plan_generator.py
+  docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
+  screener/screener.py
+  tests/test_ml1_2b_runtime_binding.py
+
+Numstat:
+  8   10  core/daily_plan_generator.py
+  5    1  docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
+ 34    9  screener/screener.py
+214    1  tests/test_ml1_2b_runtime_binding.py
+
+Total:
+  4 files changed, 261 insertions(+), 21 deletions(-)
+
+Inherited ML1-2B files not included in this R1 delta:
+  core/paper_config_snapshot.py
+  core/paper_runtime_binding.py
+  scripts/paper.py
+  scripts/run_paper_daily_plan.py
+  scripts/runbook_command_registry.py
+  scripts/runbook_stage_runner.py
+  prior MFU-ML1-2B review bundle

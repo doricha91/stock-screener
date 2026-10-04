@@ -23,6 +23,19 @@ STRATEGY_WEIGHTS = {
     "dema": 1.0,
 }
 
+RUNTIME_STRATEGY_WEIGHTS = {
+    "turtle": 1.0,
+    "rsi": 1.0,
+    "sma": 1.0,
+    "bbands": 1.0,
+    "macd": 1.0,
+    "bbs": 1.0,
+    "dema": 1.0,
+    "obv": 0.5,
+    "mfi": 0.5,
+    "vol_spike": 0.5,
+}
+
 DEFAULT_PARAMS = {
     "entry_period": 20,
     "exit_period": 10,
@@ -49,18 +62,24 @@ DEFAULT_SCREEN_START_DATE = "2023-01-01"
 DEFAULT_RESULTS_CSV = OUTPUTS / "screener_results.csv"
 
 
-def _prepare_data_for_ensemble(df: pd.DataFrame) -> pd.DataFrame | None:
+def _prepare_data_for_ensemble(
+    df: pd.DataFrame,
+    params: dict | None = None,
+) -> pd.DataFrame | None:
     if df is None or df.empty:
         return None
 
     try:
-        df = indicator.add_turtle_indicators(df, DEFAULT_PARAMS)
-        df = indicator.add_rsi_indicators(df, DEFAULT_PARAMS)
-        df = indicator.add_sma_indicators(df, DEFAULT_PARAMS)
-        df = indicator.add_bollinger_band_indicators(df, DEFAULT_PARAMS)
-        df = indicator.add_macd_indicators(df, DEFAULT_PARAMS)
-        df = indicator.add_bbs_indicators(df, DEFAULT_PARAMS)
-        df = indicator.add_dema_indicators(df, DEFAULT_PARAMS)
+        effective_params = {**DEFAULT_PARAMS, **(params or {})}
+        df = indicator.add_turtle_indicators(df, effective_params)
+        df = indicator.add_rsi_indicators(df, effective_params)
+        df = indicator.add_sma_indicators(df, effective_params)
+        df = indicator.add_bollinger_band_indicators(df, effective_params)
+        df = indicator.add_macd_indicators(df, effective_params)
+        df = indicator.add_bbs_indicators(df, effective_params)
+        df = indicator.add_dema_indicators(df, effective_params)
+        if params is not None:
+            df = indicator.add_volume_indicators(df, effective_params)
     except Exception:
         return None
 
@@ -78,6 +97,8 @@ def build_screener_results(
     market_state: dict | None = None,
     start_date: str = DEFAULT_SCREEN_START_DATE,
     end_date: str | None = None,
+    runtime_config: dict | None = None,
+    apply_entry_filter: bool = True,
 ) -> pd.DataFrame:
     state = _resolve_market_state(market_state)
     regime = state["regime"]
@@ -99,6 +120,13 @@ def build_screener_results(
 
     print(f"  Total tickers: {len(tickers)}")
     recommendations: list[dict] = []
+    effective_params = {**DEFAULT_PARAMS, **(runtime_config or {})}
+    weight_defaults = RUNTIME_STRATEGY_WEIGHTS if runtime_config is not None else STRATEGY_WEIGHTS
+    effective_weights = {
+        name: effective_params.get(f"{name}_weight", weight)
+        for name, weight in weight_defaults.items()
+    }
+    effective_threshold = effective_params.get("score_threshold", SCORE_THRESHOLD)
 
     print("\n[Step 3] Screening...")
     for symbol in tqdm(tickers):
@@ -113,26 +141,38 @@ def build_screener_results(
                 if df.empty or len(df) < 200:
                     continue
 
-            df = _prepare_data_for_ensemble(df)
+            df = (
+                _prepare_data_for_ensemble(df, effective_params)
+                if runtime_config is not None
+                else _prepare_data_for_ensemble(df)
+            )
             if df is None:
                 continue
 
-            df = strategy.apply_ensemble_strategy(df, DEFAULT_PARAMS)
+            df = strategy.apply_ensemble_strategy(df, effective_params)
 
             latest_row = df.iloc[-1]
-            score, reasons = compute_candidate_score(latest_row, STRATEGY_WEIGHTS)
+            score, reasons = compute_candidate_score(latest_row, effective_weights)
 
-            if is_enterable_candidate(score, SCORE_THRESHOLD, regime):
-                recommendations.append(
+            if apply_entry_filter and not is_enterable_candidate(score, effective_threshold, regime):
+                continue
+
+            recommendation = {
+                "Symbol": symbol,
+                "Date": latest_row.name.strftime("%Y-%m-%d"),
+                "Price": latest_row["close"],
+                "Score": score,
+                "Strategies": ", ".join(reasons),
+                "Market": regime,
+            }
+            if runtime_config is not None:
+                recommendation.update(
                     {
-                        "Symbol": symbol,
-                        "Date": latest_row.name.strftime("%Y-%m-%d"),
-                        "Price": latest_row["close"],
-                        "Score": score,
-                        "Strategies": ", ".join(reasons),
-                        "Market": regime,
+                        f"signal_{name}": latest_row.get(f"signal_{name}", 0)
+                        for name in effective_weights
                     }
                 )
+            recommendations.append(recommendation)
         except Exception:
             continue
 
@@ -218,12 +258,14 @@ def run_screener(
     save: bool = True,
     db_path: str | None = None,
     csv_output_path: str | Path | None = None,
+    runtime_config: dict | None = None,
 ) -> pd.DataFrame:
     df_result = build_screener_results(
         tickers=tickers,
         market_state=market_state,
         start_date=start_date,
         end_date=end_date,
+        runtime_config=runtime_config,
     )
 
     if save and not df_result.empty:

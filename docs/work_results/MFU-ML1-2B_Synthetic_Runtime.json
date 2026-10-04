@@ -1,0 +1,463 @@
+{
+  "base_sha": "f9ce53662e6cacab8df642895bfd2e83df40bf46",
+  "cases": [
+    {
+      "account_id": "synthetic_a",
+      "active_regime": "BULL",
+      "applied_regime": "BULL",
+      "applied_regime_overlay": {
+        "SWITCHING_PREMIUM": 1.5,
+        "target_cash_ratio": 0.05,
+        "trailing_stop_multiplier": 3.25,
+        "weights": {
+          "bbands": 1,
+          "dema": 1.2,
+          "mfi": 0.5,
+          "obv": 0.5,
+          "rsi": 0.5,
+          "sma": 1,
+          "turtle": 1.5,
+          "vol_spike": 0.5
+        }
+      },
+      "binding_digest": "sha256:48e067333830269e4d5221600ad9495ec771304453707ccd08b2a30addedf3d3",
+      "effective_runtime_strategy": {
+        "ALLOW_PROFIT_SWITCH": false,
+        "REBALANCE_FREQUENCY": "D",
+        "SWITCHING_MAX_COUNT": 2,
+        "SWITCHING_PREMIUM": 1.5,
+        "atr_period": 20,
+        "bbands_period": 20,
+        "bbands_weight": 1,
+        "bbs_weight": 1,
+        "dema_short_period": 20,
+        "dema_weight": 1.2,
+        "entry_period": 12,
+        "exit_period": 20,
+        "macd_fast_period": 12,
+        "macd_slow_period": 26,
+        "macd_weight": 1,
+        "mfi_period": 14,
+        "mfi_weight": 0.5,
+        "obv_weight": 0.5,
+        "rs_lookback": 30,
+        "rs_weight": 3,
+        "rsi_period": 14,
+        "rsi_weight": 0.5,
+        "score_threshold": 1.25,
+        "sma_long_period": 200,
+        "sma_short_period": 50,
+        "sma_weight": 1,
+        "target_cash_ratio": 0.05,
+        "trailing_stop_multiplier": 3.25,
+        "turtle_weight": 1.5,
+        "vol_spike_weight": 0.5
+      },
+      "effective_strategy_base": {
+        "ALLOW_PROFIT_SWITCH": false,
+        "REBALANCE_FREQUENCY": "D",
+        "SWITCHING_MAX_COUNT": 2,
+        "SWITCHING_PREMIUM": 1,
+        "atr_period": 20,
+        "bbands_period": 20,
+        "bbands_weight": 1,
+        "bbs_weight": 1,
+        "dema_short_period": 20,
+        "dema_weight": 1,
+        "entry_period": 12,
+        "exit_period": 20,
+        "macd_fast_period": 12,
+        "macd_slow_period": 26,
+        "macd_weight": 1,
+        "mfi_period": 14,
+        "mfi_weight": 0.5,
+        "obv_weight": 0.5,
+        "rs_lookback": 30,
+        "rs_weight": 3,
+        "rsi_period": 14,
+        "rsi_weight": 1,
+        "score_threshold": 1.25,
+        "sma_long_period": 200,
+        "sma_short_period": 50,
+        "sma_weight": 1,
+        "trailing_stop_multiplier": 2.5,
+        "turtle_weight": 1,
+        "vol_spike_weight": 0.5
+      },
+      "entry_universe_definition": {
+        "kind": "symbols",
+        "symbols": [
+          "AAA",
+          "BBB"
+        ]
+      },
+      "excluded_symbols": [
+        {
+          "reason": "missing_market_data",
+          "symbol": "BBB"
+        }
+      ],
+      "existing_holdings_preserved": [
+        "ZZZ"
+      ],
+      "managed_symbols": [
+        "AAA",
+        "SPY",
+        "ZZZ"
+      ],
+      "materialized_entry_universe": [
+        "AAA"
+      ],
+      "regime_policy": {
+        "BREADTH_OVERSOLD_THRESHOLD": 15,
+        "BREADTH_THRESHOLD": 40,
+        "CB_COOLDOWN_DAYS": 3,
+        "CB_DROP_THRESHOLD": -3,
+        "DD_LOOKBACK": 252,
+        "DD_THRESHOLD": -15,
+        "MA_CROSS_FAST": 50,
+        "MA_CROSS_SLOW": 200,
+        "MIN_MODE_MAINTAIN_DAYS": 5,
+        "REGIME_ADX_PERIOD": 14,
+        "REGIME_ADX_THRESHOLD": 25,
+        "REGIME_RULES": {
+          "BEAR": {
+            "SWITCHING_PREMIUM": 2.5,
+            "target_cash_ratio": 0.7,
+            "trailing_stop_multiplier": 1.5,
+            "weights": {
+              "bbands": 0.2,
+              "dema": 0,
+              "mfi": 0.8,
+              "obv": 0.8,
+              "rsi": 0.2,
+              "sma": 0,
+              "turtle": 0,
+              "vol_spike": 1
+            }
+          },
+          "BULL": {
+            "SWITCHING_PREMIUM": 1.5,
+            "target_cash_ratio": 0.05,
+            "trailing_stop_multiplier": 3.25,
+            "weights": {
+              "bbands": 1,
+              "dema": 1.2,
+              "mfi": 0.5,
+              "obv": 0.5,
+              "rsi": 0.5,
+              "sma": 1,
+              "turtle": 1.5,
+              "vol_spike": 0.5
+            }
+          },
+          "PANIC": {
+            "SWITCHING_PREMIUM": 5,
+            "target_cash_ratio": 1,
+            "trailing_stop_multiplier": 0.5,
+            "weights": {
+              "bbands": 0,
+              "dema": 0,
+              "mfi": 0,
+              "obv": 0,
+              "rsi": 0,
+              "sma": 0,
+              "turtle": 0,
+              "vol_spike": 0
+            }
+          },
+          "UNSTABLE": {
+            "SWITCHING_PREMIUM": 1.5,
+            "target_cash_ratio": 0.3,
+            "trailing_stop_multiplier": 2.5,
+            "weights": {
+              "bbands": 1.2,
+              "dema": 0,
+              "mfi": 1,
+              "obv": 0.8,
+              "rsi": 1.5,
+              "sma": 0,
+              "turtle": 0,
+              "vol_spike": 0.8
+            }
+          }
+        },
+        "REGIME_SMA_PERIOD": 200,
+        "REGIME_SMA_SHORT_PERIOD": 50,
+        "USE_CIRCUIT_BREAKER": true,
+        "USE_DRAWDOWN_TRIGGER": true,
+        "USE_MARKET_BREADTH": true,
+        "USE_MA_CROSS": true,
+        "USE_VIX_BREAKOUT": true,
+        "VIX_MA_PERIOD": 20,
+        "VIX_MULTIPLIER": 1.5,
+        "use_market_regime": true
+      },
+      "requested_entry_universe": [
+        "AAA",
+        "BBB"
+      ],
+      "runtime_frozen_validation": "PASS",
+      "schema_version": "paper_runtime_binding.v1",
+      "shared_policy": {
+        "HEDGE_ASSET": "SQQQ",
+        "HEDGE_LIQUIDATION_PRIORITY": "rs_low",
+        "HEDGE_RATIO_BEAR": 0.3,
+        "HEDGE_RATIO_PANIC": 1,
+        "HEDGE_TICKERS": [
+          "SH",
+          "SDS",
+          "SPXU",
+          "PSQ",
+          "QID",
+          "SQQQ",
+          "SOXS",
+          "BIL"
+        ],
+        "MARKET_BENCHMARK_SYMBOL": "SPY",
+        "USE_HEDGE_MODE": true,
+        "max_long_positions": 10,
+        "max_positions": 10,
+        "risk_per_trade": 0.05
+      },
+      "strategy_reference": {
+        "id": "strategy_a",
+        "version": "v1"
+      },
+      "universe_reference": {
+        "id": "universe_a",
+        "version": "v1"
+      }
+    },
+    {
+      "account_id": "synthetic_b",
+      "active_regime": "BEAR",
+      "applied_regime": "BEAR",
+      "applied_regime_overlay": {
+        "SWITCHING_PREMIUM": 2.5,
+        "target_cash_ratio": 0.7,
+        "trailing_stop_multiplier": 1.5,
+        "weights": {
+          "bbands": 0.2,
+          "dema": 0,
+          "mfi": 0.8,
+          "obv": 0.8,
+          "rsi": 0.2,
+          "sma": 0,
+          "turtle": 0,
+          "vol_spike": 1
+        }
+      },
+      "binding_digest": "sha256:33a394bba654777da3df15ebe2a3e79c9fd5d5e89c2215ad4f41619f838f48b2",
+      "effective_runtime_strategy": {
+        "ALLOW_PROFIT_SWITCH": false,
+        "REBALANCE_FREQUENCY": "D",
+        "SWITCHING_MAX_COUNT": 2,
+        "SWITCHING_PREMIUM": 2.5,
+        "atr_period": 20,
+        "bbands_period": 20,
+        "bbands_weight": 0.2,
+        "bbs_weight": 1,
+        "dema_short_period": 20,
+        "dema_weight": 0,
+        "entry_period": 33,
+        "exit_period": 20,
+        "macd_fast_period": 12,
+        "macd_slow_period": 26,
+        "macd_weight": 1,
+        "mfi_period": 14,
+        "mfi_weight": 0.8,
+        "obv_weight": 0.8,
+        "rs_lookback": 30,
+        "rs_weight": 3,
+        "rsi_period": 14,
+        "rsi_weight": 0.2,
+        "score_threshold": 4.5,
+        "sma_long_period": 200,
+        "sma_short_period": 50,
+        "sma_weight": 0,
+        "target_cash_ratio": 0.7,
+        "trailing_stop_multiplier": 1.5,
+        "turtle_weight": 0,
+        "vol_spike_weight": 1
+      },
+      "effective_strategy_base": {
+        "ALLOW_PROFIT_SWITCH": false,
+        "REBALANCE_FREQUENCY": "D",
+        "SWITCHING_MAX_COUNT": 2,
+        "SWITCHING_PREMIUM": 1,
+        "atr_period": 20,
+        "bbands_period": 20,
+        "bbands_weight": 1,
+        "bbs_weight": 1,
+        "dema_short_period": 20,
+        "dema_weight": 1,
+        "entry_period": 33,
+        "exit_period": 20,
+        "macd_fast_period": 12,
+        "macd_slow_period": 26,
+        "macd_weight": 1,
+        "mfi_period": 14,
+        "mfi_weight": 0.5,
+        "obv_weight": 0.5,
+        "rs_lookback": 30,
+        "rs_weight": 3,
+        "rsi_period": 14,
+        "rsi_weight": 1,
+        "score_threshold": 4.5,
+        "sma_long_period": 200,
+        "sma_short_period": 50,
+        "sma_weight": 1,
+        "trailing_stop_multiplier": 2.5,
+        "turtle_weight": 1,
+        "vol_spike_weight": 0.5
+      },
+      "entry_universe_definition": {
+        "kind": "shared_snapshot"
+      },
+      "excluded_symbols": [],
+      "existing_holdings_preserved": [
+        "HOLD"
+      ],
+      "managed_symbols": [
+        "CCC",
+        "HOLD",
+        "SPY",
+        "ZZZ"
+      ],
+      "materialized_entry_universe": [
+        "CCC",
+        "ZZZ"
+      ],
+      "regime_policy": {
+        "BREADTH_OVERSOLD_THRESHOLD": 15,
+        "BREADTH_THRESHOLD": 40,
+        "CB_COOLDOWN_DAYS": 3,
+        "CB_DROP_THRESHOLD": -3,
+        "DD_LOOKBACK": 252,
+        "DD_THRESHOLD": -15,
+        "MA_CROSS_FAST": 50,
+        "MA_CROSS_SLOW": 200,
+        "MIN_MODE_MAINTAIN_DAYS": 5,
+        "REGIME_ADX_PERIOD": 14,
+        "REGIME_ADX_THRESHOLD": 25,
+        "REGIME_RULES": {
+          "BEAR": {
+            "SWITCHING_PREMIUM": 2.5,
+            "target_cash_ratio": 0.7,
+            "trailing_stop_multiplier": 1.5,
+            "weights": {
+              "bbands": 0.2,
+              "dema": 0,
+              "mfi": 0.8,
+              "obv": 0.8,
+              "rsi": 0.2,
+              "sma": 0,
+              "turtle": 0,
+              "vol_spike": 1
+            }
+          },
+          "BULL": {
+            "SWITCHING_PREMIUM": 1.5,
+            "target_cash_ratio": 0.05,
+            "trailing_stop_multiplier": 3.25,
+            "weights": {
+              "bbands": 1,
+              "dema": 1.2,
+              "mfi": 0.5,
+              "obv": 0.5,
+              "rsi": 0.5,
+              "sma": 1,
+              "turtle": 1.5,
+              "vol_spike": 0.5
+            }
+          },
+          "PANIC": {
+            "SWITCHING_PREMIUM": 5,
+            "target_cash_ratio": 1,
+            "trailing_stop_multiplier": 0.5,
+            "weights": {
+              "bbands": 0,
+              "dema": 0,
+              "mfi": 0,
+              "obv": 0,
+              "rsi": 0,
+              "sma": 0,
+              "turtle": 0,
+              "vol_spike": 0
+            }
+          },
+          "UNSTABLE": {
+            "SWITCHING_PREMIUM": 1.5,
+            "target_cash_ratio": 0.3,
+            "trailing_stop_multiplier": 2.5,
+            "weights": {
+              "bbands": 1.2,
+              "dema": 0,
+              "mfi": 1,
+              "obv": 0.8,
+              "rsi": 1.5,
+              "sma": 0,
+              "turtle": 0,
+              "vol_spike": 0.8
+            }
+          }
+        },
+        "REGIME_SMA_PERIOD": 200,
+        "REGIME_SMA_SHORT_PERIOD": 50,
+        "USE_CIRCUIT_BREAKER": true,
+        "USE_DRAWDOWN_TRIGGER": true,
+        "USE_MARKET_BREADTH": true,
+        "USE_MA_CROSS": true,
+        "USE_VIX_BREAKOUT": true,
+        "VIX_MA_PERIOD": 20,
+        "VIX_MULTIPLIER": 1.5,
+        "use_market_regime": true
+      },
+      "requested_entry_universe": [
+        "CCC",
+        "ZZZ"
+      ],
+      "runtime_frozen_validation": "PASS",
+      "schema_version": "paper_runtime_binding.v1",
+      "shared_policy": {
+        "HEDGE_ASSET": "SQQQ",
+        "HEDGE_LIQUIDATION_PRIORITY": "rs_low",
+        "HEDGE_RATIO_BEAR": 0.3,
+        "HEDGE_RATIO_PANIC": 1,
+        "HEDGE_TICKERS": [
+          "SH",
+          "SDS",
+          "SPXU",
+          "PSQ",
+          "QID",
+          "SQQQ",
+          "SOXS",
+          "BIL"
+        ],
+        "MARKET_BENCHMARK_SYMBOL": "SPY",
+        "USE_HEDGE_MODE": true,
+        "max_long_positions": 10,
+        "max_positions": 10,
+        "risk_per_trade": 0.05
+      },
+      "strategy_reference": {
+        "id": "strategy_b",
+        "version": "v1"
+      },
+      "universe_reference": {
+        "id": "universe_b",
+        "version": "v1"
+      }
+    }
+  ],
+  "schema_version": "mfu_ml1_2b_synthetic_runtime.v1",
+  "validation": {
+    "account_a_runtime_frozen_validation": "PASS",
+    "account_b_runtime_frozen_validation": "PASS",
+    "module_global_mutation": false,
+    "order_independent": true,
+    "strategy_isolation": true,
+    "universe_isolation": true
+  }
+}

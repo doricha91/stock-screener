@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from core.daily_plan_generator import generate_daily_plan
 from core.paper_account_guard import require_initialized_writer_account_paths
 from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths, latest_current_state_snapshot_path
+from core.paper_runtime_binding import resolve_runtime_binding
 from core.paper_state_provider import load_official_paper_state_for_daily_plan
 from core.stage_a_asof_contract import (
     StageAAsOfContext,
@@ -127,6 +128,7 @@ def run_paper_daily_plan(
     trade_date: str | None = None,
     enforce_asof_contract: bool = False,
     observed_at: str | None = None,
+    runbook_state_path: str | Path | None = None,
 ) -> str:
     explicit_mode = data_date is not None or trade_date is not None
     if explicit_mode:
@@ -143,6 +145,30 @@ def run_paper_daily_plan(
     require_initialized_writer_account_paths(
         account_paths,
         command_name="run_paper_daily_plan",
+    )
+    frozen_binding = None
+    if runbook_state_path is not None:
+        from scripts import runbook_state
+
+        state = runbook_state.load_state(Path(runbook_state_path))
+        expected_context = {
+            "account_id": account_paths.account_id,
+            "data_date": normalized_data_date or normalized_db_date,
+            "trade_date": normalized_db_date,
+        }
+        actual_context = {
+            "account_id": state.frozen_context.account_id,
+            "data_date": state.frozen_context.data_date,
+            "trade_date": state.frozen_context.trade_date,
+        }
+        if actual_context != expected_context:
+            raise ValueError("runbook_state_context_mismatch")
+        frozen_binding = getattr(state.frozen_context, "binding", None)
+        if frozen_binding is None:
+            raise ValueError("runbook_state_frozen_binding_required")
+    runtime_binding = resolve_runtime_binding(
+        account_paths.account_id,
+        frozen_binding=frozen_binding,
     )
     asof_context = None
     if enforce_asof_contract:
@@ -247,6 +273,7 @@ def run_paper_daily_plan(
         asof_context=asof_context,
         pinned_config_snapshot=pinned_config_snapshot,
         account_lineage=account_lineage if asof_context is not None else None,
+        account_binding=runtime_binding,
     )
 
 
@@ -256,6 +283,7 @@ def main() -> int:
     parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
     parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
     parser.add_argument("--account-id", required=True, help="Initialized paper account id")
+    parser.add_argument("--runbook-state-json", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     try:
@@ -265,6 +293,7 @@ def main() -> int:
             account_paths=account_paths,
             data_date=args.data_date,
             trade_date=args.trade_date,
+            runbook_state_path=args.runbook_state_json,
         )
     except (ValueError, StageAAsOfContractError) as exc:
         print(f"Paper daily plan aborted: {exc}")

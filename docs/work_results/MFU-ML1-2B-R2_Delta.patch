@@ -1,0 +1,192 @@
+diff --git a/core/daily_plan_generator.py b/core/daily_plan_generator.py
+index 48cc025..d930097 100644
+--- a/core/daily_plan_generator.py
++++ b/core/daily_plan_generator.py
+@@ -26,7 +26,7 @@ from core.target_portfolio_state import (
+ from core.paths import front_daily_action_plan_path, market_db_path
+ from core.backtest_engine import evaluate_switching_opportunity
+ from core.config_factory import make_config, get_regime_config
+-from core.decision_core import compute_candidate_score
++from core.decision_core import compute_candidate_score, is_enterable_candidate
+ from core.paper_config_snapshot import save_paper_config_snapshot
+ from core.paper_config_hash import PAPER_CONFIG_HASH_POLICY, compute_paper_config_hash_from_file
+ from core.paper_runtime_binding import (
+@@ -784,8 +784,12 @@ def write_daily_plan_json_sidecar(
+     return output_path
+ 
+ 
+-def is_buy_signal_candidate(candidate: Dict[str, Any], score_threshold: float) -> bool:
+-    """Match the backtest buy_signal gate: score >= threshold and rs_val > 0."""
++def is_buy_signal_candidate(
++    candidate: Dict[str, Any],
++    score_threshold: float,
++    regime: str = "BULL",
++) -> bool:
++    """Apply the shared regime/score gate and the positive-RS buy requirement."""
+     score = candidate.get("score")
+     rs_val = candidate.get("rs_val")
+ 
+@@ -798,12 +802,13 @@ def is_buy_signal_candidate(candidate: Dict[str, Any], score_threshold: float) -
+     if pd.isna(score) or pd.isna(rs_val):
+         return False
+ 
+-    return bool(score >= float(score_threshold) and rs_val > 0)
++    return bool(is_enterable_candidate(score, float(score_threshold), regime) and rs_val > 0)
+ 
+ 
+ def filter_switch_candidates_for_daily_plan(
+     df_candidates: pd.DataFrame,
+     score_threshold: float,
++    regime: str = "BULL",
+ ) -> pd.DataFrame:
+     """Restrict switching candidates to backtest-like buy_signal candidates only."""
+     if df_candidates.empty:
+@@ -814,7 +819,7 @@ def filter_switch_candidates_for_daily_plan(
+         switch_candidates["rs_val"] = 0.0
+ 
+     mask = switch_candidates.apply(
+-        lambda row: is_buy_signal_candidate(row, score_threshold),
++        lambda row: is_buy_signal_candidate(row, score_threshold, regime),
+         axis=1,
+     )
+     return switch_candidates.loc[mask].copy()
+@@ -1488,7 +1493,7 @@ def generate_daily_plan(
+             'rs_val': c.get('rs_val', 0.0),
+             'rs_calc_success': c.get('rs_calc_success', True),
+             'latest_price_date': latest_price_date,
+-            'entry_signal': is_buy_signal_candidate(c, score_threshold),
++            'entry_signal': is_buy_signal_candidate(c, score_threshold, regime),
+             'price': c['close']
+         })
+     print(
+@@ -1617,8 +1622,8 @@ def generate_daily_plan(
+                 for row in holding_score_results
+                 if row["valid"] and row["position_return"] is not None
+             ]
+-            c_df = filter_switch_candidates_for_daily_plan(df_candidates, score_threshold)
+-            if switching_scores and not df_candidates.empty:
++            c_df = filter_switch_candidates_for_daily_plan(df_candidates, score_threshold, regime)
++            if switching_scores and not c_df.empty:
+                 switch_pairs = evaluate_switching_opportunity(c_df, switching_scores, merged_config)
+             else:
+                 print("[WARN] Skipping active switching: no valid holding scores could be computed.")
+diff --git a/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md b/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
+index 600c93e..b0c3313 100644
+--- a/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
++++ b/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
+@@ -34,7 +34,7 @@ The runtime assembler verifies effective strategy values, the complete regime po
+ 
+ The screener accepts an optional per-call runtime config. Bound calls prepare and expose the complete ensemble signal set (`turtle`, `rsi`, `sma`, `bbands`, `macd`, `bbs`, `dema`, `obv`, `mfi`, and `vol_spike`) and score it with the frozen runtime weights. Calls without runtime injection retain the prior seven-weight defaults and filtering behavior.
+ 
+-For a bound Daily Plan, the screener does not apply its preliminary entry threshold. It returns the complete scored signal rows, and Daily Plan is the authoritative final scoring and threshold location: it recomputes the ten-weight ensemble score, adds the configured positive-RS weight, and only then applies `score_threshold` and the existing positive-RS entry gate. This prevents a candidate that can pass the final frozen-strategy-plus-RS semantics from being discarded by an incomplete preliminary score. Other screener callers keep the existing immediate threshold behavior.
++For a bound Daily Plan, the screener does not apply its preliminary entry threshold. It returns the complete scored signal rows, and Daily Plan is the authoritative final scoring and entry-gate location: it recomputes the ten-weight ensemble score, adds the configured positive-RS weight, and then applies the shared regime hard gate, `score_threshold`, and the existing positive-RS gate. This prevents a candidate that can pass the final frozen-strategy-plus-RS semantics from being discarded by an incomplete preliminary score while preserving the existing `PANIC` prohibition on new BUY entries. The same final eligibility predicate filters switching replacements, so `PANIC` cannot produce `SWITCH_IN` BUY actions. Valuation, risk, exit, trailing-stop, SELL, hedge, and holding-management paths remain active. Other screener callers keep the existing immediate threshold behavior.
+ 
+ ## Universe contract
+ 
+diff --git a/tests/test_ml1_2b_runtime_binding.py b/tests/test_ml1_2b_runtime_binding.py
+index 9ebd2ab..894b2b7 100644
+--- a/tests/test_ml1_2b_runtime_binding.py
++++ b/tests/test_ml1_2b_runtime_binding.py
+@@ -500,6 +500,102 @@ def test_bound_daily_plan_applies_threshold_after_complete_score_and_rs(
+     assert captured["target"].target_symbols == ["AAA"]
+ 
+ 
++@pytest.mark.parametrize(
++    ("regime", "expected"),
++    [("PANIC", False), ("BULL", True), ("BEAR", True)],
++)
++def test_final_buy_gate_preserves_regime_hard_entry_policy(regime, expected):
++    candidate = {"score": 99.0, "rs_val": 1.0}
++
++    assert daily_plan.is_buy_signal_candidate(candidate, 1.0, regime) is expected
++
++
++def test_switch_candidate_filter_blocks_panic_and_allows_bull():
++    candidates = pd.DataFrame([
++        {"symbol": "AAA", "score": 99.0, "rs_val": 1.0, "close": 100.0},
++    ])
++
++    panic = daily_plan.filter_switch_candidates_for_daily_plan(candidates, 1.0, "PANIC")
++    bull = daily_plan.filter_switch_candidates_for_daily_plan(candidates, 1.0, "BULL")
++
++    assert panic.empty
++    assert bull["symbol"].tolist() == ["AAA"]
++
++
++def test_bound_panic_blocks_strategy_and_switch_buy_but_preserves_holding_sell(
++    binding_environment, monkeypatch, tmp_path,
++):
++    captured: dict = {}
++    real_build_target = daily_plan.build_target_portfolio_state
++    _patch_daily_plan_dependencies(monkeypatch, captured)
++    monkeypatch.setattr(daily_plan.market_analyzer, "get_market_state", lambda **kwargs: {
++        "date": "2026-10-01", "regime": "PANIC", "trade_halted": False,
++        "vix_value": 50.0, "triggers": {}, "plan": {},
++    })
++
++    def build_candidates(**kwargs):
++        captured["screener"] = kwargs
++        return pd.DataFrame([{
++            "Symbol": "AAA", "Date": "2026-10-01", "Price": 100.0, "Score": 99.0,
++            **{f"signal_{name}": 1 for name in RUNTIME_SIGNAL_NAMES},
++        }])
++
++    def capture_target(regime, candidates, config):
++        captured["final_candidates"] = copy.deepcopy(candidates)
++        target = real_build_target(regime, candidates, config)
++        captured["target"] = target
++        return target
++
++    def panic_sell_diagnostic(symbol, *args, **kwargs):
++        return {
++            "symbol": symbol,
++            "close": 8.0,
++            "exit_low": 9.0,
++            "atr_source": "indicator",
++            "trailing_triggered": True,
++            "stop_price": 9.0,
++            "warning_items": [],
++            "notes": "",
++        }
++
++    def capture_report(*args, **kwargs):
++        captured["actions"] = copy.deepcopy(args[3])
++        return "# panic plan\n"
++
++    monkeypatch.setattr(daily_plan, "build_screener_results", build_candidates)
++    monkeypatch.setattr(daily_plan, "calculate_candidate_rs_val", lambda *args, **kwargs: 1.0)
++    monkeypatch.setattr(daily_plan, "build_target_portfolio_state", capture_target)
++    monkeypatch.setattr(
++        daily_plan, "compute_holding_score_for_switching",
++        lambda *args, **kwargs: (0.0, 0.1, ["holding"]),
++    )
++    monkeypatch.setattr(
++        daily_plan, "evaluate_switching_opportunity",
++        lambda *args, **kwargs: pytest.fail("PANIC must not evaluate switch-in candidates"),
++    )
++    monkeypatch.setattr(
++        daily_plan, "load_price_history_until",
++        lambda *args, **kwargs: pd.DataFrame({"close": [8.0]}),
++    )
++    monkeypatch.setattr(daily_plan, "build_holding_sell_diagnostic", panic_sell_diagnostic)
++    monkeypatch.setattr(daily_plan, "format_markdown_report", capture_report)
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++
++    daily_plan.generate_daily_plan(
++        date_str="2026-10-02", data_date="2026-10-01",
++        current_state=_empty_state(holdings=["BBB"]),
++        output_path=tmp_path / "panic.md", account_id="synthetic_a", account_binding=frozen,
++    )
++
++    assert captured["screener"]["apply_entry_filter"] is False
++    assert captured["final_candidates"][0]["score"] > 0
++    assert captured["final_candidates"][0]["rs_val"] > 0
++    assert captured["final_candidates"][0]["entry_signal"] is False
++    assert captured["target"].target_symbols == []
++    assert [item["symbol"] for item in captured["actions"] if item["type"] == "SELL"] == ["BBB"]
++    assert not [item for item in captured["actions"] if item["type"] == "BUY"]
++
++
+ def test_bound_daily_plan_unexpected_materialization_error_aborts_without_exclusion_evidence(
+     binding_environment, monkeypatch, tmp_path,
+ ):

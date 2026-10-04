@@ -677,6 +677,9 @@ def handle_plan(args: argparse.Namespace) -> int:
 
     try:
         if explicit_mode:
+            binding_kwargs = {}
+            if getattr(args, "runbook_state_json", None):
+                binding_kwargs["runbook_state_path"] = args.runbook_state_json
             report_path = _call_with_optional_account_paths(
                 run_paper_daily_plan,
                 None,
@@ -684,6 +687,7 @@ def handle_plan(args: argparse.Namespace) -> int:
                 data_date=data_date,
                 trade_date=preflight_date,
                 enforce_asof_contract=bool(getattr(args, "enforce_asof_contract", False)),
+                **binding_kwargs,
             )
         else:
             report_path = _call_with_optional_account_paths(
@@ -1087,6 +1091,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
     plan_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
     plan_parser.add_argument("--enforce-asof-contract", action="store_true", help=argparse.SUPPRESS)
+    plan_parser.add_argument("--runbook-state-json", help=argparse.SUPPRESS)
     plan_parser.set_defaults(handler=handle_plan)
 
     eod_parser = subparsers.add_parser(

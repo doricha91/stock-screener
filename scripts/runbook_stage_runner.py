@@ -5039,7 +5039,14 @@ def _run_stage_a_command(
     dry_run: bool,
     timeout_sec: int,
 ) -> tuple[dict[str, Any], str]:
-    rendered_argv = render_argv_template(command, state.frozen_context, state.artifacts)
+    render_values = dict(state.artifacts)
+    render_values["runbook_state_path"] = str(runbook_state.get_state_path_for_context(
+        workspace,
+        state.frozen_context.account_id,
+        state.frozen_context.data_date,
+        state.frozen_context.trade_date,
+    ))
+    rendered_argv = render_argv_template(command, state.frozen_context, render_values)
     argv = normalize_python_script_argv(rendered_argv, repo_root)
     if dry_run:
         process = {

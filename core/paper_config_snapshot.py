@@ -49,6 +49,7 @@ def build_paper_config_snapshot_payload(
     data_date: str | None = None,
     trade_date: str | None = None,
     asof_context: StageAAsOfContext | None = None,
+    runtime_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     weights = _extract_strategy_weights(final_config)
     market_status_summary = {
@@ -74,7 +75,7 @@ def build_paper_config_snapshot_payload(
     }
     observed_at = asof_context.observed_at if asof_context is not None else datetime.now().astimezone().isoformat(timespec="seconds")
     effective_at = asof_context.trade_date if asof_context is not None else (trade_date or plan_date)
-    return {
+    payload = {
         "schema_version": 1,
         "plan_date": plan_date,
         "data_date": data_date or plan_date,
@@ -98,6 +99,9 @@ def build_paper_config_snapshot_payload(
             "Official Stage A reuse is validated by the AS-OF contract when enabled.",
         ],
     }
+    if runtime_binding is not None:
+        payload["runtime_binding"] = _json_safe(runtime_binding)
+    return payload
 
 
 def save_paper_config_snapshot(
@@ -113,6 +117,7 @@ def save_paper_config_snapshot(
     trade_date: str | None = None,
     asof_context: StageAAsOfContext | None = None,
     immutable: bool = False,
+    runtime_binding: dict[str, Any] | None = None,
 ) -> Path:
     output_path = Path(output_path)
     archive_dir = Path(archive_dir)
@@ -143,6 +148,7 @@ def save_paper_config_snapshot(
         data_date=data_date,
         trade_date=trade_date,
         asof_context=asof_context,
+        runtime_binding=runtime_binding,
     )
     output_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

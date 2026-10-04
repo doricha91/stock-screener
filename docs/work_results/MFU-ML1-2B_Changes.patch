@@ -1,0 +1,1184 @@
+diff --git a/core/daily_plan_generator.py b/core/daily_plan_generator.py
+index d6441ee..381bba8 100644
+--- a/core/daily_plan_generator.py
++++ b/core/daily_plan_generator.py
+@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
+ 
+ import config
+ import market_analyzer
+-from screener.screener import build_screener_results
++from screener.screener import DEFAULT_SCREEN_START_DATE, build_screener_results
+ from core.portfolio_state_manager import load_current_state
+ from core.target_portfolio_state import (
+     build_target_portfolio_state, 
+@@ -29,6 +29,12 @@ from core.config_factory import make_config, get_regime_config
+ from core.decision_core import compute_candidate_score
+ from core.paper_config_snapshot import save_paper_config_snapshot
+ from core.paper_config_hash import PAPER_CONFIG_HASH_POLICY, compute_paper_config_hash_from_file
++from core.paper_runtime_binding import (
++    build_runtime_config,
++    record_runtime_universe,
++    validate_pinned_runtime_evidence,
++    validate_runtime_consumption,
++)
+ from core.paper_execution_intent import build_execution_intent
+ from core.stage_a_asof_contract import (
+     StageAAsOfContext,
+@@ -142,6 +148,31 @@ def resolve_official_universe_membership(
+     return symbols, lineage
+ 
+ 
++def materialize_explicit_entry_universe(
++    symbols: List[str],
++    *,
++    end_date: str,
++    minimum_rows: int = 200,
++) -> tuple[list[str], list[dict[str, str]]]:
++    """Resolve explicit entry symbols with enough as-of market data to screen."""
++    materialized: list[str] = []
++    excluded: list[dict[str, str]] = []
++    for symbol in sorted(set(symbols)):
++        try:
++            frame = data_manager.get_price_data(
++                symbol,
++                start_date=DEFAULT_SCREEN_START_DATE,
++                end_date=end_date,
++            )
++        except Exception:
++            frame = pd.DataFrame()
++        if frame is None or len(frame) < minimum_rows:
++            excluded.append({"symbol": symbol, "reason": "missing_market_data"})
++        else:
++            materialized.append(symbol)
++    return materialized, excluded
++
++
+ def calculate_candidate_rs_val(
+     symbol: str,
+     asof_date: pd.Timestamp,
+@@ -694,6 +725,7 @@ def build_daily_plan_json_payload(
+     config_snapshot_path: str | Path | None = None,
+     state_snapshot_path: str | Path | None = None,
+     as_of_lineage: Dict[str, Any] | None = None,
++    runtime_binding: Dict[str, Any] | None = None,
+ ) -> Dict[str, Any]:
+     resolved_fingerprints = build_daily_plan_fingerprints(
+         fingerprints=fingerprints,
+@@ -716,6 +748,8 @@ def build_daily_plan_json_payload(
+     }
+     if as_of_lineage is not None:
+         payload["as_of_lineage"] = as_of_lineage
++    if runtime_binding is not None:
++        payload["runtime_binding"] = runtime_binding
+     return payload
+ 
+ 
+@@ -1150,6 +1184,7 @@ def generate_daily_plan(
+     asof_context: StageAAsOfContext | None = None,
+     pinned_config_snapshot: Dict[str, Any] | None = None,
+     account_lineage: Dict[str, Any] | None = None,
++    account_binding: Dict[str, Any] | None = None,
+ ) -> str:
+     """
+     일일 판단 산출물(Action Plan)을 생성하고 파일로 저장합니다.
+@@ -1188,7 +1223,26 @@ def generate_daily_plan(
+             f"market selected date {data_date} is after DATA_DATE {asof_context.data_date}",
+             source="market",
+         )
+-    if pinned_config_snapshot is not None:
++    runtime_binding_evidence: Dict[str, Any] | None = None
++    if account_binding is not None:
++        derived_config, runtime_binding_evidence = build_runtime_config(
++            account_binding,
++            active_regime=regime,
++            start_date=data_date,
++            end_date=data_date,
++        )
++        runtime_binding_evidence["account_id"] = account_id
++        if pinned_config_snapshot is not None:
++            merged_config = dict(pinned_config_snapshot["full_config"])
++            validate_runtime_consumption(merged_config, runtime_binding_evidence)
++            validate_pinned_runtime_evidence(
++                pinned_config_snapshot.get("runtime_binding"),
++                runtime_binding_evidence,
++                include_materialization=False,
++            )
++        else:
++            merged_config = derived_config
++    elif pinned_config_snapshot is not None:
+         merged_config = dict(pinned_config_snapshot["full_config"])
+     else:
+         base_config = make_config({}, data_date, data_date)
+@@ -1202,17 +1256,66 @@ def generate_daily_plan(
+         end_date=data_date,
+         start_date=bench_start,
+     )
+-    universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
+-    universe_snapshot = universe_selection.get("snapshot", {})
+-    universe_metadata = universe_selection.get("metadata", {})
+     universe_lineage: Dict[str, Any] | None = None
+     official_universe_symbols: list[str] | None = None
+-    if asof_context is not None:
+-        official_universe_symbols, universe_lineage = resolve_official_universe_membership(
+-            universe_snapshot,
+-            universe_metadata,
+-            asof_context,
+-        )
++    universe_exclusions: list[dict[str, str]] = []
++    requested_entry_universe: list[str] = []
++    if runtime_binding_evidence is not None:
++        universe_definition = runtime_binding_evidence["entry_universe_definition"]
++        if universe_definition["kind"] == "shared_snapshot":
++            universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
++            universe_snapshot = universe_selection.get("snapshot", {})
++            universe_metadata = dict(universe_selection.get("metadata", {}))
++            if asof_context is not None:
++                official_universe_symbols, universe_lineage = resolve_official_universe_membership(
++                    universe_snapshot,
++                    universe_metadata,
++                    asof_context,
++                )
++            else:
++                official_universe_symbols = sorted({
++                    str(symbol).strip().upper()
++                    for symbol in universe_snapshot.get("active_symbols", [])
++                    if str(symbol).strip()
++                })
++            requested_entry_universe = list(official_universe_symbols)
++        else:
++            universe_snapshot = {"removed": []}
++            requested_entry_universe = list(universe_definition["symbols"])
++            official_universe_symbols, universe_exclusions = materialize_explicit_entry_universe(
++                requested_entry_universe,
++                end_date=signal_date,
++            )
++            reference = runtime_binding_evidence["universe_reference"]
++            universe_metadata = {
++                "policy": "account_binding_explicit",
++                "source": f"binding:{reference['id']}:{reference['version']}",
++                "binding_digest": runtime_binding_evidence["binding_digest"],
++                "requested_entry_universe": requested_entry_universe,
++                "materialized_entry_universe": official_universe_symbols,
++                "excluded_symbols": universe_exclusions,
++                "warning": None,
++            }
++            if asof_context is not None:
++                universe_lineage = {
++                    "source": universe_metadata["source"],
++                    "effective_as_of": asof_context.data_date,
++                    "selected_max_date": asof_context.data_date,
++                    "observed_at": asof_context.observed_at,
++                    "revision": runtime_binding_evidence["binding_digest"],
++                    "capture_mode": "frozen_account_binding",
++                    "validator_result": "PASS",
++                }
++    else:
++        universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
++        universe_snapshot = universe_selection.get("snapshot", {})
++        universe_metadata = universe_selection.get("metadata", {})
++        if asof_context is not None:
++            official_universe_symbols, universe_lineage = resolve_official_universe_membership(
++                universe_snapshot,
++                universe_metadata,
++                asof_context,
++            )
+     removed_universe_symbols = {
+         str(symbol).strip().upper()
+         for symbol in universe_snapshot.get("removed", [])
+@@ -1220,6 +1323,36 @@ def generate_daily_plan(
+     }
+     removed_candidate_exclusions: List[Dict[str, Any]] = []
+     stale_holdings_alert: List[str] = []
++    if runtime_binding_evidence is not None:
++        materialized_entry_universe = list(official_universe_symbols or [])
++        existing_holdings = [str(symbol).strip().upper() for symbol in current_state.current_symbols]
++        managed_symbols = sorted({
++            *materialized_entry_universe,
++            *existing_holdings,
++            *(str(symbol).strip().upper() for symbol in current_state.hedge_symbols),
++            str(benchmark_symbol).strip().upper(),
++        })
++        runtime_binding_evidence = record_runtime_universe(
++            runtime_binding_evidence,
++            requested=requested_entry_universe,
++            materialized=materialized_entry_universe,
++            excluded=universe_exclusions,
++            existing_holdings=existing_holdings,
++            managed_symbols=managed_symbols,
++        )
++        validate_runtime_consumption(merged_config, runtime_binding_evidence)
++        if pinned_config_snapshot is not None:
++            validate_pinned_runtime_evidence(
++                pinned_config_snapshot.get("runtime_binding"),
++                runtime_binding_evidence,
++                include_materialization=True,
++            )
++        universe_metadata = {
++            **universe_metadata,
++            "requested_entry_universe": runtime_binding_evidence["requested_entry_universe"],
++            "materialized_entry_universe": runtime_binding_evidence["materialized_entry_universe"],
++            "excluded_symbols": runtime_binding_evidence["excluded_symbols"],
++        }
+     
+     # 3. 신규 매수 후보 스크리닝 (Raw Signals)
+     screener_kwargs: Dict[str, Any] = {
+@@ -1228,6 +1361,8 @@ def generate_daily_plan(
+     }
+     if official_universe_symbols is not None:
+         screener_kwargs["tickers"] = official_universe_symbols
++    if runtime_binding_evidence is not None:
++        screener_kwargs["runtime_config"] = merged_config
+     df_candidates = build_screener_results(**screener_kwargs)
+     if asof_context is not None and not df_candidates.empty:
+         candidate_date_col = "Date" if "Date" in df_candidates.columns else "date" if "date" in df_candidates.columns else None
+@@ -1738,6 +1873,7 @@ def generate_daily_plan(
+                 universe_metadata=universe_metadata,
+                 asof_context=asof_context,
+                 immutable=asof_context is not None,
++                runtime_binding=runtime_binding_evidence,
+             )
+ 
+     if asof_context is not None:
+@@ -1825,6 +1961,7 @@ def generate_daily_plan(
+             config_snapshot_path=config_snapshot_path,
+             state_snapshot_path=state_snapshot_path,
+             as_of_lineage=as_of_lineage,
++            runtime_binding=runtime_binding_evidence,
+         )
+         write_daily_plan_json_sidecar(path=sidecar_path, payload=sidecar_payload)
+         
+diff --git a/core/paper_config_snapshot.py b/core/paper_config_snapshot.py
+index b226166..772790a 100644
+--- a/core/paper_config_snapshot.py
++++ b/core/paper_config_snapshot.py
+@@ -49,6 +49,7 @@ def build_paper_config_snapshot_payload(
+     data_date: str | None = None,
+     trade_date: str | None = None,
+     asof_context: StageAAsOfContext | None = None,
++    runtime_binding: dict[str, Any] | None = None,
+ ) -> dict[str, Any]:
+     weights = _extract_strategy_weights(final_config)
+     market_status_summary = {
+@@ -74,7 +75,7 @@ def build_paper_config_snapshot_payload(
+     }
+     observed_at = asof_context.observed_at if asof_context is not None else datetime.now().astimezone().isoformat(timespec="seconds")
+     effective_at = asof_context.trade_date if asof_context is not None else (trade_date or plan_date)
+-    return {
++    payload = {
+         "schema_version": 1,
+         "plan_date": plan_date,
+         "data_date": data_date or plan_date,
+@@ -98,6 +99,9 @@ def build_paper_config_snapshot_payload(
+             "Official Stage A reuse is validated by the AS-OF contract when enabled.",
+         ],
+     }
++    if runtime_binding is not None:
++        payload["runtime_binding"] = _json_safe(runtime_binding)
++    return payload
+ 
+ 
+ def save_paper_config_snapshot(
+@@ -113,6 +117,7 @@ def save_paper_config_snapshot(
+     trade_date: str | None = None,
+     asof_context: StageAAsOfContext | None = None,
+     immutable: bool = False,
++    runtime_binding: dict[str, Any] | None = None,
+ ) -> Path:
+     output_path = Path(output_path)
+     archive_dir = Path(archive_dir)
+@@ -143,6 +148,7 @@ def save_paper_config_snapshot(
+         data_date=data_date,
+         trade_date=trade_date,
+         asof_context=asof_context,
++        runtime_binding=runtime_binding,
+     )
+     output_path.write_text(
+         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+diff --git a/screener/screener.py b/screener/screener.py
+index 80eb383..ea73d49 100644
+--- a/screener/screener.py
++++ b/screener/screener.py
+@@ -49,18 +49,22 @@ DEFAULT_SCREEN_START_DATE = "2023-01-01"
+ DEFAULT_RESULTS_CSV = OUTPUTS / "screener_results.csv"
+ 
+ 
+-def _prepare_data_for_ensemble(df: pd.DataFrame) -> pd.DataFrame | None:
++def _prepare_data_for_ensemble(
++    df: pd.DataFrame,
++    params: dict | None = None,
++) -> pd.DataFrame | None:
+     if df is None or df.empty:
+         return None
+ 
+     try:
+-        df = indicator.add_turtle_indicators(df, DEFAULT_PARAMS)
+-        df = indicator.add_rsi_indicators(df, DEFAULT_PARAMS)
+-        df = indicator.add_sma_indicators(df, DEFAULT_PARAMS)
+-        df = indicator.add_bollinger_band_indicators(df, DEFAULT_PARAMS)
+-        df = indicator.add_macd_indicators(df, DEFAULT_PARAMS)
+-        df = indicator.add_bbs_indicators(df, DEFAULT_PARAMS)
+-        df = indicator.add_dema_indicators(df, DEFAULT_PARAMS)
++        effective_params = {**DEFAULT_PARAMS, **(params or {})}
++        df = indicator.add_turtle_indicators(df, effective_params)
++        df = indicator.add_rsi_indicators(df, effective_params)
++        df = indicator.add_sma_indicators(df, effective_params)
++        df = indicator.add_bollinger_band_indicators(df, effective_params)
++        df = indicator.add_macd_indicators(df, effective_params)
++        df = indicator.add_bbs_indicators(df, effective_params)
++        df = indicator.add_dema_indicators(df, effective_params)
+     except Exception:
+         return None
+ 
+@@ -78,6 +82,7 @@ def build_screener_results(
+     market_state: dict | None = None,
+     start_date: str = DEFAULT_SCREEN_START_DATE,
+     end_date: str | None = None,
++    runtime_config: dict | None = None,
+ ) -> pd.DataFrame:
+     state = _resolve_market_state(market_state)
+     regime = state["regime"]
+@@ -99,6 +104,12 @@ def build_screener_results(
+ 
+     print(f"  Total tickers: {len(tickers)}")
+     recommendations: list[dict] = []
++    effective_params = {**DEFAULT_PARAMS, **(runtime_config or {})}
++    effective_weights = {
++        name: effective_params.get(f"{name}_weight", weight)
++        for name, weight in STRATEGY_WEIGHTS.items()
++    }
++    effective_threshold = effective_params.get("score_threshold", SCORE_THRESHOLD)
+ 
+     print("\n[Step 3] Screening...")
+     for symbol in tqdm(tickers):
+@@ -113,16 +124,20 @@ def build_screener_results(
+                 if df.empty or len(df) < 200:
+                     continue
+ 
+-            df = _prepare_data_for_ensemble(df)
++            df = (
++                _prepare_data_for_ensemble(df, effective_params)
++                if runtime_config is not None
++                else _prepare_data_for_ensemble(df)
++            )
+             if df is None:
+                 continue
+ 
+-            df = strategy.apply_ensemble_strategy(df, DEFAULT_PARAMS)
++            df = strategy.apply_ensemble_strategy(df, effective_params)
+ 
+             latest_row = df.iloc[-1]
+-            score, reasons = compute_candidate_score(latest_row, STRATEGY_WEIGHTS)
++            score, reasons = compute_candidate_score(latest_row, effective_weights)
+ 
+-            if is_enterable_candidate(score, SCORE_THRESHOLD, regime):
++            if is_enterable_candidate(score, effective_threshold, regime):
+                 recommendations.append(
+                     {
+                         "Symbol": symbol,
+@@ -218,12 +233,14 @@ def run_screener(
+     save: bool = True,
+     db_path: str | None = None,
+     csv_output_path: str | Path | None = None,
++    runtime_config: dict | None = None,
+ ) -> pd.DataFrame:
+     df_result = build_screener_results(
+         tickers=tickers,
+         market_state=market_state,
+         start_date=start_date,
+         end_date=end_date,
++        runtime_config=runtime_config,
+     )
+ 
+     if save and not df_result.empty:
+diff --git a/scripts/paper.py b/scripts/paper.py
+index f4f5d99..bdcab8e 100644
+--- a/scripts/paper.py
++++ b/scripts/paper.py
+@@ -677,6 +677,9 @@ def handle_plan(args: argparse.Namespace) -> int:
+ 
+     try:
+         if explicit_mode:
++            binding_kwargs = {}
++            if getattr(args, "runbook_state_json", None):
++                binding_kwargs["runbook_state_path"] = args.runbook_state_json
+             report_path = _call_with_optional_account_paths(
+                 run_paper_daily_plan,
+                 None,
+@@ -684,6 +687,7 @@ def handle_plan(args: argparse.Namespace) -> int:
+                 data_date=data_date,
+                 trade_date=preflight_date,
+                 enforce_asof_contract=bool(getattr(args, "enforce_asof_contract", False)),
++                **binding_kwargs,
+             )
+         else:
+             report_path = _call_with_optional_account_paths(
+@@ -1087,6 +1091,7 @@ def build_parser() -> argparse.ArgumentParser:
+     plan_parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
+     plan_parser.add_argument("--account-id", required=True, help="Initialized paper account id.")
+     plan_parser.add_argument("--enforce-asof-contract", action="store_true", help=argparse.SUPPRESS)
++    plan_parser.add_argument("--runbook-state-json", help=argparse.SUPPRESS)
+     plan_parser.set_defaults(handler=handle_plan)
+ 
+     eod_parser = subparsers.add_parser(
+diff --git a/scripts/run_paper_daily_plan.py b/scripts/run_paper_daily_plan.py
+index e56b170..7742386 100644
+--- a/scripts/run_paper_daily_plan.py
++++ b/scripts/run_paper_daily_plan.py
+@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
+ from core.daily_plan_generator import generate_daily_plan
+ from core.paper_account_guard import require_initialized_writer_account_paths
+ from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths, latest_current_state_snapshot_path
++from core.paper_runtime_binding import resolve_runtime_binding
+ from core.paper_state_provider import load_official_paper_state_for_daily_plan
+ from core.stage_a_asof_contract import (
+     StageAAsOfContext,
+@@ -127,6 +128,7 @@ def run_paper_daily_plan(
+     trade_date: str | None = None,
+     enforce_asof_contract: bool = False,
+     observed_at: str | None = None,
++    runbook_state_path: str | Path | None = None,
+ ) -> str:
+     explicit_mode = data_date is not None or trade_date is not None
+     if explicit_mode:
+@@ -144,6 +146,30 @@ def run_paper_daily_plan(
+         account_paths,
+         command_name="run_paper_daily_plan",
+     )
++    frozen_binding = None
++    if runbook_state_path is not None:
++        from scripts import runbook_state
++
++        state = runbook_state.load_state(Path(runbook_state_path))
++        expected_context = {
++            "account_id": account_paths.account_id,
++            "data_date": normalized_data_date or normalized_db_date,
++            "trade_date": normalized_db_date,
++        }
++        actual_context = {
++            "account_id": state.frozen_context.account_id,
++            "data_date": state.frozen_context.data_date,
++            "trade_date": state.frozen_context.trade_date,
++        }
++        if actual_context != expected_context:
++            raise ValueError("runbook_state_context_mismatch")
++        frozen_binding = getattr(state.frozen_context, "binding", None)
++        if frozen_binding is None:
++            raise ValueError("runbook_state_frozen_binding_required")
++    runtime_binding = resolve_runtime_binding(
++        account_paths.account_id,
++        frozen_binding=frozen_binding,
++    )
+     asof_context = None
+     if enforce_asof_contract:
+         if normalized_data_date is None:
+@@ -247,6 +273,7 @@ def run_paper_daily_plan(
+         asof_context=asof_context,
+         pinned_config_snapshot=pinned_config_snapshot,
+         account_lineage=account_lineage if asof_context is not None else None,
++        account_binding=runtime_binding,
+     )
+ 
+ 
+@@ -256,6 +283,7 @@ def main() -> int:
+     parser.add_argument("--data-date", help="Completed market data date (YYYYMMDD or YYYY-MM-DD)")
+     parser.add_argument("--trade-date", help="Paper trade/plan date (YYYYMMDD or YYYY-MM-DD)")
+     parser.add_argument("--account-id", required=True, help="Initialized paper account id")
++    parser.add_argument("--runbook-state-json", help=argparse.SUPPRESS)
+     args = parser.parse_args()
+ 
+     try:
+@@ -265,6 +293,7 @@ def main() -> int:
+             account_paths=account_paths,
+             data_date=args.data_date,
+             trade_date=args.trade_date,
++            runbook_state_path=args.runbook_state_json,
+         )
+     except (ValueError, StageAAsOfContractError) as exc:
+         print(f"Paper daily plan aborted: {exc}")
+diff --git a/scripts/runbook_command_registry.py b/scripts/runbook_command_registry.py
+index ea203a0..8a638b4 100644
+--- a/scripts/runbook_command_registry.py
++++ b/scripts/runbook_command_registry.py
+@@ -198,6 +198,8 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
+             "--account-id",
+             "{account_id}",
+             "--enforce-asof-contract",
++            "--runbook-state-json",
++            "{runbook_state_path}",
+         ),
+         command_type="LOCAL_ARTIFACT_WRITE",
+         phase1_auto_execute=True,
+diff --git a/scripts/runbook_stage_runner.py b/scripts/runbook_stage_runner.py
+index 2354d40..e872eb2 100644
+--- a/scripts/runbook_stage_runner.py
++++ b/scripts/runbook_stage_runner.py
+@@ -5039,7 +5039,14 @@ def _run_stage_a_command(
+     dry_run: bool,
+     timeout_sec: int,
+ ) -> tuple[dict[str, Any], str]:
+-    rendered_argv = render_argv_template(command, state.frozen_context, state.artifacts)
++    render_values = dict(state.artifacts)
++    render_values["runbook_state_path"] = str(runbook_state.get_state_path_for_context(
++        workspace,
++        state.frozen_context.account_id,
++        state.frozen_context.data_date,
++        state.frozen_context.trade_date,
++    ))
++    rendered_argv = render_argv_template(command, state.frozen_context, render_values)
+     argv = normalize_python_script_argv(rendered_argv, repo_root)
+     if dry_run:
+         process = {
+diff --git a/core/paper_runtime_binding.py b/core/paper_runtime_binding.py
+new file mode 100644
+index 0000000..06dd252
+--- /dev/null
++++ b/core/paper_runtime_binding.py
+@@ -0,0 +1,160 @@
++"""Per-call Paper Daily Plan runtime derived from a frozen account binding."""
++from __future__ import annotations
++
++import copy
++from typing import Any
++
++from core.config_factory import get_regime_config, make_config
++from core.paper_account_binding import (
++    BindingError,
++    assert_binding_matches,
++    resolve_account_binding,
++    validate_binding,
++)
++from core.paper_account_profile import (
++    VERSIONED_ACCOUNT_PROFILE_SCHEMA,
++    load_paper_account_profiles,
++)
++
++
++def resolve_runtime_binding(
++    account_id: str,
++    *,
++    frozen_binding: dict[str, Any] | None = None,
++) -> dict[str, Any] | None:
++    """Resolve current binding and, when supplied, prove it matches frozen evidence."""
++    profiles = load_paper_account_profiles(allow_missing=True)
++    if profiles.schema_version != VERSIONED_ACCOUNT_PROFILE_SCHEMA:
++        if frozen_binding is not None:
++            raise BindingError("frozen binding requires versioned account profiles")
++        return None
++    current = resolve_account_binding(account_id, profiles=profiles)
++    if frozen_binding is not None:
++        assert_binding_matches(frozen_binding, current)
++        return copy.deepcopy(frozen_binding)
++    validate_binding(current)
++    return copy.deepcopy(current)
++
++
++def build_runtime_config(
++    binding: dict[str, Any],
++    *,
++    active_regime: str,
++    start_date: str,
++    end_date: str,
++) -> tuple[dict[str, Any], dict[str, Any]]:
++    """Assemble account-local config without mutating module-global configuration."""
++    validate_binding(binding)
++    semantics = binding["semantics"]
++    strategy_base = copy.deepcopy(semantics["effective_strategy_base"])
++    regime_policy = copy.deepcopy(semantics["regime_policy"])
++    shared_policy = copy.deepcopy(semantics["shared_policy"])
++
++    base_config = make_config({}, start_date, end_date)
++    base_config.update(strategy_base)
++    base_config.update(regime_policy)
++    base_config.update(shared_policy)
++    base_config["REGIME_RULES"] = copy.deepcopy(regime_policy["REGIME_RULES"])
++
++    rules = regime_policy["REGIME_RULES"]
++    applied_regime = active_regime if active_regime in rules else "UNSTABLE"
++    applied_overlay = copy.deepcopy(rules.get(applied_regime, {}))
++    runtime_config = get_regime_config(active_regime, base_config)
++
++    effective_runtime_strategy = copy.deepcopy(strategy_base)
++    for key, value in applied_overlay.items():
++        if key == "description":
++            continue
++        if key == "weights":
++            for name, weight in value.items():
++                effective_runtime_strategy[f"{name}_weight"] = weight
++        else:
++            effective_runtime_strategy[key] = value
++
++    evidence = {
++        "schema_version": "paper_runtime_binding.v1",
++        "binding_digest": binding["digest"],
++        "strategy_reference": copy.deepcopy(semantics["strategy"]["reference"]),
++        "universe_reference": copy.deepcopy(semantics["universe"]["reference"]),
++        "effective_strategy_base": strategy_base,
++        "regime_policy": regime_policy,
++        "active_regime": active_regime,
++        "applied_regime": applied_regime,
++        "applied_regime_overlay": applied_overlay,
++        "effective_runtime_strategy": effective_runtime_strategy,
++        "shared_policy": shared_policy,
++        "entry_universe_definition": copy.deepcopy(semantics["universe"]["content"]),
++        "requested_entry_universe": [],
++        "materialized_entry_universe": [],
++        "excluded_symbols": [],
++        "managed_symbols": [],
++        "existing_holdings_preserved": [],
++        "runtime_frozen_validation": "PASS",
++    }
++    validate_runtime_consumption(runtime_config, evidence)
++    return runtime_config, evidence
++
++
++def validate_runtime_consumption(
++    runtime_config: dict[str, Any],
++    runtime_evidence: dict[str, Any],
++) -> None:
++    """Fail closed if a consumer config differs from its frozen derived values."""
++    for key, expected in runtime_evidence["effective_runtime_strategy"].items():
++        if runtime_config.get(key) != expected:
++            raise BindingError(f"runtime strategy mismatch: {key}")
++    for key, expected in runtime_evidence["shared_policy"].items():
++        if runtime_config.get(key) != expected:
++            raise BindingError(f"runtime shared policy mismatch: {key}")
++    for key, expected in runtime_evidence["regime_policy"].items():
++        if runtime_config.get(key) != expected:
++            raise BindingError(f"runtime regime policy mismatch: {key}")
++
++
++def validate_pinned_runtime_evidence(
++    pinned: Any,
++    current: dict[str, Any],
++    *,
++    include_materialization: bool,
++) -> None:
++    """Validate optional prior runtime evidence without migrating older snapshots."""
++    if pinned is None:
++        return
++    if not isinstance(pinned, dict):
++        raise BindingError("malformed pinned runtime binding evidence")
++    fields = [
++        "account_id", "binding_digest", "strategy_reference", "universe_reference",
++        "effective_strategy_base", "regime_policy", "shared_policy", "active_regime",
++        "applied_regime", "applied_regime_overlay", "effective_runtime_strategy",
++        "entry_universe_definition", "runtime_frozen_validation",
++    ]
++    if include_materialization:
++        fields.extend([
++            "requested_entry_universe", "materialized_entry_universe", "excluded_symbols",
++            "managed_symbols", "existing_holdings_preserved",
++        ])
++    for field in fields:
++        if pinned.get(field) != current.get(field):
++            raise BindingError(f"pinned runtime binding mismatch: {field}")
++
++
++def record_runtime_universe(
++    runtime_evidence: dict[str, Any],
++    *,
++    requested: list[str],
++    materialized: list[str],
++    excluded: list[dict[str, str]],
++    existing_holdings: list[str],
++    managed_symbols: list[str],
++) -> dict[str, Any]:
++    """Return deterministic runtime evidence after entry-universe materialization."""
++    result = copy.deepcopy(runtime_evidence)
++    result["requested_entry_universe"] = sorted(set(requested))
++    result["materialized_entry_universe"] = sorted(set(materialized))
++    result["excluded_symbols"] = sorted(
++        ({"symbol": row["symbol"], "reason": row["reason"]} for row in excluded),
++        key=lambda row: (row["symbol"], row["reason"]),
++    )
++    result["existing_holdings_preserved"] = sorted(set(existing_holdings))
++    result["managed_symbols"] = sorted(set(managed_symbols))
++    return result
+diff --git a/tests/test_ml1_2b_runtime_binding.py b/tests/test_ml1_2b_runtime_binding.py
+new file mode 100644
+index 0000000..d423ed5
+--- /dev/null
++++ b/tests/test_ml1_2b_runtime_binding.py
+@@ -0,0 +1,400 @@
++from __future__ import annotations
++
++import copy
++import json
++from pathlib import Path
++
++import pandas as pd
++import pytest
++
++from core import daily_plan_generator as daily_plan
++from core import paper_account_binding as binding
++from core import paper_account_profile as profiles
++from core import paper_runtime_binding as runtime
++from core.paper_config_snapshot import build_paper_config_snapshot_payload
++from core.target_portfolio_state import CurrentPortfolioState, RebalanceDecision, TargetPortfolioState
++from screener import screener
++from scripts import run_paper_daily_plan, runbook_command_registry, runbook_stage_runner, runbook_state
++from tests.paper_account_test_support import create_initialized_account_paths
++
++
++def _write_json(path: Path, payload: dict) -> None:
++    path.write_text(json.dumps(payload), encoding="utf-8")
++
++
++@pytest.fixture
++def binding_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
++    account_path = tmp_path / "profiles.json"
++    registry_path = tmp_path / "registry.json"
++    account_payload = {
++        "schema_version": profiles.VERSIONED_ACCOUNT_PROFILE_SCHEMA,
++        "default_account_id": "synthetic_a",
++        "accounts": [
++            {
++                "account_id": "synthetic_a", "display_name": "A", "currency": "USD",
++                "initial_cash": 100000, "account_type": "paper", "is_default": True,
++                "strategy_profile": "strategy_a", "strategy_version": "v1",
++                "universe_profile": "universe_a", "universe_version": "v1",
++            },
++            {
++                "account_id": "synthetic_b", "display_name": "B", "currency": "USD",
++                "initial_cash": 100000, "account_type": "paper", "is_default": False,
++                "strategy_profile": "strategy_b", "strategy_version": "v1",
++                "universe_profile": "universe_b", "universe_version": "v1",
++            },
++        ],
++    }
++    registry_payload = {
++        "schema_version": binding.REGISTRY_SCHEMA,
++        "strategy": [
++            {"id": "strategy_a", "version": "v1", "content": {"parameters": {
++                "entry_period": 12, "score_threshold": 1.25,
++            }}},
++            {"id": "strategy_b", "version": "v1", "content": {"parameters": {
++                "entry_period": 33, "score_threshold": 4.5,
++            }}},
++        ],
++        "universe": [
++            {"id": "universe_a", "version": "v1", "content": {
++                "kind": "symbols", "symbols": ["BBB", "AAA"],
++            }},
++            {"id": "universe_b", "version": "v1", "content": {
++                "kind": "shared_snapshot",
++            }},
++        ],
++    }
++    _write_json(account_path, account_payload)
++    _write_json(registry_path, registry_payload)
++    monkeypatch.setattr(profiles, "_default_settings_path", lambda: account_path)
++    monkeypatch.setattr(binding, "paper_binding_registry_path", lambda: registry_path)
++    return {
++        "accounts": account_payload,
++        "account_path": account_path,
++        "registry": registry_payload,
++        "registry_path": registry_path,
++    }
++
++
++def _empty_state(*, holdings: list[str] | None = None) -> CurrentPortfolioState:
++    symbols = holdings or []
++    return CurrentPortfolioState(
++        current_symbols=symbols,
++        current_cash_ratio=1.0,
++        current_hedge_ratio=0.0,
++        absolute_cash=100000.0,
++        shares={symbol: 1 for symbol in symbols},
++        avg_price={symbol: 10.0 for symbol in symbols},
++        highest_prices={symbol: 10.0 for symbol in symbols},
++        highest_price_meta={},
++        hedge_symbols=[],
++    )
++
++
++def test_strategy_regime_and_shared_policy_derive_only_from_binding(binding_environment):
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    config, evidence = runtime.build_runtime_config(
++        frozen, active_regime="BULL", start_date="2026-10-01", end_date="2026-10-01"
++    )
++
++    assert config["entry_period"] == 12
++    assert config["score_threshold"] == 1.25
++    assert evidence["effective_strategy_base"] == frozen["semantics"]["effective_strategy_base"]
++    assert evidence["applied_regime_overlay"] == frozen["semantics"]["regime_policy"]["REGIME_RULES"]["BULL"]
++    assert evidence["shared_policy"] == frozen["semantics"]["shared_policy"]
++    for key, value in evidence["shared_policy"].items():
++        assert config[key] == value
++
++
++@pytest.mark.parametrize("regime", ["BULL", "BEAR"])
++def test_active_regime_overlay_is_account_local(binding_environment, regime):
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    _, evidence = runtime.build_runtime_config(
++        frozen, active_regime=regime, start_date="2026-10-01", end_date="2026-10-01"
++    )
++    assert evidence["applied_regime"] == regime
++    assert evidence["applied_regime_overlay"] == frozen["semantics"]["regime_policy"]["REGIME_RULES"][regime]
++
++
++def test_account_a_b_are_order_independent_without_global_contamination(binding_environment):
++    frozen_a = runtime.resolve_runtime_binding("synthetic_a")
++    frozen_b = runtime.resolve_runtime_binding("synthetic_b")
++
++    a_first = runtime.build_runtime_config(frozen_a, active_regime="BULL", start_date="x", end_date="x")
++    b_second = runtime.build_runtime_config(frozen_b, active_regime="BEAR", start_date="x", end_date="x")
++    b_first = runtime.build_runtime_config(frozen_b, active_regime="BEAR", start_date="x", end_date="x")
++    a_second = runtime.build_runtime_config(frozen_a, active_regime="BULL", start_date="x", end_date="x")
++
++    assert a_first == a_second
++    assert b_first == b_second
++    assert a_first[0]["entry_period"] == 12
++    assert b_first[0]["entry_period"] == 33
++    assert a_first[1]["entry_universe_definition"]["symbols"] == ["AAA", "BBB"]
++    assert b_first[1]["entry_universe_definition"] == {"kind": "shared_snapshot"}
++
++
++def test_frozen_current_drift_fails_before_runtime(binding_environment):
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    binding_environment["registry"]["strategy"][0]["content"]["parameters"]["entry_period"] = 13
++    _write_json(binding_environment["registry_path"], binding_environment["registry"])
++    with pytest.raises(binding.BindingError, match="drift"):
++        runtime.resolve_runtime_binding("synthetic_a", frozen_binding=frozen)
++
++
++def test_runtime_consumption_tamper_fails_closed(binding_environment):
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    config, evidence = runtime.build_runtime_config(
++        frozen, active_regime="BULL", start_date="x", end_date="x"
++    )
++    config["entry_period"] = 999
++    with pytest.raises(binding.BindingError, match="runtime strategy mismatch"):
++        runtime.validate_runtime_consumption(config, evidence)
++
++
++def test_pinned_regime_or_shared_policy_drift_fails_closed(binding_environment):
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    config, evidence = runtime.build_runtime_config(
++        frozen, active_regime="BULL", start_date="x", end_date="x"
++    )
++    for key in ("REGIME_ADX_THRESHOLD", "max_long_positions"):
++        changed = copy.deepcopy(config)
++        changed[key] = changed[key] + 1
++        with pytest.raises(binding.BindingError, match="runtime (regime|shared) policy mismatch"):
++            runtime.validate_runtime_consumption(changed, evidence)
++
++
++def test_pinned_runtime_evidence_drift_fails_closed_without_migrating_legacy(binding_environment):
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    _, evidence = runtime.build_runtime_config(
++        frozen, active_regime="BULL", start_date="x", end_date="x"
++    )
++    runtime.validate_pinned_runtime_evidence(None, evidence, include_materialization=False)
++    changed = copy.deepcopy(evidence)
++    changed["effective_strategy_base"]["entry_period"] = 999
++    with pytest.raises(binding.BindingError, match="pinned runtime binding mismatch"):
++        runtime.validate_pinned_runtime_evidence(changed, evidence, include_materialization=False)
++
++
++def test_explicit_universe_materialization_records_missing_data(monkeypatch):
++    monkeypatch.setattr(
++        daily_plan.data_manager,
++        "get_price_data",
++        lambda symbol, **kwargs: pd.DataFrame(index=range(210 if symbol != "BBB" else 10)),
++    )
++    materialized, excluded = daily_plan.materialize_explicit_entry_universe(
++        ["BBB", "AAA", "CCC"], end_date="2026-10-01"
++    )
++    assert materialized == ["AAA", "CCC"]
++    assert excluded == [{"symbol": "BBB", "reason": "missing_market_data"}]
++
++
++def test_existing_holdings_are_preserved_outside_entry_universe(binding_environment):
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    _, evidence = runtime.build_runtime_config(
++        frozen, active_regime="BULL", start_date="x", end_date="x"
++    )
++    recorded = runtime.record_runtime_universe(
++        evidence,
++        requested=["AAA", "BBB"],
++        materialized=["AAA"],
++        excluded=[{"symbol": "BBB", "reason": "missing_market_data"}],
++        existing_holdings=["ZZZ"],
++        managed_symbols=["AAA", "ZZZ", "SPY"],
++    )
++    assert recorded["materialized_entry_universe"] == ["AAA"]
++    assert recorded["existing_holdings_preserved"] == ["ZZZ"]
++    assert recorded["managed_symbols"] == ["AAA", "SPY", "ZZZ"]
++
++
++def test_screener_consumes_per_call_runtime_config(monkeypatch):
++    index = pd.date_range("2026-01-01", periods=210)
++    frame = pd.DataFrame({"close": range(210)}, index=index)
++    captured: dict = {}
++    monkeypatch.setattr(screener.data_manager, "get_price_data", lambda *args, **kwargs: frame.copy())
++    def prepare(df, params):
++        captured["params"] = params
++        return df
++
++    def apply_strategy(df, params):
++        captured["strategy_params"] = params
++        return df
++
++    def score(row, weights):
++        captured["weights"] = weights
++        return 9.0, ["x"]
++
++    def enterable(score_value, threshold, regime):
++        captured["threshold"] = threshold
++        return True
++
++    monkeypatch.setattr(screener, "_prepare_data_for_ensemble", prepare)
++    monkeypatch.setattr(screener.strategy, "apply_ensemble_strategy", apply_strategy)
++    monkeypatch.setattr(screener, "compute_candidate_score", score)
++    monkeypatch.setattr(screener, "is_enterable_candidate", enterable)
++
++    config = {"entry_period": 7, "turtle_weight": 8.0, "score_threshold": 6.0}
++    result = screener.build_screener_results(
++        tickers=["AAA"], market_state={"regime": "BULL", "plan": {}}, runtime_config=config
++    )
++    assert not result.empty
++    assert captured["params"]["entry_period"] == 7
++    assert captured["strategy_params"]["entry_period"] == 7
++    assert captured["weights"]["turtle"] == 8.0
++    assert captured["threshold"] == 6.0
++
++
++def _patch_daily_plan_dependencies(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
++    monkeypatch.setattr(daily_plan.market_analyzer, "get_market_state", lambda **kwargs: {
++        "date": "2026-10-01", "regime": "BULL", "trade_halted": False,
++        "vix_value": 10.0, "triggers": {}, "plan": {},
++    })
++    monkeypatch.setattr(daily_plan, "load_market_index_series", lambda *args, **kwargs: pd.Series(dtype="float64"))
++    monkeypatch.setattr(daily_plan.data_manager, "get_price_data", lambda symbol, **kwargs: pd.DataFrame(index=range(210 if symbol == "AAA" else 0)))
++    monkeypatch.setattr(daily_plan, "build_screener_results", lambda **kwargs: captured.update(screener=kwargs) or pd.DataFrame())
++    monkeypatch.setattr(daily_plan, "build_target_portfolio_state", lambda *args, **kwargs: TargetPortfolioState(
++        market_state="BULL", target_cash_ratio=0.05, target_hedge_ratio=0.0,
++        target_long_slots=0, target_symbols=[],
++    ))
++    monkeypatch.setattr(daily_plan, "evaluate_rebalance_need", lambda *args, **kwargs: RebalanceDecision(
++        rebalance_needed=False, rebalance_reason=[], symbol_diff_added=[], symbol_diff_removed=[],
++        cash_ratio_diff=0.0, hedge_ratio_diff=0.0,
++    ))
++    monkeypatch.setattr(daily_plan, "get_cash_policy_status", lambda *args, **kwargs: {
++        "total_equity": 100000, "current_cash": 100000, "current_cash_ratio": 1.0,
++        "target_cash_ratio": 0.05, "required_cash_buffer": 5000,
++        "available_buying_power": 95000, "is_violating_buffer": False,
++    })
++    monkeypatch.setattr(daily_plan, "format_markdown_report", lambda *args, **kwargs: "# plan\n")
++
++
++def test_daily_plan_explicit_binding_controls_entry_stream_and_evidence(
++    binding_environment, monkeypatch, tmp_path,
++):
++    captured: dict = {}
++    _patch_daily_plan_dependencies(monkeypatch, captured)
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    output = tmp_path / "plan.md"
++    daily_plan.generate_daily_plan(
++        date_str="2026-10-02", data_date="2026-10-01", current_state=_empty_state(),
++        output_path=output, account_id="synthetic_a", account_binding=frozen,
++    )
++    payload = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
++    assert captured["screener"]["tickers"] == ["AAA"]
++    assert captured["screener"]["runtime_config"]["entry_period"] == 12
++    assert payload["runtime_binding"]["requested_entry_universe"] == ["AAA", "BBB"]
++    assert payload["runtime_binding"]["account_id"] == "synthetic_a"
++    assert payload["runtime_binding"]["materialized_entry_universe"] == ["AAA"]
++    assert payload["runtime_binding"]["excluded_symbols"] == [
++        {"symbol": "BBB", "reason": "missing_market_data"}
++    ]
++
++
++def test_daily_plan_shared_snapshot_binding_controls_entry_stream(
++    binding_environment, monkeypatch, tmp_path,
++):
++    captured: dict = {}
++    _patch_daily_plan_dependencies(monkeypatch, captured)
++    monkeypatch.setattr(daily_plan, "load_universe_snapshot_as_of_quarter", lambda date: {
++        "snapshot": {"active_symbols": ["ZZZ", "CCC"], "removed": []},
++        "metadata": {"policy": "quarterly_as_of", "warning": None},
++    })
++    frozen = runtime.resolve_runtime_binding("synthetic_b")
++    output = tmp_path / "shared.md"
++    daily_plan.generate_daily_plan(
++        date_str="2026-10-02", data_date="2026-10-01", current_state=_empty_state(),
++        output_path=output, account_id="synthetic_b", account_binding=frozen,
++    )
++    payload = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
++    assert captured["screener"]["tickers"] == ["CCC", "ZZZ"]
++    assert payload["runtime_binding"]["requested_entry_universe"] == ["CCC", "ZZZ"]
++    assert payload["runtime_binding"]["materialized_entry_universe"] == ["CCC", "ZZZ"]
++    assert payload["runtime_binding"]["excluded_symbols"] == []
++
++
++def test_config_snapshot_preserves_runtime_consumed_value_evidence(binding_environment):
++    frozen = runtime.resolve_runtime_binding("synthetic_a")
++    config, evidence = runtime.build_runtime_config(
++        frozen, active_regime="BULL", start_date="x", end_date="x"
++    )
++    evidence["account_id"] = "synthetic_a"
++    payload = build_paper_config_snapshot_payload(
++        plan_date="2026-10-02",
++        data_date="2026-10-01",
++        trade_date="2026-10-02",
++        market_state={"regime": "BULL"},
++        final_config=config,
++        source="test",
++        market_state_write_log=False,
++        runtime_binding=evidence,
++    )
++    assert payload["runtime_binding"] == evidence
++    assert payload["runtime_binding"]["strategy_reference"] == {"id": "strategy_a", "version": "v1"}
++
++
++def test_runbook_state_binding_is_passed_and_drift_blocks(
++    binding_environment, monkeypatch, tmp_path,
++):
++    account_paths = create_initialized_account_paths(
++        tmp_path / "account", account_id="synthetic_a", date_str="2026-10-01"
++    )
++    state = runbook_state.create_initial_state("synthetic_a", "2026-10-01", "2026-10-02")
++    state_path = tmp_path / "state.json"
++    runbook_state.save_state(state, state_path)
++    monkeypatch.setattr(run_paper_daily_plan, "load_official_paper_state_for_daily_plan", lambda *args, **kwargs: _empty_state())
++    captured: dict = {}
++    monkeypatch.setattr(run_paper_daily_plan, "generate_daily_plan", lambda **kwargs: captured.update(kwargs) or str(kwargs["output_path"]))
++
++    run_paper_daily_plan.run_paper_daily_plan(
++        account_paths=account_paths, data_date="2026-10-01", trade_date="2026-10-02",
++        runbook_state_path=state_path,
++    )
++    assert captured["account_binding"] == state.frozen_context.binding
++
++    changed = copy.deepcopy(binding_environment["registry"])
++    changed["strategy"][0]["content"]["parameters"]["entry_period"] = 99
++    _write_json(binding_environment["registry_path"], changed)
++    with pytest.raises(binding.BindingError, match="drift"):
++        run_paper_daily_plan.run_paper_daily_plan(
++            account_paths=account_paths, data_date="2026-10-01", trade_date="2026-10-02",
++            runbook_state_path=state_path,
++        )
++
++
++def test_runbook_state_context_mismatch_fails_before_plan(
++    binding_environment, monkeypatch, tmp_path,
++):
++    account_paths = create_initialized_account_paths(
++        tmp_path / "account", account_id="synthetic_a", date_str="2026-10-01"
++    )
++    state = runbook_state.create_initial_state("synthetic_a", "2026-10-01", "2026-10-03")
++    state_path = tmp_path / "state.json"
++    runbook_state.save_state(state, state_path)
++    with pytest.raises(ValueError, match="runbook_state_context_mismatch"):
++        run_paper_daily_plan.run_paper_daily_plan(
++            account_paths=account_paths, data_date="2026-10-01", trade_date="2026-10-02",
++            runbook_state_path=state_path,
++        )
++
++
++def test_stage_a_daily_plan_command_pins_runbook_state_path(
++    binding_environment, monkeypatch, tmp_path,
++):
++    command = runbook_command_registry.get_command("daily_plan")
++    assert "--runbook-state-json" in command.argv_template
++    assert "{runbook_state_path}" in command.argv_template
++    state = runbook_state.create_initial_state("synthetic_a", "2026-10-01", "2026-10-02")
++    state_path = runbook_state.get_state_path_for_context(
++        tmp_path, "synthetic_a", "2026-10-01", "2026-10-02"
++    )
++    runbook_state.save_state(state, state_path)
++    captured: dict = {}
++
++    def fake_run(argv, cwd, timeout_sec):
++        captured["argv"] = argv
++        return {"executed": True, "exit_code": 1, "duration_ms": 1, "stdout": "", "stderr": "x"}
++
++    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
++    runbook_stage_runner._run_stage_a_command(
++        state, tmp_path, tmp_path, command, False, 5
++    )
++    index = captured["argv"].index("--runbook-state-json")
++    assert Path(captured["argv"][index + 1]) == state_path
+diff --git a/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md b/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
+new file mode 100644
+index 0000000..b0b5e3c
+--- /dev/null
++++ b/docs/TRD/mfu_ml1_2b_runtime_strategy_universe_binding.md
+@@ -0,0 +1,76 @@
++# MFU-ML1-2B Runtime Strategy and Universe Binding
++
++## Purpose
++
++This MFU connects the versioned, frozen account binding from ML1-2A to Paper Daily Plan runtime consumption. It does not activate a production profile or change account bootstrap, recovery, execution, or scheduler behavior.
++
++## Runtime flow
++
++```text
++Stage A frozen runbook state
++  -> current binding drift check
++  -> frozen effective_strategy_base
++  -> frozen active-regime overlay
++  -> frozen shared-policy constraints
++  -> per-call runtime config
++  -> bound entry-universe materialization
++  -> screener / Daily Plan consumers
++  -> config snapshot and Daily Plan runtime evidence
++```
++
++The Stage A command passes its exact runbook state path to the Daily Plan entrypoint. The entrypoint validates account, data date, and trade date before consuming the frozen binding. A versioned direct call without a runbook state uses a call-local resolved binding. Legacy account-profile paths continue without runtime binding injection.
++
++## Strategy precedence and isolation
++
++The only account strategy base is `semantics.effective_strategy_base`. Runtime values are assembled in this order:
++
++1. Existing `make_config()` structural/default config
++2. Frozen effective strategy base
++3. Frozen regime policy and `REGIME_RULES`
++4. Frozen shared policy
++5. Existing active-regime overlay through `get_regime_config()`
++
++The runtime assembler verifies effective strategy values, the complete regime policy, and shared constraints before consumers run. Pinned config snapshots are checked against the same values. Config dictionaries are copied and passed as call arguments; module globals are not patched.
++
++The screener accepts an optional per-call runtime config. Indicator preparation, strategy application, scoring weights, and the entry threshold use that config only for the bound path. Calls without runtime injection retain the prior defaults.
++
++## Universe contract
++
++`shared_snapshot` uses the existing quarterly as-of snapshot and passes its normalized active symbols to the screener.
++
++An explicit-symbol binding sorts and checks each requested symbol against the same start-date and 200-row minimum used by the screener. Symbols without sufficient as-of market data are excluded from entry screening with deterministic evidence:
++
++```text
++reason = missing_market_data
++```
++
++Entry eligibility and position management remain separate:
++
++```text
++entry stream = materialized bound entry universe
++managed stream = entry stream + existing holdings + hedge symbols + benchmark
++```
++
++Holdings outside the entry universe therefore continue through existing valuation, risk, exit, and switching evaluation paths.
++
++## Runtime evidence and fail-closed checks
++
++The config snapshot and Daily Plan JSON sidecar record:
++
++- account ID and frozen binding digest
++- strategy and universe references
++- effective strategy base
++- active/applied regime and overlay
++- effective runtime strategy
++- shared policy
++- entry-universe definition
++- requested and materialized entry universes
++- excluded symbols and reasons
++- preserved holdings and managed symbols
++- runtime/frozen validation result
++
++If a pinned snapshot already contains this evidence, source fields and materialization fields must match the newly derived values. Older snapshots without the optional evidence field remain readable and are not migrated.
++
++## Boundaries
++
++This MFU does not perform production activation, account preparation, bootstrap writes, market refresh redesign, operational runbook execution, parallel account execution, position/trade strategy ownership, deployment, backtest changes, or optimizer changes.

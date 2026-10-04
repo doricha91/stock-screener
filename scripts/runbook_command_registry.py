@@ -198,6 +198,8 @@ RUNBOOK_COMMANDS: tuple[RunbookCommand, ...] = (
             "--account-id",
             "{account_id}",
             "--enforce-asof-contract",
+            "--runbook-state-json",
+            "{runbook_state_path}",
         ),
         command_type="LOCAL_ARTIFACT_WRITE",
         phase1_auto_execute=True,
