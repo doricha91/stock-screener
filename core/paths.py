@@ -153,3 +153,8 @@ def paper_replay_diff_config_snapshot_archive_dir() -> Path:
 
 def paper_binding_registry_path() -> Path:
     return ROOT / "config" / "paper_binding_profiles.json"
+
+
+def shared_market_preparations_dir() -> Path:
+    """Return the shared publication namespace without creating it."""
+    return OUTPUTS / "shared_market_preparations"

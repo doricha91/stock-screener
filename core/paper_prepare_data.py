@@ -129,10 +129,18 @@ def run_paper_prepare_data(
     trade_date: str | None = None,
     account_id: str = "paper_default",
     observed_at: str | None = None,
+    required_symbols: list[str] | None = None,
+    required_index_symbols: list[str] | None = None,
 ) -> dict:
     normalized_date = normalize_prepare_date(date_str)
     snapshot_path: Path | None = None
-    if include_universe and trade_date is not None:
+    if required_symbols is not None:
+        if include_universe:
+            raise ValueError("Explicit coverage must use its already resolved universe artifacts")
+        tickers = sorted(set(required_symbols))
+        if not tickers:
+            raise ValueError("Explicit stock coverage must not be empty")
+    elif include_universe and trade_date is not None:
         context = StageAAsOfContext.build(
             account_id=account_id,
             data_date=normalized_date,
@@ -163,7 +171,10 @@ def run_paper_prepare_data(
 
     if not skip_prices:
         try:
-            data_collector.update_market_indices()
+            if required_index_symbols is None:
+                data_collector.update_market_indices()
+            else:
+                data_collector.update_market_indices(additional_symbols=required_index_symbols)
             data_collector.update_tickers_info(tickers)
             data_collector.update_stock_data(tickers)
             summary["price_update_status"] = "success"

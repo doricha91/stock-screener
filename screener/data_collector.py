@@ -100,7 +100,7 @@ def update_tickers_info(tickers):
     print(f"✅ 총 {cnt}개 신규 종목 정보 업데이트 완료.")
 
 
-def update_market_indices():
+def update_market_indices(*, additional_symbols=None):
     indices = {
         'SPY': 'S&P 500 ETF', 'QQQ': 'NASDAQ 100 ETF',
         '^VIX': 'Volatility Index', '^TNX': '10-Year Treasury Yield',
@@ -112,6 +112,9 @@ def update_market_indices():
     for t in hedge_tickers:
         if t not in indices:
             indices[t] = f'Hedge Asset {t}'
+
+    for symbol in additional_symbols or []:
+        indices.setdefault(symbol, f'Required Market Input {symbol}')
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

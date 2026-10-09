@@ -244,6 +244,20 @@ def handle_preflight(args: argparse.Namespace) -> int:
     return 1 if summary["result"] == "FAIL" else 0
 
 
+def handle_prepare_shared_data(args: argparse.Namespace) -> int:
+    from core.paper_shared_market_prepare import run_shared_market_prepare
+
+    summary = run_shared_market_prepare(
+        data_date=args.data_date, participant_account_ids=args.participant_account_id,
+    )
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False))
+    else:
+        print(f"PAPER SHARED MARKET PREPARATION: {summary['result']}")
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 2 if summary["result"] == "BLOCKED" else 0
+
+
 def handle_prepare_data(args: argparse.Namespace) -> int:
     try:
         summary = run_paper_prepare_data(
@@ -995,6 +1009,14 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     subparsers = parser.add_subparsers(dest="command")
+
+    shared_parser = subparsers.add_parser(
+        "prepare-shared-data", help="Publish shared market inputs for explicit Paper participants",
+    )
+    shared_parser.add_argument("--data-date", required=True, help="Shared DATA_DATE (YYYY-MM-DD)")
+    shared_parser.add_argument("--participant-account-id", action="append", required=True)
+    shared_parser.add_argument("--json", action="store_true", help="Print the result as JSON")
+    shared_parser.set_defaults(handler=handle_prepare_shared_data)
 
     prepare_data_parser = subparsers.add_parser(
         "prepare-data",
