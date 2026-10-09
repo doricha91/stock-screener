@@ -65,6 +65,7 @@ def test_bootstrap_snapshot_contains_initial_cash_and_snapshot_date(tmp_path: Pa
         rows = list(csv.DictReader(handle))
     assert len(rows) == 1
     row = rows[0]
+    assert row["account_id"] == "paper_growth"
     assert row["snapshot_date"] == "2026-06-01"
     assert row["initial_cash"] == "123456.00"
     assert row["cash"] == "123456.00"

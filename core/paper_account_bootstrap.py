@@ -269,6 +269,7 @@ def _write_account_snapshot_seed(
     row = {column: "" for column in PAPER_ACCOUNT_SNAPSHOT_COLUMNS}
     row.update(
         {
+            "account_id": account_paths.account_id,
             "snapshot_date": snapshot_date,
             "currency": currency,
             "initial_cash": f"{initial_cash:.2f}",

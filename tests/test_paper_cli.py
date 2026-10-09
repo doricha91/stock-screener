@@ -53,6 +53,8 @@ def test_prepare_data_calls_existing_runner(monkeypatch):
         skip_prices: bool,
         skip_indicators: bool,
         include_universe: bool,
+        trade_date: str | None,
+        account_id: str,
     ) -> dict:
         captured.update(
             {
@@ -60,6 +62,8 @@ def test_prepare_data_calls_existing_runner(monkeypatch):
                 "skip_prices": skip_prices,
                 "skip_indicators": skip_indicators,
                 "include_universe": include_universe,
+                "trade_date": trade_date,
+                "account_id": account_id,
             }
         )
         return {
@@ -82,6 +86,8 @@ def test_prepare_data_calls_existing_runner(monkeypatch):
         "skip_prices": False,
         "skip_indicators": False,
         "include_universe": False,
+        "trade_date": None,
+        "account_id": "paper_default",
     }
 
 
@@ -94,6 +100,8 @@ def test_prepare_data_passes_skip_and_universe_flags(monkeypatch):
         skip_prices: bool,
         skip_indicators: bool,
         include_universe: bool,
+        trade_date: str | None,
+        account_id: str,
     ) -> dict:
         captured.update(
             {
@@ -101,6 +109,8 @@ def test_prepare_data_passes_skip_and_universe_flags(monkeypatch):
                 "skip_prices": skip_prices,
                 "skip_indicators": skip_indicators,
                 "include_universe": include_universe,
+                "trade_date": trade_date,
+                "account_id": account_id,
             }
         )
         return {
@@ -125,6 +135,8 @@ def test_prepare_data_passes_skip_and_universe_flags(monkeypatch):
         "skip_prices": True,
         "skip_indicators": True,
         "include_universe": True,
+        "trade_date": None,
+        "account_id": "paper_default",
     }
 
 
@@ -1144,7 +1156,7 @@ def test_eod_rejects_both_modes():
 def test_missing_future_commands_from_help(capsys):
     paper.main([])
     output = capsys.readouterr().out
-    assert "{prepare-data,prepare,data-freshness,status,init-account,weekly-status,benchmark,preview,commit,preflight,plan,eod,reports,review,review-template,review-validate,review-append}" in output
+    assert "{prepare-data,prepare,data-freshness,status,init-account,prepare-first-run,weekly-status,benchmark,preview,commit,preflight,plan,eod,reports,review,review-template,review-validate,review-append}" in output
     assert "run-all" not in output
     assert "prepare-data" in output
     assert "data-freshness" in output
@@ -1165,6 +1177,8 @@ def test_prepare_data_does_not_call_eod_commit(monkeypatch):
         skip_prices: bool,
         skip_indicators: bool,
         include_universe: bool,
+        trade_date: str | None,
+        account_id: str,
     ) -> dict:
         return {
             "date": "2026-05-13",

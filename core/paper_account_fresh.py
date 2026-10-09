@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 from datetime import date
@@ -16,6 +17,7 @@ from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
 from core.paper_execution_log import PAPER_EXECUTION_LOG_COLUMNS
 from core.paper_snapshot_identity import validate_snapshot_account_identity
 from core.runbook_calendar import MarketCalendar
+from core.stage_a_asof_contract import sha256_payload
 
 
 def _rows(path: Path, columns: list[str]) -> list[dict[str, str]]:
@@ -36,6 +38,14 @@ def _number(value: Any) -> float:
     if not math.isfinite(result):
         raise ValueError("invalid_bootstrap_number")
     return result
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _history_blockers(workspace: Path, account_id: str) -> list[str]:
@@ -136,6 +146,7 @@ def validate_prepare_first_request(
     """
     blockers: list[str] = []
     binding = None
+    bootstrap = None
     context = {"account_id": account_id, "data_date": data_date, "trade_date": trade_date}
     try:
         from scripts.runbook_state import get_runbook_day_id
@@ -197,11 +208,12 @@ def validate_prepare_first_request(
             row = account_rows[0]
             if row["snapshot_date"] != data_date:
                 blockers.append("bootstrap_date_mismatch")
-            if row["currency"] != profile.currency:
+            materialized_currency = str(row["currency"] or "").strip().upper()
+            if materialized_currency != profile.currency:
                 blockers.append("bootstrap_currency_mismatch")
-            initial = _number(profile.initial_cash)
+            initial = _number(row["initial_cash"])
             if initial <= 0 or any(_number(row[k]) != initial for k in
-                                  ("initial_cash", "cash", "total_equity_cost_basis", "total_equity_market_value")):
+                                   ("cash", "total_equity_cost_basis", "total_equity_market_value")):
                 blockers.append("bootstrap_cash_mismatch")
             if any(_number(row[k]) != 0 for k in
                    ("position_count", "applied_trade_count", "positions_cost_value", "positions_market_value",
@@ -226,7 +238,7 @@ def validate_prepare_first_request(
                 blockers.append("bootstrap_current_identity_mismatch")
             if current.get("schema_version") != BOOTSTRAP_CURRENT_STATE_SCHEMA_VERSION or current.get("source") != BOOTSTRAP_SOURCE:
                 blockers.append("bootstrap_current_source_mismatch")
-            if "currency" in current and current["currency"] != profile.currency:
+            if "currency" in current and current["currency"] != materialized_currency:
                 blockers.append("bootstrap_currency_mismatch")
             if _number(current.get("absolute_cash")) != initial or _number(current.get("current_cash_ratio")) != 1:
                 blockers.append("bootstrap_current_cash_mismatch")
@@ -236,8 +248,22 @@ def validate_prepare_first_request(
                             "highest_price_meta": {}, "hedge_symbols": [], "applied_trade_ids": []}
             if any(current.get(k) != v for k, v in empty_fields.items()):
                 blockers.append("bootstrap_current_history_present")
+            bootstrap = {
+                "currency": materialized_currency,
+                "initial_cash": initial,
+                "initial_positions_identity": sha256_payload({
+                    "schema_version": "paper_initial_positions.empty.v1",
+                    "positions": [],
+                }),
+                "artifact_hashes": {
+                    canonical.account_snapshot_path.name: _sha256_file(canonical.account_snapshot_path),
+                    canonical.position_snapshot_path.name: _sha256_file(canonical.position_snapshot_path),
+                    canonical.execution_log_path.name: _sha256_file(canonical.execution_log_path),
+                    current_path.name: _sha256_file(current_path),
+                },
+            }
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         blockers.append(str(exc) or type(exc).__name__)
     return {"eligible": not blockers, "blockers": sorted(set(blockers)),
-            "context": context, "binding": binding,
+            "context": context, "binding": binding, "bootstrap": bootstrap,
             "next_action": "VALIDATED_NOT_PREPARED" if not blockers else "RESOLVE_BLOCKERS"}

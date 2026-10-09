@@ -316,10 +316,8 @@ def edit_csv(path, mutator):
 @pytest.fixture
 def fresh(environment, tmp_path):
     account_paths = paths.build_paper_account_paths("synthetic_a")
-    # Only synthetic tmp artifacts. The production seed writer is deliberately unchanged.
     initialize_paper_account(account_id="synthetic_a", initial_cash=12345, currency="USD",
                              date_str="2026-09-28", confirm_create=True, account_root=account_paths.root)
-    edit_csv(account_paths.account_snapshot_path, lambda rows: rows[0].update(account_id="synthetic_a"))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     return dict(account_id="synthetic_a", account_paths=account_paths, workspace=workspace,
@@ -483,7 +481,7 @@ def test_unattributable_lifecycle_artifacts_fail_closed(fresh, name, content):
     )
 
 
-def test_unmodified_bootstrap_blank_seed_is_rejected(environment, tmp_path):
+def test_unmodified_bootstrap_seed_has_canonical_identity(environment, tmp_path):
     ap = paths.build_paper_account_paths("synthetic_a")
     initialize_paper_account(account_id="synthetic_a", initial_cash=12345, currency="USD",
                              date_str="2026-09-28", confirm_create=True, account_root=ap.root)
@@ -494,8 +492,7 @@ def test_unmodified_bootstrap_blank_seed_is_rejected(environment, tmp_path):
         data_date="2026-09-28", trade_date="2026-09-29",
         calendar=MarketCalendar("US", "America/New_York", date(2026, 1, 1), date(2026, 12, 31), frozenset()),
     )
-    assert not result["eligible"]
-    assert any("blank_account_id" in e for e in result["blockers"])
+    assert result["eligible"], result
 
 
 def test_binding_aware_recovery_preserves_evidence(environment, tmp_path, monkeypatch):

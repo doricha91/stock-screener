@@ -41,6 +41,8 @@ from core.paper_account_bootstrap import (  # noqa: E402
     PaperAccountBootstrapError,
     initialize_paper_account,
 )
+from core.paper_first_run import prepare_first_run  # noqa: E402
+from core.paths import runbook_workspace_path, runbook_wrappers_dir  # noqa: E402
 from core.paper_prepare_data import (  # noqa: E402
     format_paper_prepare_data_summary,
     run_paper_prepare_data,
@@ -545,6 +547,29 @@ def handle_init_account(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_prepare_first_run(args: argparse.Namespace) -> int:
+    wrappers = runbook_wrappers_dir()
+    result = prepare_first_run(
+        account_id=args.account_id,
+        data_date=args.data_date,
+        workspace=runbook_workspace_path(),
+        account_local_path=wrappers / "_account.local.cmd",
+        runbook_day_local_path=wrappers / "_runbook_day.local.cmd",
+    )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("PAPER PREPARE FIRST RUN")
+        for field in (
+            "account_id", "data_date", "trade_date", "runbook_day_id",
+            "prepare_identity_digest", "result",
+        ):
+            print(f"  {field}: {result.get(field) or '-'}")
+        if result.get("blockers"):
+            print(f"  blockers: {', '.join(str(item) for item in result['blockers'])}")
+    return 0 if result["runner_result"] == "PASS" else 2
+
+
 def handle_weekly_status(args: argparse.Namespace) -> int:
     try:
         account_paths = build_paper_account_paths(args.account_id, create=False)
@@ -1029,6 +1054,15 @@ def build_parser() -> argparse.ArgumentParser:
     init_account_parser.add_argument("--allow-existing", action="store_true", help="Allow read-only inspection of an existing target without overwrite")
     init_account_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary")
     init_account_parser.set_defaults(handler=handle_init_account)
+
+    prepare_first_run_parser = subparsers.add_parser(
+        "prepare-first-run",
+        help="Prepare the first runbook day for a newly initialized versioned paper account",
+    )
+    prepare_first_run_parser.add_argument("--account-id", required=True, help="Initialized paper account id")
+    prepare_first_run_parser.add_argument("--data-date", required=True, help="Completed market data date")
+    prepare_first_run_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary")
+    prepare_first_run_parser.set_defaults(handler=handle_prepare_first_run)
 
     weekly_status_parser = subparsers.add_parser(
         "weekly-status",

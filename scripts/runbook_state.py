@@ -15,7 +15,10 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-DEFAULT_WORKSPACE = Path(r"D:\n8n\workspace\stock_screener_ops")
+from core.paths import runbook_workspace_path
+
+
+DEFAULT_WORKSPACE = runbook_workspace_path()
 STATE_FILENAME = "runbook_state.json"
 STATE_DIRNAME = "runbook_states"
 # runbook_state.json is a new controller-owned state contract for
@@ -1247,6 +1250,23 @@ def _assert_operational_gap_lifecycle_allowed(
         )
 
 
+def assert_initial_state_creation_allowed(
+    workspace: Path,
+    state: RunbookState,
+) -> None:
+    """Run the initialization/recovery guard before a new state is durable."""
+    from core.runbook_calendar import load_market_calendar
+    from core.runbook_recovery import assert_initialization_allowed
+
+    assert_initialization_allowed(
+        workspace,
+        state.frozen_context.account_id,
+        state.frozen_context.data_date,
+        state.frozen_context.trade_date,
+        load_market_calendar(),
+    )
+
+
 def init_state_file(
     workspace: Path,
     account_id: str,
@@ -1277,16 +1297,7 @@ def init_state_file_for_context(
     path = get_state_path_for_context(workspace, account_id, data_date, trade_date)
     if not path.exists():
         requested_state = create_initial_state(account_id, data_date, trade_date, timezone)
-        from core.runbook_calendar import load_market_calendar
-        from core.runbook_recovery import assert_initialization_allowed
-
-        assert_initialization_allowed(
-            workspace,
-            account_id,
-            data_date,
-            trade_date,
-            load_market_calendar(),
-        )
+        assert_initial_state_creation_allowed(workspace, requested_state)
         save_state(requested_state, path)
         _assert_operational_gap_lifecycle_allowed(workspace, requested_state)
         return "CREATED", path, requested_state

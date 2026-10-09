@@ -39,6 +39,7 @@ from scripts.runbook_no_action import (
 from scripts.runbook_command_registry import RunbookCommand
 from scripts.runbook_state import RunbookState
 from core.paper_account_paths import build_paper_account_paths, latest_current_state_snapshot_path
+from core.paper_first_run import stage_a_prepare_guard
 from core import failed_no_trade_closure
 from core.paper_daily_review_scope import (
     DailyReviewScopeError,
@@ -345,6 +346,20 @@ def run_stage_a(
             "runner_result": "BLOCKED",
             "stage_id": STAGE_A_ID,
             "reason": guard_error,
+            "dry_run": dry_run,
+            "paper_test_confirmed": confirm_paper_test,
+        }
+    prepare_guard_error = stage_a_prepare_guard(
+        workspace,
+        account_id,
+        data_date,
+        trade_date,
+    )
+    if prepare_guard_error:
+        return {
+            "runner_result": "BLOCKED",
+            "stage_id": STAGE_A_ID,
+            "reason": prepare_guard_error,
             "dry_run": dry_run,
             "paper_test_confirmed": confirm_paper_test,
         }

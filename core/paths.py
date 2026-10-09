@@ -17,6 +17,14 @@ OUTPUTS.mkdir(parents=True, exist_ok=True)
 def market_holidays_us_path() -> Path:
     return ROOT / "config" / "market_holidays_us.json"
 
+
+def runbook_wrappers_dir() -> Path:
+    return ROOT / "ops" / "runbook_wrappers"
+
+
+def runbook_workspace_path() -> Path:
+    return Path(r"D:\n8n\workspace\stock_screener_ops")
+
 # 프론트테스트 전용 디렉토리
 FRONT_TEST_DIR = OUTPUTS / "front_test"
 FRONT_TEST_DIR.mkdir(parents=True, exist_ok=True)

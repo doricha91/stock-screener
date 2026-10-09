@@ -82,6 +82,46 @@ def read_runbook_day_local(
     return values
 
 
+def write_runbook_day_local_exact(
+    path: str | Path,
+    *,
+    account_id: str,
+    values: dict[str, str],
+) -> bool:
+    """Create the first-run operator context without replacing another day."""
+    day_path = Path(path)
+    expected = {
+        "DATA_DATE": str(values.get("DATA_DATE") or ""),
+        "TRADE_DATE": str(values.get("TRADE_DATE") or ""),
+        "RUNBOOK_DAY_ID": str(values.get("RUNBOOK_DAY_ID") or ""),
+    }
+    expected_id = runbook_state.get_runbook_day_id(
+        account_id,
+        expected["DATA_DATE"],
+        expected["TRADE_DATE"],
+    )
+    if expected["RUNBOOK_DAY_ID"] != expected_id:
+        raise ValueError("runbook_day_id_mismatch")
+    if day_path.exists():
+        if read_runbook_day_local(day_path, account_id=account_id) == expected:
+            return False
+        raise ValueError("runbook_day_local_conflict")
+    if not day_path.parent.is_dir():
+        raise ValueError("runbook_day_parent_directory_not_found")
+    temp_path = day_path.with_name(f"{day_path.name}.tmp")
+    if temp_path.exists():
+        raise ValueError("runbook_day_partial_temp_exists")
+    try:
+        temp_path.write_bytes(render_runbook_day_local(expected))
+        if read_runbook_day_local(temp_path, account_id=account_id) != expected:
+            raise ValueError("temp_runbook_day_values_mismatch")
+        os.replace(temp_path, day_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+    return True
+
+
 def _values_from_rollover(result: dict[str, Any], account_id: str) -> dict[str, str]:
     if str(result.get("account_id") or "") != account_id:
         raise ValueError("rollover_account_mismatch")
