@@ -67,6 +67,18 @@ def _history_blockers(workspace: Path, account_id: str) -> list[str]:
         runbook_retirement.RETIREMENT_DIRNAME, failed_no_trade_closure.CLOSURE_DIRNAME,
         operational_gap_recovery.GENERIC_EVIDENCE_DIRNAME,
     }
+    other_day_ids: set[str] = set()
+    for state_path in (workspace / runbook_state.STATE_DIRNAME).glob("*.json"):
+        if state_path.is_symlink():
+            continue
+        try:
+            other = runbook_state.load_state(state_path)
+            owner = other.frozen_context.account_id
+            valid_records, owner_errors = _load_account_states(workspace, owner)
+            if owner != account_id and not owner_errors:
+                other_day_ids.update(record.state.runbook_day_id for record in valid_records)
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
     for dirname in sorted(directories):
         root = workspace / dirname
         if root.is_symlink():
@@ -86,6 +98,14 @@ def _history_blockers(workspace: Path, account_id: str) -> list[str]:
             if not path.is_file():
                 continue
             if path.suffix != ".json":
+                # Human-readable sidecars have no embedded account field. Only
+                # canonical namespaces backed by validated other-account states
+                # attribute them; loose files and corrupt JSON still fail closed.
+                relative = path.relative_to(root)
+                if (dirname in set(DUPLICATE_DIRS) | set(runbook_recovery.TARGET_EVIDENCE_DIRS)
+                        and len(relative.parts) > 1 and relative.parts[0] in other_day_ids
+                        and path.suffix in {".md", ".csv", ".txt", ".log"}):
+                    continue
                 blockers.append(f"unexplained_history:{dirname}")
                 continue
             try:

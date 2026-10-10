@@ -13,6 +13,7 @@ from core.execution_logger import parse_journal_from_markdown, map_journal_to_tr
 from core.paper_account_guard import assert_account_writer_target, require_initialized_writer_account_paths
 from core.paper_account_paths import PaperAccountPaths, build_paper_account_paths
 from core.paper_account_snapshot import (
+    load_account_replay_seed,
     build_paper_account_snapshot_row,
     save_paper_account_snapshot,
 )
@@ -434,8 +435,11 @@ def run_paper_eod_dry_run(
 
     if accounting_close_error is None:
         try:
+            initial_cash, currency = load_account_replay_seed(account_paths)
             paper_account_state = build_paper_account_preview_from_log(
                 paths["paper_execution_log"],
+                initial_cash=initial_cash,
+                currency=currency,
                 account_paths=account_paths,
                 as_of_date=target_snapshot_date,
                 db_path=Path(market_db_path()),
@@ -475,7 +479,7 @@ def run_paper_eod_dry_run(
             snapshot_row = build_paper_account_snapshot_row(
                 paper_account_state,
                 date_str,
-                initial_cash=100000.0,
+                initial_cash=initial_cash,
                 source_execution_log=str(paths["paper_execution_log"]),
                 source_current_state=str(paths["paper_state"]),
                 market_valuation=market_valuation,
@@ -658,7 +662,7 @@ def run_paper_eod_dry_run(
     elif not paper_log_exists:
         print("  paper_execution_log.csv not found")
         print("  no trades applied")
-        print(f"  initial_cash: {100000.0:.2f} USD")
+        print(f"  initial_cash: {initial_cash:.2f} {currency}")
         print(f"  cash: {paper_account_state.cash:.2f} {paper_account_state.currency}")
         print(f"  positions: {len(paper_account_state.positions)}")
         print(f"  applied_trades: {len(paper_account_state.applied_trade_ids)}")
@@ -667,7 +671,7 @@ def run_paper_eod_dry_run(
         print("  none")
         print()
     else:
-        print(f"  initial_cash: {100000.0:.2f} USD")
+        print(f"  initial_cash: {initial_cash:.2f} {currency}")
         print(f"  cash: {paper_account_state.cash:.2f} {paper_account_state.currency}")
         print(f"  positions: {len(paper_account_state.positions)}")
         print(f"  applied_trades: {len(paper_account_state.applied_trade_ids)}")

@@ -515,6 +515,7 @@ def build_runbook_completion_manifest(
         date_field="review_date",
         loader=lambda path: _load_review_rows(path, account_path),
         expected_account_id=state.frozen_context.account_id,
+        allow_absent=no_action,
     )
     account_snapshot = _csv_source(
         account_path / "paper_account_snapshot.csv",
@@ -695,7 +696,17 @@ def _csv_source(
     date_field: str,
     loader: Callable[[Path], list[dict[str, str]]],
     expected_account_id: str,
+    allow_absent: bool = False,
 ) -> dict[str, Any]:
+    if allow_absent and not path.exists() and not path.is_symlink():
+        return {
+            "kind": "append_only_csv_date_slice",
+            "scope_date": scope_date,
+            "logical_ref": logical_ref,
+            "presence": "verified_no_action_absent",
+            "record_count": 0,
+            "digest": _sha256_bytes(_canonical_json([]).encode("utf-8")),
+        }
     if not path.is_file():
         raise CompletionEvidenceError("source_file_missing", logical_ref)
     try:

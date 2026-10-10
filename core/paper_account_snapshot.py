@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from core.paper_account_guard import assert_account_writer_target
+from core.paper_account_paths import PaperAccountPaths
 from core.paper_account_profile import validate_account_id
 from core.paper_account_state import PaperAccountState
 from core.paper_market_valuation import PaperAccountValuation
@@ -58,6 +60,29 @@ SNAPSHOT_MONEY_FIELDS = {
     "realized_pnl",
     "total_pnl",
 }
+
+
+def load_account_replay_seed(account_paths: PaperAccountPaths) -> tuple[float, str]:
+    """Use this account's materialized capital when replaying its own ledger."""
+    path = account_paths.account_snapshot_path
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows, _ = validate_snapshot_account_identity(
+            list(reader), fieldnames=reader.fieldnames,
+            allowed_fieldnames=PAPER_ACCOUNT_SNAPSHOT_COLUMNS,
+            expected_account_id=account_paths.account_id, source_path=path,
+            account_root=account_paths.root,
+            allow_legacy_backfill=True,
+        )
+    if not rows:
+        raise ValueError("account_replay_seed_missing")
+    seeds = {(float(row["initial_cash"]), str(row["currency"]).strip()) for row in rows}
+    if len(seeds) != 1:
+        raise ValueError("account_replay_seed_inconsistent")
+    cash, currency = seeds.pop()
+    if not math.isfinite(cash) or cash <= 0 or not currency:
+        raise ValueError("account_replay_seed_invalid")
+    return cash, currency
 
 
 def _normalize_snapshot_date(snapshot_date: str) -> str:
@@ -145,7 +170,10 @@ def build_paper_account_snapshot_row(
                 "total_equity_market_value": round(float(market_valuation.total_equity_market_value), 2),
                 "cash_ratio_market_value": market_valuation.cash_ratio_market_value,
                 "unrealized_pnl": round(float(market_valuation.unrealized_pnl), 2),
-                "unrealized_pnl_pct": market_valuation.unrealized_pnl_pct,
+                "unrealized_pnl_pct": (
+                    market_valuation.unrealized_pnl_pct
+                    if market_valuation.unrealized_pnl_pct is not None else ""
+                ),
                 "total_pnl": round(total_pnl, 2),
                 "total_pnl_pct": total_pnl / float(initial_cash),
                 "market_valuation_status": "success",

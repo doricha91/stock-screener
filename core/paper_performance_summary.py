@@ -9,7 +9,8 @@ from core.paper_safety import assert_paper_path
 from core.paths import PAPER_TEST_DIR
 
 
-def _read_csv_rows(path: Path, label: str, allowed_root: Path | None = None) -> list[dict[str, str]]:
+def _read_csv_rows(path: Path, label: str, allowed_root: Path | None = None,
+                   *, empty_header: list[str] | None = None) -> list[dict[str, str]]:
     if allowed_root is None:
         assert_paper_path(path, PAPER_TEST_DIR)
     else:
@@ -17,7 +18,10 @@ def _read_csv_rows(path: Path, label: str, allowed_root: Path | None = None) -> 
     if not path.exists():
         raise FileNotFoundError(f"{label} not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        if not rows and empty_header is not None and reader.fieldnames == empty_header:
+            return []
     if not rows:
         raise ValueError(f"{label} is empty")
     return rows
@@ -48,10 +52,15 @@ def load_latest_position_snapshot_rows(
     path: Path,
     allowed_root: Path | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
+    from core.paper_position_snapshot import PAPER_POSITION_SNAPSHOT_COLUMNS
+
     rows = sorted(
-        _read_csv_rows(path, "paper_position_snapshot.csv", allowed_root=allowed_root),
+        _read_csv_rows(path, "paper_position_snapshot.csv", allowed_root=allowed_root,
+                       empty_header=PAPER_POSITION_SNAPSHOT_COLUMNS),
         key=lambda row: str(row.get("snapshot_date", "")).strip(),
     )
+    if not rows:
+        return "", []
     latest_date = str(rows[-1].get("snapshot_date", "")).strip()
     latest_rows = [row for row in rows if str(row.get("snapshot_date", "")).strip() == latest_date]
     return latest_date, latest_rows
@@ -104,6 +113,8 @@ def build_paper_performance_summary(
     latest_equity = equity_rows[-1]
     latest_drawdown = drawdown_rows[-1]
     latest_account = account_rows[-1]
+    if not latest_position_rows and float(latest_account.get("position_count", "0") or 0) != 0:
+        raise ValueError("Position snapshot is empty but account has open positions")
     latest_equity_date = str(latest_equity.get("snapshot_date", "")).strip()
     latest_drawdown_date = str(latest_drawdown.get("snapshot_date", "")).strip()
 

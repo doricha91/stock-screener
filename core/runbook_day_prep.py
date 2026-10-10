@@ -13,6 +13,9 @@ from scripts import runbook_state
 
 ACCOUNT_KEYS = ("ACCOUNT_ID", "ACCOUNT_MODE")
 RUNBOOK_DAY_KEYS = ("DATA_DATE", "TRADE_DATE", "RUNBOOK_DAY_ID")
+ACCOUNT_OPTIONAL_COMMENTS = (
+    "rem Explicit full participant set; use the same set in every participant context.",
+)
 SET_LINE_PATTERN = re.compile(r'^set "([A-Z0-9_]+)=([^"]+)"$')
 NEXT_ACTION = "Review all three local environment files, then proceed to 6-4D."
 BLOCKED_ACTION = "Resolve the blockers before preparing the runbook day environment."
@@ -29,9 +32,17 @@ def _blocked(reason: str, blockers: list[str] | None = None) -> dict[str, Any]:
     }
 
 
-def _read_local_assignments(path: str | Path, expected_keys: tuple[str, ...]) -> dict[str, str]:
+def _read_local_assignments(
+    path: str | Path,
+    expected_keys: tuple[str, ...],
+    *,
+    optional_keys: tuple[str, ...] = (),
+    optional_comments: tuple[str, ...] = (),
+) -> dict[str, str]:
     lines = Path(path).read_text(encoding="ascii").splitlines()
-    if len(lines) != len(expected_keys) + 2:
+    allowed_comments = {line.lower() for line in optional_comments}
+    lines = [line for line in lines if line.lower() not in allowed_comments]
+    if not len(expected_keys) + 2 <= len(lines) <= len(expected_keys) + len(optional_keys) + 2:
         raise ValueError("invalid_local_structure")
     if lines[0].lower() != "@echo off" or lines[-1].lower() != "exit /b 0":
         raise ValueError("invalid_local_structure")
@@ -44,13 +55,19 @@ def _read_local_assignments(path: str | Path, expected_keys: tuple[str, ...]) ->
         if key in values:
             raise ValueError(f"duplicate_local_key:{key}")
         values[key] = value
-    if tuple(values) != expected_keys:
+    if (tuple(values)[:len(expected_keys)] != expected_keys
+            or any(key not in optional_keys for key in tuple(values)[len(expected_keys):])):
         raise ValueError("local_keys_or_order_invalid")
     return values
 
 
 def read_account_local(path: str | Path) -> dict[str, str]:
-    values = _read_local_assignments(path, ACCOUNT_KEYS)
+    values = _read_local_assignments(
+        path,
+        ACCOUNT_KEYS,
+        optional_keys=("SHARED_PARTICIPANT_ACCOUNT_IDS",),
+        optional_comments=ACCOUNT_OPTIONAL_COMMENTS,
+    )
     if values["ACCOUNT_MODE"].upper() != "PAPER":
         raise ValueError("account_mode_must_be_paper")
     return values
