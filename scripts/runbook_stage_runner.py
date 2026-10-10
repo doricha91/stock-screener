@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,9 @@ from scripts.runbook_command_registry import RunbookCommand
 from scripts.runbook_state import RunbookState
 from core.paper_account_paths import build_paper_account_paths, latest_current_state_snapshot_path
 from core.paper_first_run import stage_a_prepare_guard
+from core.paper_shared_market_prepare import (
+    normalize_shared_participants, run_shared_market_prepare, validate_shared_market_input,
+)
 from core import failed_no_trade_closure
 from core.paper_daily_review_scope import (
     DailyReviewScopeError,
@@ -109,7 +113,8 @@ def normalize_python_script_argv(argv: Sequence[str], repo_root: Path) -> list[s
     return [str(part) for part in argv]
 
 
-def run_allowlisted_command(argv: list[str], cwd: Path, timeout_sec: int = DEFAULT_TIMEOUT_SEC) -> dict[str, Any]:
+def run_allowlisted_command(argv: list[str], cwd: Path, timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+                           *, env: dict[str, str] | None = None) -> dict[str, Any]:
     if not argv:
         raise ValueError("argv is required")
     started = time.perf_counter()
@@ -122,6 +127,7 @@ def run_allowlisted_command(argv: list[str], cwd: Path, timeout_sec: int = DEFAU
             stderr=subprocess.PIPE,
             timeout=timeout_sec,
             shell=False,
+            **({"env": env} if env is not None else {}),
         )
         duration_ms = int((time.perf_counter() - started) * 1000)
         return {
@@ -337,6 +343,7 @@ def run_stage_a(
     repo_root: Path | None = None,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     commands: Sequence[RunbookCommand] | None = None,
+    shared_participant_account_ids: str | list[str] | None = None,
 ) -> dict[str, Any]:
     workspace = Path(workspace).resolve(strict=False)
     repo_root = repo_root or Path(__file__).resolve().parents[1]
@@ -363,7 +370,31 @@ def run_stage_a(
             "dry_run": dry_run,
             "paper_test_confirmed": confirm_paper_test,
         }
+    shared_result = None
     try:
+        participants = normalize_shared_participants(shared_participant_account_ids, account_id)
+        if not dry_run:
+            shared_result = run_shared_market_prepare(data_date=data_date, participant_account_ids=participants)
+            if shared_result["result"] not in {"PREPARED", "REUSE"}:
+                raise ValueError(shared_result.get("reason", "shared_preparation_blocked"))
+        shared_input = validate_shared_market_input(data_date=data_date, participant_account_ids=participants)
+        state_path = runbook_state.get_state_path_for_context(workspace, account_id, data_date, trade_date)
+        if state_path.exists():
+            existing = runbook_state.load_state(state_path)
+            if not runbook_state.context_matches_state(existing, account_id, data_date, trade_date):
+                raise ValueError("context_mismatch_existing_runbook_state")
+            runbook_state.assert_current_binding(existing)
+            runbook_state.pin_shared_input(existing, shared_input)  # Validate before any state write.
+        if dry_run:
+            state = existing if state_path.exists() else runbook_state.create_initial_state(
+                account_id, data_date, trade_date, timezone)
+            state = runbook_state.pin_shared_input(state, shared_input)
+            values = {"runbook_state_path": str(state_path)}
+            return {"runner_result": "PASS", "stage_id": STAGE_A_ID, "dry_run": True,
+                    "paper_test_confirmed": confirm_paper_test, "runbook_day_id": state.runbook_day_id,
+                    "shared_input": shared_input, "shared_result": "VALIDATED",
+                    "commands": [render_argv_template(c, state.frozen_context, values) for c in get_stage_a_commands(commands)],
+                    "command_results": [], "state_mutated": False}
         _, state_path, state = runbook_state.init_state_file_for_context(
             workspace,
             account_id,
@@ -371,13 +402,15 @@ def run_stage_a(
             trade_date,
             timezone,
         )
-    except ValueError as exc:
+        state = runbook_state.pin_shared_input(state, shared_input)
+    except (ValueError, OSError, RuntimeError) as exc:
         return {
             "runner_result": "BLOCKED",
             "stage_id": STAGE_A_ID,
             "reason": str(exc),
             "dry_run": dry_run,
             "paper_test_confirmed": confirm_paper_test,
+            "commands": "NOT_RUN", "shared_result": shared_result,
         }
 
     if not runbook_state.context_matches_state(state, account_id, data_date, trade_date):
@@ -469,6 +502,8 @@ def run_stage_a(
 
     daily_plan_json_ref = state.artifacts.get("daily_plan_json")
     stage_payload = {
+        "shared_input": shared_input,
+        "shared_result": shared_result["result"],
         "action_mode": execution_intent.get("action_mode") if execution_intent else None,
         "execution_required": execution_intent.get("execution_required") if execution_intent else None,
         "candidate_execution_count": (
@@ -5001,6 +5036,8 @@ def _validate_stage_a_daily_plan(
         payload = json.loads(daily_plan_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return None, {"reason": "daily_plan_json_invalid", "detail": str(exc)}
+    if payload.get("shared_input") != state.artifacts.get("shared_input") or not state.artifacts.get("shared_input"):
+        return None, {"reason": "daily_plan_shared_input_mismatch", "detail": "Daily Plan shared input differs from runbook pin"}
     try:
         intent = validate_daily_plan_execution_intent(
             payload,
@@ -5026,6 +5063,27 @@ def _validate_stage_a_daily_plan(
         validate_stage_a_lineage(payload.get("as_of_lineage"), context=context)
     except StageAAsOfContractError as exc:
         return None, {"reason": exc.reason, "detail": exc.detail}
+    try:
+        pin = state.artifacts["shared_input"]
+        current = validate_shared_market_input(data_date=state.frozen_context.data_date,
+                                              participant_account_ids=pin["participant_account_ids"])
+        if current != pin:
+            raise ValueError("shared_pin_mismatch")
+        for name in ("market", "indicator", "rs"):
+            evidence = (payload.get("as_of_lineage") or {}).get(name, {})
+            if (evidence.get("source") != pin["snapshot"]["path"]
+                    or evidence.get("revision") != pin["snapshot"]["sha256"]):
+                raise ValueError("daily_plan_frozen_lineage_mismatch")
+        binding = getattr(state.frozen_context, "binding", None) or {}
+        universe = binding.get("semantics", {}).get("universe", {}).get("content", {})
+        if universe.get("kind") == "shared_snapshot":
+            evidence = payload["as_of_lineage"]["universe"]
+            if (not pin.get("universe")
+                    or evidence.get("source") != pin["universe"]["path"]
+                    or evidence.get("revision") != pin["universe"]["sha256"]):
+                raise ValueError("daily_plan_frozen_universe_mismatch")
+    except (ValueError, OSError, RuntimeError) as exc:
+        return None, {"reason": "daily_plan_shared_input_mismatch", "detail": str(exc)}
     return intent, None
 
 
@@ -5080,7 +5138,13 @@ def _run_stage_a_command(
         )
         return result, _format_command_log(rendered_argv, argv, repo_root, process, "", "")
 
-    execution = run_allowlisted_command(argv, repo_root, timeout_sec)
+    pin = state.artifacts.get("shared_input")
+    if not pin:
+        raise ValueError("shared_pin_required")
+    # Pass overrides only to Stage A children. Parent process and E/F retain
+    # their canonical source/TRADE_DATE context.
+    child_env = {**os.environ, "STOCK_SCREENER_MARKET_DB": pin["snapshot"]["path"]}
+    execution = run_allowlisted_command(argv, repo_root, timeout_sec, env=child_env)
     stdout = str(execution.get("stdout") or "")
     stderr = str(execution.get("stderr") or "")
     exit_code = execution.get("exit_code")
@@ -5193,6 +5257,7 @@ def _build_parser() -> argparse.ArgumentParser:
     stage_a.add_argument("--account-id", required=True)
     stage_a.add_argument("--data-date", required=True)
     stage_a.add_argument("--trade-date", required=True)
+    stage_a.add_argument("--shared-participant-account-ids", required=True)
     stage_a.add_argument("--timezone", default="Asia/Seoul")
     stage_a.add_argument("--dry-run", action="store_true")
     stage_a.add_argument("--confirm-paper-test", action="store_true")
@@ -5296,6 +5361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             confirm_paper_test=args.confirm_paper_test,
             timeout_sec=args.timeout_sec,
+            shared_participant_account_ids=args.shared_participant_account_ids,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("runner_result") == "PASS" else 1

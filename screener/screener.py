@@ -99,7 +99,9 @@ def build_screener_results(
     end_date: str | None = None,
     runtime_config: dict | None = None,
     apply_entry_filter: bool = True,
+    data_reader=None,
 ) -> pd.DataFrame:
+    reader = data_reader if data_reader is not None else data_manager
     state = _resolve_market_state(market_state)
     regime = state["regime"]
     description = state["plan"].get("description", "")
@@ -114,7 +116,7 @@ def build_screener_results(
 
     if tickers is None:
         print("\n[Step 2] Loading tickers...")
-        tickers = data_manager.get_ticker_list()
+        tickers = reader.get_ticker_list()
     else:
         print("\n[Step 2] Using provided tickers...")
 
@@ -131,7 +133,7 @@ def build_screener_results(
     print("\n[Step 3] Screening...")
     for symbol in tqdm(tickers):
         try:
-            df = data_manager.get_price_data(symbol, start_date=start_date, end_date=end_date)
+            df = reader.get_price_data(symbol, start_date=start_date, end_date=end_date)
             if df is None or len(df) < 200:
                 continue
 

@@ -42,9 +42,11 @@ def _resolve_market_db() -> Path:
 
 DB_PATH = str(_resolve_market_db())
 
-def get_db_connection():
+def get_db_connection(db_path=None, *, read_only=False):
     """시스템 전체에서 데이터베이스 연결 시 사용하는 공용 함수입니다."""
-    return sqlite3.connect(DB_PATH)
+    if read_only:
+        return sqlite3.connect(Path(db_path or DB_PATH).absolute().as_uri() + "?mode=ro", uri=True)
+    return sqlite3.connect(db_path or DB_PATH)
 
 
 # -------------------------------------------------------------
@@ -384,9 +386,12 @@ def _upsert_market_status_log(conn: sqlite3.Connection, date_str: str, status: s
         else:
             raise e
 
-def get_market_state(target_date: str | None = None, write_log: bool = True, config_overrides: dict = None) -> dict:
+def get_market_state(target_date: str | None = None, write_log: bool = True, config_overrides: dict = None,
+                     *, db_path=None, read_only=False) -> dict:
     """메인 시스템(Backtest, Screener 등)에서 시장 상태를 확인할 때 사용하는 유일한 진입점입니다."""
-    conn = get_db_connection()
+    if read_only and write_log:
+        raise ValueError("read_only_market_log_write_forbidden")
+    conn = get_db_connection(db_path, read_only=read_only) if db_path is not None or read_only else get_db_connection()
     try:
         date_str = _coerce_date(target_date, conn)
         vix_series = _get_market_series(conn, "^VIX", date_str)

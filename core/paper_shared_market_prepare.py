@@ -329,6 +329,64 @@ def _reuse(package: Path, data_date: str, participants: list[dict]) -> dict:
     return manifest
 
 
+def normalize_shared_participants(values: str | list[str] | None, account_id: str) -> list[str]:
+    """Normalize an explicit operating-context participant set; never infer it."""
+    if isinstance(values, str):
+        values = values.split(",")
+    _require(isinstance(values, list) and bool(values), "participants_required", "Explicit participants are required")
+    _require(all(isinstance(value, str) for value in values), "invalid_participant", "Participant IDs must be strings")
+    ids = [validate_account_id(value.strip()) for value in values]
+    _require(len(ids) == len(set(ids)), "duplicate_participant", "Duplicate participants")
+    _require(validate_account_id(account_id) in ids, "active_account_not_participant", "Active account must be a participant")
+    return sorted(ids)
+
+
+def _validated_shared_market_input(*, data_date: str, participant_account_ids: list[str]) -> dict:
+    """Read-only consumer contract: validate a publication, never create/repair it."""
+    normalized = normalize_prepare_date(data_date)
+    package = shared_market_preparations_dir() / normalized
+    _require(_check_publication_paths(package), "publication_missing", "Shared publication is missing")
+    manifest = _reuse(package, normalized, _participants(participant_account_ids, normalized))
+    def artifact(name: str, digest: str) -> dict:
+        return {"path": str((package / name).absolute()), "sha256": digest}
+    return {
+        "data_date": normalized,
+        "participant_account_ids": manifest["participant_account_ids"],
+        "shared_preparation_id": manifest["shared_preparation_id"],
+        "request_identity": manifest["request_identity"],
+        "manifest": artifact(MANIFEST, sha256_file(package / MANIFEST)),
+        "snapshot": artifact(SNAPSHOT, manifest["snapshot"]["sha256"]),
+        "universe": artifact(UNIVERSE, manifest["shared_universe_sources"][0]["sha256"])
+                    if manifest["shared_universe_sources"] else None,
+        "validation_result": "PASS",
+    }
+
+
+def validate_shared_market_input(*, data_date: str, participant_account_ids: list[str]) -> dict:
+    try:
+        return _validated_shared_market_input(data_date=data_date, participant_account_ids=participant_account_ids)
+    except SharedPreparationError:
+        raise
+    except (ValueError, RuntimeError, OSError, sqlite3.Error, KeyError, TypeError, AttributeError) as exc:
+        raise SharedPreparationError("invalid_shared_input", str(exc)) from exc
+
+
+def load_pinned_shared_input(state_path: str | Path, *, account_id: str, data_date: str) -> dict:
+    from scripts import runbook_state
+
+    state = runbook_state.load_state(Path(state_path))
+    _require(state.frozen_context.account_id == account_id
+             and state.frozen_context.data_date == normalize_prepare_date(data_date),
+             "shared_context_mismatch", "Shared state context differs")
+    runbook_state.assert_current_binding(state)
+    pin = state.artifacts.get("shared_input")
+    _require(isinstance(pin, dict), "shared_pin_required", "Stage A shared input pin is required")
+    ids = normalize_shared_participants(pin.get("participant_account_ids"), account_id)
+    current = validate_shared_market_input(data_date=data_date, participant_account_ids=ids)
+    _require(current == pin, "shared_pin_mismatch", "Published input differs from pinned input")
+    return current
+
+
 def run_shared_market_prepare(*, data_date: str, participant_account_ids: list[str]) -> dict:
     """PREPARED / REUSE / BLOCKED; never modify a pre-existing date package."""
     calls = 0

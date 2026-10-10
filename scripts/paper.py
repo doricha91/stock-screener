@@ -275,10 +275,30 @@ def handle_prepare_data(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_shared_data_validate(args: argparse.Namespace) -> int:
+    from core.paper_shared_market_prepare import load_pinned_shared_input
+    try:
+        pin = load_pinned_shared_input(args.runbook_state_json, account_id=args.account_id, data_date=args.data_date)
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(json.dumps({"blocked": True, "reason": str(exc)}))
+        return 2
+    print(json.dumps({"result": "PASS", "shared_input": pin}))
+    return 0
+
+
+def _shared_freshness_kwargs(args: argparse.Namespace, data_date: str) -> dict:
+    if not getattr(args, "runbook_state_json", None):
+        return {}
+    from core.paper_shared_market_prepare import load_pinned_shared_input
+    return {"shared_input": load_pinned_shared_input(
+        args.runbook_state_json, account_id=args.account_id, data_date=data_date)}
+
+
 def handle_data_freshness(args: argparse.Namespace) -> int:
     summary = run_paper_data_freshness_check(
         date_str=args.date,
         strict=args.strict,
+        **_shared_freshness_kwargs(args, args.date),
     )
     print("PAPER DATA FRESHNESS")
     print(f"  target_date: {summary['target_date']}")
@@ -684,7 +704,12 @@ def handle_plan(args: argparse.Namespace) -> int:
         return 1
 
     if explicit_mode:
-        data_freshness = run_paper_data_freshness_check(date_str=data_date, strict=True)
+        try:
+            data_freshness = run_paper_data_freshness_check(
+                date_str=data_date, strict=True, **_shared_freshness_kwargs(args, data_date))
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(json.dumps({"blocked": True, "reason": str(exc)}))
+            return 2
         _print_data_freshness_summary(data_freshness)
         if data_freshness["result"] != "PASS":
             print("Paper plan aborted because data_date freshness failed.")
@@ -1018,6 +1043,12 @@ def build_parser() -> argparse.ArgumentParser:
     shared_parser.add_argument("--json", action="store_true", help="Print the result as JSON")
     shared_parser.set_defaults(handler=handle_prepare_shared_data)
 
+    validate_shared_parser = subparsers.add_parser("validate-shared-data", help="Validate pinned shared inputs read-only")
+    validate_shared_parser.add_argument("--runbook-state-json", required=True)
+    validate_shared_parser.add_argument("--account-id", required=True)
+    validate_shared_parser.add_argument("--data-date", required=True)
+    validate_shared_parser.set_defaults(handler=handle_shared_data_validate)
+
     prepare_data_parser = subparsers.add_parser(
         "prepare-data",
         help="Refresh minimal paper market-data inputs explicitly. This command may update market_data.db.",
@@ -1047,6 +1078,8 @@ def build_parser() -> argparse.ArgumentParser:
     data_freshness_parser.add_argument("--strict", action="store_true", help="Escalate stale-data warnings to failures where applicable")
     data_freshness_parser.add_argument("--write-report", action="store_true", help="Write freshness report under outputs/paper_test/reports")
     data_freshness_parser.set_defaults(handler=handle_data_freshness)
+    data_freshness_parser.add_argument("--runbook-state-json", help=argparse.SUPPRESS)
+    data_freshness_parser.add_argument("--account-id", help=argparse.SUPPRESS)
 
     status_parser = subparsers.add_parser(
         "status",

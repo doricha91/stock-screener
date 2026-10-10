@@ -9,7 +9,7 @@ if not "%ENV_EXIT_CODE%"=="0" (
   exit /b %ENV_EXIT_CODE%
 )
 
-for %%V in (REPO_ROOT WORKSPACE ACCOUNT_ID DATA_DATE TRADE_DATE PYTHON_EXE) do (
+for %%V in (REPO_ROOT WORKSPACE ACCOUNT_ID DATA_DATE TRADE_DATE PYTHON_EXE SHARED_PARTICIPANT_ACCOUNT_IDS) do (
   if not defined %%V (
     echo Required variable %%V is not defined.
     if /I "%PAUSE_ON_EXIT%"=="1" pause
@@ -35,6 +35,7 @@ if errorlevel 1 (
   --account-id "%ACCOUNT_ID%" ^
   --data-date "%DATA_DATE%" ^
   --trade-date "%TRADE_DATE%" ^
+  --shared-participant-account-ids "%SHARED_PARTICIPANT_ACCOUNT_IDS%" ^
   --confirm-paper-test
 
 set "EXIT_CODE=%ERRORLEVEL%"

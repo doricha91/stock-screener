@@ -17,7 +17,7 @@ def test_step_0_to_21_are_all_registered() -> None:
     assert [command.step_id for command in commands] == list(range(22))
     assert [command.command_key for command in commands] == [
         "status",
-        "data_prepare",
+        "shared_data_validate",
         "data_freshness",
         "daily_plan",
         "export_daily_plan_notion",

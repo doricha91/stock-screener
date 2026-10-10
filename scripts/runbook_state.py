@@ -234,6 +234,9 @@ def save_state(state: RunbookState, path: Path) -> None:
     assert_current_binding(state)
     if path.is_file():
         previous = load_state(path)
+        if ("shared_input" in previous.artifacts
+                and previous.artifacts["shared_input"] != state.artifacts.get("shared_input")):
+            raise ValueError("existing_shared_input_rewrite_forbidden")
         if BINDING_STATE_SCHEMA_VERSION in {previous.schema_version, state.schema_version}:
             if (previous.schema_version != state.schema_version
                     or previous.to_dict()["frozen_context"] != state.to_dict()["frozen_context"]):
@@ -245,6 +248,17 @@ def save_state(state: RunbookState, path: Path) -> None:
         encoding="utf-8",
     )
     tmp_path.replace(path)
+
+
+def pin_shared_input(state: RunbookState, shared_input: dict) -> RunbookState:
+    existing = state.artifacts.get("shared_input")
+    if existing is not None and existing != shared_input:
+        raise ValueError("existing_shared_input_rewrite_forbidden")
+    if shared_input.get("data_date") != state.frozen_context.data_date:
+        raise ValueError("shared_context_mismatch")
+    if state.frozen_context.account_id not in shared_input.get("participant_account_ids", []):
+        raise ValueError("active_account_not_participant")
+    return replace(state, artifacts={**state.artifacts, "shared_input": copy.deepcopy(shared_input)})
 
 
 def context_matches_state(

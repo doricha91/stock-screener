@@ -440,11 +440,19 @@ def test_unprepared_fresh_stage_a_blocked_then_prepared_allowed(first_run: dict)
     assert blocked["runner_result"] == "BLOCKED"
     assert blocked["reason"] == "prepare_first_run_required"
     assert _prepare(first_run)["result"] == "PREPARED"
+    assert first_run_module.stage_a_prepare_guard(
+        first_run["workspace"], ACCOUNT_ID, DATA_DATE, TRADE_DATE
+    ) is None
+    before = _tree_bytes(first_run["workspace"].parent)
     allowed = runbook_stage_runner.run_stage_a(
         first_run["workspace"], ACCOUNT_ID, DATA_DATE, TRADE_DATE, dry_run=True
     )
-    assert allowed["runner_result"] == "PASS", allowed
-    assert _prepare(first_run)["result"] == "RESUME_EXISTING_RUN"
+    # Passing the first-run guard is necessary but Stage A now also requires
+    # an explicit participant set and an already published package for dry-run.
+    assert allowed["runner_result"] == "BLOCKED", allowed
+    assert allowed["reason"] == "Explicit participants are required"
+    assert _tree_bytes(first_run["workspace"].parent) == before
+    assert _prepare(first_run)["result"] == "REUSE"
 
 
 def test_cli_surface_accepts_only_account_and_data_date(

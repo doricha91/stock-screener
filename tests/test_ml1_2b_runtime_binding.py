@@ -691,13 +691,17 @@ def test_stage_a_daily_plan_command_pins_runbook_state_path(
     assert "--runbook-state-json" in command.argv_template
     assert "{runbook_state_path}" in command.argv_template
     state = runbook_state.create_initial_state("synthetic_a", "2026-10-01", "2026-10-02")
+    state = runbook_state.pin_shared_input(state, {
+        "data_date": "2026-10-01", "participant_account_ids": ["synthetic_a"],
+        "snapshot": {"path": str(tmp_path / "market.sqlite3")},
+    })
     state_path = runbook_state.get_state_path_for_context(
         tmp_path, "synthetic_a", "2026-10-01", "2026-10-02"
     )
     runbook_state.save_state(state, state_path)
     captured: dict = {}
 
-    def fake_run(argv, cwd, timeout_sec):
+    def fake_run(argv, cwd, timeout_sec, **kwargs):
         captured["argv"] = argv
         return {"executed": True, "exit_code": 1, "duration_ms": 1, "stdout": "", "stderr": "x"}
 

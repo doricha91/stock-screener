@@ -90,9 +90,12 @@ def _configure_console_encoding() -> None:
         pass
 
 
-def load_market_index_series(symbol: str, end_date: str, start_date: str | None = None) -> pd.Series:
+def load_market_index_series(symbol: str, end_date: str, start_date: str | None = None,
+                             *, db_path=None, read_only=False) -> pd.Series:
     """Load benchmark/index close series from market_index up to end_date."""
-    conn = sqlite3.connect(market_db_path())
+    target = db_path or market_db_path()
+    conn = (sqlite3.connect(Path(target).absolute().as_uri() + "?mode=ro", uri=True)
+            if read_only else sqlite3.connect(target))
     try:
         params: list[str] = [symbol, end_date]
         query = """
@@ -116,11 +119,11 @@ def load_market_index_series(symbol: str, end_date: str, start_date: str | None 
     return df.set_index("date")["close"].dropna()
 
 
-def load_price_history_until(symbol: str, end_date: str, lookback_days: int = 10) -> pd.DataFrame:
+def load_price_history_until(symbol: str, end_date: str, lookback_days: int = 10, *, data_reader=None) -> pd.DataFrame:
     """Load stock price history ending on or before end_date without look-ahead."""
     end_ts = pd.to_datetime(end_date)
     start_date = (end_ts - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-    df = data_manager.get_price_data(symbol, start_date=start_date, end_date=end_date)
+    df = (data_reader or data_manager).get_price_data(symbol, start_date=start_date, end_date=end_date)
     if df is None or df.empty:
         return pd.DataFrame()
     return df.sort_index()[df.index <= end_ts]
@@ -153,12 +156,13 @@ def materialize_explicit_entry_universe(
     *,
     end_date: str,
     minimum_rows: int = 200,
+    data_reader=None,
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Resolve explicit entry symbols with enough as-of market data to screen."""
     materialized: list[str] = []
     excluded: list[dict[str, str]] = []
     for symbol in sorted(set(symbols)):
-        frame = data_manager.get_price_data(
+        frame = (data_reader or data_manager).get_price_data(
             symbol,
             start_date=DEFAULT_SCREEN_START_DATE,
             end_date=end_date,
@@ -175,6 +179,7 @@ def calculate_candidate_rs_val(
     asof_date: pd.Timestamp,
     benchmark_close: pd.Series,
     rs_lookback: int,
+    *, data_reader=None,
 ) -> Optional[float]:
     """Calculate candidate relative strength using only history up to asof_date."""
     if benchmark_close is None or benchmark_close.empty:
@@ -184,7 +189,7 @@ def calculate_candidate_rs_val(
     start_date = (asof_date - pd.Timedelta(days=history_days)).strftime("%Y-%m-%d")
     end_date = asof_date.strftime("%Y-%m-%d")
 
-    stock_df = data_manager.get_price_data(symbol, start_date=start_date, end_date=end_date)
+    stock_df = (data_reader or data_manager).get_price_data(symbol, start_date=start_date, end_date=end_date)
     if stock_df is None or stock_df.empty or 'close' not in stock_df.columns:
         return None
 
@@ -373,12 +378,13 @@ def compute_holding_score_for_switching(
     rs_lookback: int,
     rs_weight: float,
     merged_config: dict,
+    *, data_reader=None,
 ) -> tuple[float | None, float | None, list[str]]:
     """Recompute a holding score from latest data for switching evaluation only."""
     asof_date = pd.to_datetime(data_date)
     history_days = max(400, rs_lookback * 3)
     start_date = (asof_date - pd.Timedelta(days=history_days)).strftime("%Y-%m-%d")
-    df = data_manager.get_price_data(symbol, start_date=start_date, end_date=data_date)
+    df = (data_reader or data_manager).get_price_data(symbol, start_date=start_date, end_date=data_date)
     if df is None or df.empty:
         return None, None, []
 
@@ -409,7 +415,8 @@ def compute_holding_score_for_switching(
 
     latest_row = df.iloc[-1]
     score, reasons = compute_candidate_score(latest_row, active_weights)
-    rs_val = calculate_candidate_rs_val(symbol, asof_date, benchmark_close, rs_lookback)
+    rs_val = calculate_candidate_rs_val(symbol, asof_date, benchmark_close, rs_lookback,
+                                        **({"data_reader": data_reader} if data_reader is not None else {}))
     if rs_val is not None and rs_val > 0:
         score += rs_weight
 
@@ -421,6 +428,7 @@ def build_holding_sell_diagnostic(
     data_date: str,
     current_state: CurrentPortfolioState,
     merged_config: dict,
+    *, data_reader=None,
 ) -> Dict[str, Any]:
     """Build read-only SELL diagnostics for a current holding without affecting actions."""
     asof_date = pd.to_datetime(data_date)
@@ -450,7 +458,7 @@ def build_holding_sell_diagnostic(
         if meta_parts:
             notes.append(" ".join(meta_parts))
 
-    df = data_manager.get_price_data(symbol, start_date=start_date, end_date=data_date)
+    df = (data_reader or data_manager).get_price_data(symbol, start_date=start_date, end_date=data_date)
     if df is None or df.empty:
         notes.append("price history unavailable")
     else:
@@ -1187,6 +1195,7 @@ def generate_daily_plan(
     pinned_config_snapshot: Dict[str, Any] | None = None,
     account_lineage: Dict[str, Any] | None = None,
     account_binding: Dict[str, Any] | None = None,
+    shared_input: Dict[str, Any] | None = None,
 ) -> str:
     """
     일일 판단 산출물(Action Plan)을 생성하고 파일로 저장합니다.
@@ -1196,6 +1205,19 @@ def generate_daily_plan(
     plan_date = date_str
     explicit_data_date = data_date is not None
     requested_data_date = data_date or plan_date
+    reader_kwargs = {}
+    market_kwargs = {}
+    if shared_input is not None:
+        if account_binding is None:
+            raise ValueError("shared_input_requires_account_binding")
+        from core.paper_shared_market_prepare import validate_shared_market_input
+        validated = validate_shared_market_input(
+            data_date=requested_data_date, participant_account_ids=shared_input["participant_account_ids"])
+        if validated != shared_input or account_id not in shared_input["participant_account_ids"]:
+            raise ValueError("shared_pin_mismatch")
+        market_kwargs = {"db_path": shared_input["snapshot"]["path"], "read_only": True}
+        reader_kwargs = {"data_reader": data_manager.DataManager(**market_kwargs)}
+        market_state_write_log = False
 
     _configure_console_encoding()
         
@@ -1213,6 +1235,7 @@ def generate_daily_plan(
     m_state = market_analyzer.get_market_state(
         target_date=requested_data_date,
         write_log=market_state_write_log,
+        **market_kwargs,
     )
     data_date = m_state["date"]
     trade_date = plan_date
@@ -1257,6 +1280,7 @@ def generate_daily_plan(
         benchmark_symbol,
         end_date=data_date,
         start_date=bench_start,
+        **market_kwargs,
     )
     universe_lineage: Dict[str, Any] | None = None
     official_universe_symbols: list[str] | None = None
@@ -1265,7 +1289,14 @@ def generate_daily_plan(
     if runtime_binding_evidence is not None:
         universe_definition = runtime_binding_evidence["entry_universe_definition"]
         if universe_definition["kind"] == "shared_snapshot":
-            universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
+            if shared_input is not None:
+                frozen = shared_input.get("universe")
+                if frozen is None:
+                    raise ValueError("frozen_universe_required")
+                universe_selection = {"snapshot": json.loads(Path(frozen["path"]).read_text(encoding="utf-8")),
+                                      "metadata": {"snapshot_path": frozen["path"]}}
+            else:
+                universe_selection = load_universe_snapshot_as_of_quarter(signal_date)
             universe_snapshot = universe_selection.get("snapshot", {})
             universe_metadata = dict(universe_selection.get("metadata", {}))
             if asof_context is not None:
@@ -1287,6 +1318,7 @@ def generate_daily_plan(
             official_universe_symbols, universe_exclusions = materialize_explicit_entry_universe(
                 requested_entry_universe,
                 end_date=signal_date,
+                **reader_kwargs,
             )
             reference = runtime_binding_evidence["universe_reference"]
             universe_metadata = {
@@ -1360,6 +1392,7 @@ def generate_daily_plan(
     screener_kwargs: Dict[str, Any] = {
         "market_state": m_state,
         "end_date": signal_date,
+        **reader_kwargs,
     }
     if official_universe_symbols is not None:
         screener_kwargs["tickers"] = official_universe_symbols
@@ -1418,7 +1451,7 @@ def generate_daily_plan(
             rs_success = 0
             rs_positive = 0
             for symbol in df_candidates['symbol'].tolist():
-                rs_val = calculate_candidate_rs_val(symbol, asof_date, benchmark_close, rs_lookback)
+                rs_val = calculate_candidate_rs_val(symbol, asof_date, benchmark_close, rs_lookback, **reader_kwargs)
                 if rs_val is None:
                     rs_values.append(0.0)
                     rs_calc_success.append(False)
@@ -1532,7 +1565,7 @@ def generate_daily_plan(
                 f"⚠️ [Freshness Guard] Holding {s} is listed in latest universe snapshot removed list. Review manually."
             )
         try:
-            df = load_price_history_until(s, data_date, lookback_days=10)
+            df = load_price_history_until(s, data_date, lookback_days=10, **reader_kwargs)
             price = df.iloc[-1]['close'] if not df.empty else current_state.avg_price[s]
             current_prices[s] = price
             total_stock_value += (current_state.shares[s] * price)
@@ -1586,6 +1619,7 @@ def generate_daily_plan(
                         rs_lookback,
                         rs_weight,
                         merged_config,
+                        **reader_kwargs,
                     )
                 score_valid = _is_valid_holding_score(score)
                 p_ret = (current_prices[s] - current_state.avg_price[s]) / current_state.avg_price[s] if current_state.avg_price[s] > 0 else 0
@@ -1661,7 +1695,7 @@ def generate_daily_plan(
 
     # 5-1. 매도 판단 (Trailing Stop 및 일반 리밸런싱 매도)
         try:
-            diag = build_holding_sell_diagnostic(symbol, data_date, current_state, merged_config)
+            diag = build_holding_sell_diagnostic(symbol, data_date, current_state, merged_config, **reader_kwargs)
             holding_sell_diagnostics.append(diag)
             for warning in diag.get("warning_items", []):
                 warning_items.append(warning)
@@ -1926,6 +1960,13 @@ def generate_daily_plan(
             "account": account_lineage,
             "config": config_lineage,
         }
+        if shared_input is not None:
+            for name in ("market", "indicator", "rs"):
+                as_of_lineage[name]["source"] = shared_input["snapshot"]["path"]
+                as_of_lineage[name]["revision"] = shared_input["snapshot"]["sha256"]
+            if shared_input.get("universe") and universe_metadata.get("snapshot_path"):
+                as_of_lineage["universe"]["source"] = shared_input["universe"]["path"]
+                as_of_lineage["universe"]["revision"] = shared_input["universe"]["sha256"]
         as_of_lineage = validate_stage_a_lineage(as_of_lineage, context=asof_context)
 
     report_content = format_markdown_report(
@@ -1966,6 +2007,8 @@ def generate_daily_plan(
             as_of_lineage=as_of_lineage,
             runtime_binding=runtime_binding_evidence,
         )
+        if shared_input is not None:
+            sidecar_payload["shared_input"] = shared_input
         write_daily_plan_json_sidecar(path=sidecar_path, payload=sidecar_payload)
         
     print(f"[OK] Action Plan saved to: {report_path}")

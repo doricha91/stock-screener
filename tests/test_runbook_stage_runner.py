@@ -6,6 +6,8 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from scripts import runbook_command_registry as registry
 from scripts import runbook_result
 from scripts import runbook_stage_runner
@@ -13,9 +15,29 @@ from scripts import runbook_state
 from core.paper_execution_intent import build_execution_intent
 
 
-ACCOUNT_ID = "paper_A"
+ACCOUNT_ID = "paper_a"
 DATA_DATE = "2026-06-12"
 TRADE_DATE = "2026-06-15"
+
+
+TEST_PARTICIPANTS = ["paper_a", "paper_b", "paper_smoke"]
+
+
+def _shared_pin():
+    return {"data_date": DATA_DATE, "participant_account_ids": TEST_PARTICIPANTS,
+            "shared_preparation_id": "fixture", "snapshot": {"path": "snapshot.sqlite3", "sha256": "sha256:fixture"}}
+
+
+@pytest.fixture(autouse=True)
+def admitted_shared_input(monkeypatch):
+    # Runner unit tests isolate process/result handling. Real preparation and
+    # consumer validation are exercised by test_ml1_4c_stage_a_shared.
+    monkeypatch.setattr(runbook_stage_runner, "run_shared_market_prepare", lambda **kw: {"result": "REUSE"})
+    monkeypatch.setattr(runbook_stage_runner, "validate_shared_market_input", lambda **kw: _shared_pin())
+
+
+def _run_stage_a(*args, **kwargs):
+    return runbook_stage_runner.run_stage_a(*args, shared_participant_account_ids=TEST_PARTICIPANTS, **kwargs)
 
 
 def _daily_plan_payload(
@@ -35,6 +57,8 @@ def _daily_plan_payload(
         }
         for source in ("market", "indicator", "rs", "account")
     }
+    for name in ("market", "indicator", "rs"):
+        lineage[name].update(source="snapshot.sqlite3", revision="sha256:fixture")
     lineage["universe"] = {
         "source": "test_universe",
         "effective_as_of": DATA_DATE,
@@ -62,6 +86,7 @@ def _daily_plan_payload(
         "execution_intent": build_execution_intent(resolved_items),
         "fingerprints": {"generator_version": "paper_daily_plan.v1"},
         "as_of_lineage": lineage,
+        "shared_input": _shared_pin(),
     }
 
 
@@ -77,84 +102,29 @@ def _is_daily_plan_command(argv: list[str]) -> bool:
     return "plan" in argv and any(str(part).endswith("paper.py") for part in argv)
 
 
-def test_dry_run_stage_a_creates_step_0_to_5_command_results(tmp_path: Path) -> None:
-    result = runbook_stage_runner.run_stage_a(
-        tmp_path,
-        ACCOUNT_ID,
-        DATA_DATE,
-        TRADE_DATE,
-        dry_run=True,
-    )
-
+def test_dry_run_renders_six_commands_without_any_artifact(tmp_path):
+    result = _run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, dry_run=True)
     assert result["runner_result"] == "PASS"
-    assert result["dry_run"] is True
-    assert result["paper_test_confirmed"] is False
-    command_dir = tmp_path / "command_runs" / result["runbook_day_id"]
-    command_jsons = sorted(command_dir.glob("*.json"))
-    assert len(command_jsons) == 6
-    assert [json.loads(path.read_text(encoding="utf-8"))["step_id"] for path in command_jsons] == list(range(6))
-    assert [json.loads(path.read_text(encoding="utf-8"))["command_key"] for path in command_jsons] == [
-        "status",
-        "data_prepare",
-        "data_freshness",
-        "daily_plan",
-        "export_daily_plan_notion",
-        "export_execution_template",
-    ]
+    assert len(result["commands"]) == 6
+    assert result["command_results"] == []
+    assert result["state_mutated"] is False
+    assert not list(tmp_path.iterdir())
 
 
-def test_dry_run_stage_a_creates_stage_summary_and_latest(tmp_path: Path) -> None:
-    result = runbook_stage_runner.run_stage_a(
-        tmp_path,
-        ACCOUNT_ID,
-        DATA_DATE,
-        TRADE_DATE,
-        dry_run=True,
-    )
-
-    stage_dir = tmp_path / "stage_runs" / result["runbook_day_id"]
-    assert Path(result["stage_summary_json"]).exists()
-    assert Path(result["stage_summary_txt"]).exists()
-    assert Path(result["latest_stage_summary_json"]).exists()
-    assert Path(result["latest_stage_summary_txt"]).exists()
-    assert (stage_dir / "latest_A.json").exists()
-    assert (stage_dir / "latest_A.txt").exists()
-    latest = json.loads((stage_dir / "latest_A.json").read_text(encoding="utf-8"))
-    assert latest["runner_result"] == "PASS"
-    assert latest["counts"]["total"] == 6
+def test_dry_run_preserves_ready_state_bytes(tmp_path):
+    _, path, _ = runbook_state.init_state_file_for_context(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    before = path.read_bytes()
+    result = _run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, dry_run=True)
+    assert result["runner_result"] == "PASS"
+    assert path.read_bytes() == before
+    assert not (tmp_path / "command_runs").exists()
 
 
-def test_stage_a_uses_per_runbook_day_id_directories(tmp_path: Path) -> None:
-    result_a = runbook_stage_runner.run_stage_a(tmp_path, "paper_A", DATA_DATE, TRADE_DATE, dry_run=True)
-    result_b = runbook_stage_runner.run_stage_a(tmp_path, "paper_B", DATA_DATE, TRADE_DATE, dry_run=True)
-
-    assert result_a["runbook_day_id"] != result_b["runbook_day_id"]
-    assert (tmp_path / "runbook_states" / f"{result_a['runbook_day_id']}.json").exists()
-    assert (tmp_path / "runbook_states" / f"{result_b['runbook_day_id']}.json").exists()
-    assert (tmp_path / "command_runs" / result_a["runbook_day_id"]).exists()
-    assert (tmp_path / "command_runs" / result_b["runbook_day_id"]).exists()
-
-
-def test_stage_a_state_transition_records_running_to_pass(tmp_path: Path) -> None:
-    result = runbook_stage_runner.run_stage_a(
-        tmp_path,
-        ACCOUNT_ID,
-        DATA_DATE,
-        TRADE_DATE,
-        dry_run=True,
-    )
-
-    state_path = Path(result["state_path"])
-    state = runbook_state.load_state(state_path)
-    assert state.current_stage == "A"
-    assert state.current_status == "PASS"
-    assert state.stage_status["A"] == "PASS"
-    assert state.last_completed_stage == "A"
-    assert state.last_completed_step == 5
-    assert [event["event_type"] for event in state.history if event["event_type"].startswith("stage_")] == [
-        "stage_started",
-        "stage_completed",
-    ]
+def test_stage_a_dry_run_account_identities_remain_separate(tmp_path):
+    a = _run_stage_a(tmp_path, "paper_a", DATA_DATE, TRADE_DATE, dry_run=True)
+    b = _run_stage_a(tmp_path, "paper_b", DATA_DATE, TRADE_DATE, dry_run=True)
+    assert a["runbook_day_id"] != b["runbook_day_id"]
+    assert not (tmp_path / "runbook_states").exists()
 
 
 def test_stage_a_selects_only_step_0_to_5() -> None:
@@ -179,7 +149,7 @@ def test_stage_a_rejects_non_stage_a_command() -> None:
 def test_fake_subprocess_success_marks_results_pass(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         return {
             "executed": True,
@@ -195,7 +165,7 @@ def test_fake_subprocess_success_marks_results_pass(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path,
         ACCOUNT_ID,
         DATA_DATE,
@@ -220,7 +190,7 @@ def test_fake_subprocess_success_marks_results_pass(tmp_path: Path, monkeypatch)
 def test_fake_subprocess_failure_is_fail_stop(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         exit_code = 1 if len(calls) == 3 else 0
         return {
@@ -233,7 +203,7 @@ def test_fake_subprocess_failure_is_fail_stop(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path,
         ACCOUNT_ID,
         DATA_DATE,
@@ -253,7 +223,7 @@ def test_fake_subprocess_failure_is_fail_stop(tmp_path: Path, monkeypatch) -> No
 
 
 def test_command_result_log_is_written(tmp_path: Path, monkeypatch) -> None:
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         return {
             "executed": True,
             "exit_code": 0,
@@ -268,7 +238,7 @@ def test_command_result_log_is_written(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path,
         ACCOUNT_ID,
         DATA_DATE,
@@ -314,6 +284,7 @@ def test_cli_stage_a_dry_run_outputs_json(tmp_path: Path) -> None:
             DATA_DATE,
             "--trade-date",
             TRADE_DATE,
+            "--shared-participant-account-ids", "paper_cli",
             "--dry-run",
         ],
         cwd=Path(__file__).resolve().parents[1],
@@ -323,18 +294,22 @@ def test_cli_stage_a_dry_run_outputs_json(tmp_path: Path) -> None:
         shell=False,
     )
 
-    assert completed.returncode == 0
+    assert completed.returncode == 1
     payload = json.loads(completed.stdout)
-    assert payload["runner_result"] == "PASS"
-    assert payload["stage_id"] == "A"
+    assert payload["runner_result"] == "BLOCKED"
     assert payload["dry_run"] is True
-    assert payload["paper_test_confirmed"] is False
-    assert Path(payload["latest_stage_summary_json"]).exists()
-    assert Path(payload["stage_summary_json"]).exists()
+    assert not list(tmp_path.iterdir())
 
 
-def test_stage_a_summary_uses_result_helper_contract(tmp_path: Path) -> None:
-    result = runbook_stage_runner.run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, dry_run=True)
+def test_stage_a_summary_uses_result_helper_contract(tmp_path: Path, monkeypatch) -> None:
+    def execute(argv, *args, **kwargs):
+        stdout = _write_daily_plan_for_fake_run(tmp_path, _daily_plan_payload()) if _is_daily_plan_command(argv) else "{}"
+        return {"exit_code": 0, "stdout": stdout, "stderr": "", "duration_ms": 1}
+    monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", execute)
+    result = _run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True)
+    state = runbook_state.load_state(Path(result["state_path"]))
+    assert state.current_status == "PASS"
+    assert [e["event_type"] for e in state.history if e["event_type"].startswith("stage_")] == ["stage_started", "stage_completed"]
     summary = json.loads(Path(result["stage_summary_json"]).read_text(encoding="utf-8"))
 
     assert runbook_result.validate_stage_summary(summary) == []
@@ -354,7 +329,7 @@ def test_parse_stdout_json_wraps_full_array() -> None:
 
 def test_parse_stdout_json_extracts_last_object_after_text() -> None:
     stdout = """PAPER NOTION EXPORT
-  manual_execution_template: account_id=paper_A create=4 failed=0
+  manual_execution_template: account_id=paper_a create=4 failed=0
 {
   "target": "manual_execution_template",
   "created_count": 4,
@@ -393,7 +368,7 @@ def test_parse_stdout_json_returns_empty_for_malformed_json() -> None:
 
 
 def test_stage_a_preserves_mixed_stdout_json_in_raw_payload(tmp_path: Path, monkeypatch) -> None:
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         return {
             "executed": True,
             "exit_code": 0,
@@ -408,7 +383,7 @@ def test_stage_a_preserves_mixed_stdout_json_in_raw_payload(tmp_path: Path, monk
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path,
         ACCOUNT_ID,
         DATA_DATE,
@@ -429,7 +404,7 @@ def test_stage_a_preserves_mixed_stdout_json_in_raw_payload(tmp_path: Path, monk
 def test_real_stage_a_without_confirm_is_blocked(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         return {
             "executed": True,
@@ -448,7 +423,7 @@ def test_real_stage_a_without_confirm_is_blocked(tmp_path: Path, monkeypatch) ->
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
+    result = _run_stage_a(tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE)
 
     assert result["runner_result"] == "BLOCKED"
     assert result["reason"] == "paper_test_confirmation_required"
@@ -460,7 +435,7 @@ def test_real_stage_a_without_confirm_is_blocked(tmp_path: Path, monkeypatch) ->
 def test_real_stage_a_with_confirm_and_paper_account_is_allowed(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         return {
             "executed": True,
@@ -479,7 +454,7 @@ def test_real_stage_a_with_confirm_and_paper_account_is_allowed(tmp_path: Path, 
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path,
         "paper_smoke",
         DATA_DATE,
@@ -496,7 +471,7 @@ def test_real_stage_a_with_confirm_and_paper_account_is_allowed(tmp_path: Path, 
 def test_real_stage_a_with_confirm_and_non_paper_account_is_blocked(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         return {
             "executed": True,
@@ -508,7 +483,7 @@ def test_real_stage_a_with_confirm_and_non_paper_account_is_blocked(tmp_path: Pa
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
 
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path,
         "live_account",
         DATA_DATE,
@@ -526,7 +501,7 @@ def test_stage_a_valid_execution_plan_exposes_pinned_intent(tmp_path: Path, monk
     calls: list[list[str]] = []
     workspace = tmp_path / "workspace"
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         stdout = (
             _write_daily_plan_for_fake_run(tmp_path, _daily_plan_payload())
@@ -536,7 +511,7 @@ def test_stage_a_valid_execution_plan_exposes_pinned_intent(tmp_path: Path, monk
         return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         workspace, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
 
@@ -560,7 +535,7 @@ def test_stage_a_valid_execution_plan_exposes_pinned_intent(tmp_path: Path, monk
 def test_stage_a_valid_no_action_plan_runs_exports_and_exposes_summary(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         stdout = (
             _write_daily_plan_for_fake_run(tmp_path, _daily_plan_payload(items=[]))
@@ -570,7 +545,7 @@ def test_stage_a_valid_no_action_plan_runs_exports_and_exposes_summary(tmp_path:
         return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
     summary = json.loads(Path(result["stage_summary_json"]).read_text(encoding="utf-8"))
@@ -596,13 +571,13 @@ def test_stage_a_malformed_intent_blocks_before_exports(tmp_path: Path, monkeypa
     payload = _daily_plan_payload(items=[])
     payload["execution_intent"]["action_mode"] = "EXECUTION"
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         stdout = _write_daily_plan_for_fake_run(tmp_path, payload) if _is_daily_plan_command(argv) else ""
         return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
 
@@ -617,13 +592,13 @@ def test_stage_a_context_mismatch_blocks_before_exports(tmp_path: Path, monkeypa
     calls: list[list[str]] = []
     payload = _daily_plan_payload(account_id="paper_other")
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         stdout = _write_daily_plan_for_fake_run(tmp_path, payload) if _is_daily_plan_command(argv) else ""
         return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
 
@@ -637,13 +612,13 @@ def test_stage_a_missing_asof_lineage_blocks_before_exports(tmp_path: Path, monk
     payload = _daily_plan_payload()
     del payload["as_of_lineage"]
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         stdout = _write_daily_plan_for_fake_run(tmp_path, payload) if _is_daily_plan_command(argv) else ""
         return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
 
@@ -658,13 +633,13 @@ def test_stage_a_future_lineage_blocks_before_exports(tmp_path: Path, monkeypatc
     payload = _daily_plan_payload()
     payload["as_of_lineage"]["indicator"]["selected_max_date"] = "2026-06-13"
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         stdout = _write_daily_plan_for_fake_run(tmp_path, payload) if _is_daily_plan_command(argv) else ""
         return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": stdout, "stderr": ""}
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
 
@@ -677,12 +652,12 @@ def test_stage_a_future_lineage_blocks_before_exports(tmp_path: Path, monkeypatc
 def test_stage_a_missing_daily_plan_evidence_blocks_before_exports(tmp_path: Path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800) -> dict[str, object]:
+    def fake_run(argv: list[str], cwd: Path, timeout_sec: int = 1800, **kwargs) -> dict[str, object]:
         calls.append(argv)
         return {"executed": True, "exit_code": 0, "duration_ms": 1, "stdout": "", "stderr": ""}
 
     monkeypatch.setattr(runbook_stage_runner, "run_allowlisted_command", fake_run)
-    result = runbook_stage_runner.run_stage_a(
+    result = _run_stage_a(
         tmp_path, ACCOUNT_ID, DATA_DATE, TRADE_DATE, confirm_paper_test=True
     )
 
@@ -705,6 +680,7 @@ def test_cli_real_stage_a_without_confirm_returns_blocked_json(tmp_path: Path) -
             DATA_DATE,
             "--trade-date",
             TRADE_DATE,
+            "--shared-participant-account-ids", "paper_cli",
         ],
         cwd=Path(__file__).resolve().parents[1],
         text=True,

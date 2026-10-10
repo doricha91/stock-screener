@@ -147,6 +147,7 @@ def run_paper_daily_plan(
         command_name="run_paper_daily_plan",
     )
     frozen_binding = None
+    shared_input = None
     if runbook_state_path is not None:
         from scripts import runbook_state
 
@@ -166,6 +167,11 @@ def run_paper_daily_plan(
         frozen_binding = getattr(state.frozen_context, "binding", None)
         if frozen_binding is None:
             raise ValueError("runbook_state_frozen_binding_required")
+        if enforce_asof_contract or "shared_input" in state.artifacts:
+            from core.paper_shared_market_prepare import load_pinned_shared_input
+            shared_input = load_pinned_shared_input(
+                runbook_state_path, account_id=account_paths.account_id,
+                data_date=normalized_data_date or normalized_db_date)
     runtime_binding = resolve_runtime_binding(
         account_paths.account_id,
         frozen_binding=frozen_binding,
@@ -207,6 +213,8 @@ def run_paper_daily_plan(
         log_path=state_log_path,
         initial_cash=initial_cash,
         currency=currency,
+        **({"db_path": Path(shared_input["snapshot"]["path"]), "account_paths": account_paths}
+           if shared_input is not None else {}),
     )
     output_path = account_paths.daily_action_plan_path(artifact_date)
     config_snapshot_output_path = account_paths.config_snapshot_path(artifact_date)
@@ -274,6 +282,7 @@ def run_paper_daily_plan(
         pinned_config_snapshot=pinned_config_snapshot,
         account_lineage=account_lineage if asof_context is not None else None,
         account_binding=runtime_binding,
+        **({"shared_input": shared_input} if shared_input is not None else {}),
     )
 
 

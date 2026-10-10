@@ -166,8 +166,23 @@ def run_paper_data_freshness_check(
     strict: bool = False,
     db_path: str | Path | None = None,
     universe_root: str | Path | None = None,
+    shared_input: dict | None = None,
 ) -> dict[str, Any]:
     target_date = _normalize_date(date_str)
+    if shared_input is not None:
+        from core.paper_shared_market_prepare import validate_shared_market_input
+        current = validate_shared_market_input(
+            data_date=target_date, participant_account_ids=shared_input["participant_account_ids"])
+        if current != shared_input:
+            raise ValueError("shared_pin_mismatch")
+        # The publication validator checks exactly the pinned participant coverage
+        # at DATA_DATE, including mandatory history and frozen universe provenance.
+        summary = _apply_summary(target_date, Path(current["snapshot"]["path"]), [
+            _issue("info", "shared_snapshot_coverage", "ok", "Pinned snapshot coverage validated read-only",
+                   latest_date=target_date),
+        ])
+        summary["shared_input"] = current
+        return summary
     target_ts = datetime.strptime(target_date, "%Y-%m-%d").date()
     market_db = Path(db_path) if db_path is not None else Path(market_db_path())
     universe_dir = Path(universe_root) if universe_root is not None else (OUTPUTS / "universe")

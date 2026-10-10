@@ -1156,7 +1156,7 @@ def test_eod_rejects_both_modes():
 def test_missing_future_commands_from_help(capsys):
     paper.main([])
     output = capsys.readouterr().out
-    assert "{prepare-shared-data,prepare-data,prepare,data-freshness,status,init-account,prepare-first-run,weekly-status,benchmark,preview,commit,preflight,plan,eod,reports,review,review-template,review-validate,review-append}" in output
+    assert "{prepare-shared-data,validate-shared-data,prepare-data,prepare,data-freshness,status,init-account,prepare-first-run,weekly-status,benchmark,preview,commit,preflight,plan,eod,reports,review,review-template,review-validate,review-append}" in output
     assert "run-all" not in output
     assert "prepare-data" in output
     assert "data-freshness" in output
