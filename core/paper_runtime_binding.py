@@ -91,6 +91,21 @@ def build_runtime_config(
         "existing_holdings_preserved": [],
         "runtime_frozen_validation": "PASS",
     }
+    quarterly = semantics.get("quarterly_universe")
+    if quarterly is not None:
+        evidence.update({
+            "universe_profile": quarterly["universe_profile"],
+            "universe_version": quarterly["universe_version"],
+            "quarterly_artifact": {
+                "schema_version": quarterly["schema_version"],
+                "version": quarterly["artifact_version"],
+                "artifact_hash": quarterly["artifact_hash"],
+            },
+            "selected_universe_slice": {
+                "name": quarterly["slice_name"],
+                "symbol_hash": quarterly["slice_hash"],
+            },
+        })
     validate_runtime_consumption(runtime_config, evidence)
     return runtime_config, evidence
 
@@ -133,6 +148,11 @@ def validate_pinned_runtime_evidence(
             "requested_entry_universe", "materialized_entry_universe", "excluded_symbols",
             "managed_symbols", "existing_holdings_preserved",
         ])
+    for field in (
+        "universe_profile", "universe_version", "quarterly_artifact", "selected_universe_slice",
+    ):
+        if field in pinned or field in current:
+            fields.append(field)
     for field in fields:
         if pinned.get(field) != current.get(field):
             raise BindingError(f"pinned runtime binding mismatch: {field}")

@@ -158,3 +158,26 @@ def paper_binding_registry_path() -> Path:
 def shared_market_preparations_dir() -> Path:
     """Return the shared publication namespace without creating it."""
     return OUTPUTS / "shared_market_preparations"
+
+
+def quarterly_universe_dir(*, outputs_root: Path | None = None) -> Path:
+    """Return the immutable quarterly-universe namespace without creating it."""
+    root = Path(outputs_root) if outputs_root is not None else OUTPUTS
+    return root / "universe" / "quarterly"
+
+
+def quarterly_universe_artifact_path(
+    version: str,
+    *,
+    outputs_root: Path | None = None,
+) -> Path:
+    """Return the canonical artifact path for a validated ``YYYYqN`` version."""
+    import re
+
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]{4}q[1-4]", version):
+        raise ValueError(f"invalid quarterly universe version: {version!r}")
+    root = quarterly_universe_dir(outputs_root=outputs_root)
+    target = root / version / "universe_membership.json"
+    if not target.absolute().is_relative_to(root.absolute()):
+        raise ValueError("quarterly universe path escapes its namespace")
+    return target

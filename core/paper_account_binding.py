@@ -6,8 +6,9 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
+from core import quarterly_universe
 from core.config_factory import make_config
 from core.paper_account_profile import (
     PaperAccountProfileConfig, VERSIONED_ACCOUNT_PROFILE_SCHEMA,
@@ -98,6 +99,73 @@ def _content(kind: str, value: Any) -> dict[str, Any]:
     ) or len(symbols) != len(set(symbols)):
         raise BindingError("invalid universe symbols")
     return {"kind": "symbols", "symbols": sorted(symbols)}
+
+
+def _quarterly_reference(reference: Mapping[str, Any]) -> bool:
+    return bool(re.fullmatch(r"[0-9]{4}q[1-4]", str(reference.get("version", ""))))
+
+
+def _validate_quarterly_provenance(
+    reference: Mapping[str, Any],
+    content: Mapping[str, Any],
+    value: Any,
+) -> dict[str, str]:
+    expected_keys = {
+        "schema_version", "universe_profile", "universe_version", "artifact_version",
+        "artifact_hash", "slice_name", "slice_hash",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise BindingError("malformed quarterly universe provenance")
+    profile = reference["id"]
+    version = reference["version"]
+    expected_slice = quarterly_universe.PROFILE_TO_SLICE.get(profile)
+    if expected_slice is None or not _quarterly_reference(reference):
+        raise BindingError("quarterly provenance is not allowed for this universe reference")
+    if value["schema_version"] != quarterly_universe.SCHEMA:
+        raise BindingError("quarterly artifact schema mismatch")
+    if (value["universe_profile"] != profile or value["universe_version"] != version
+            or value["artifact_version"] != version or value["slice_name"] != expected_slice):
+        raise BindingError("quarterly universe identity mismatch")
+    if not isinstance(value["artifact_hash"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["artifact_hash"]):
+        raise BindingError("invalid quarterly artifact hash")
+    symbols = content.get("symbols") if content.get("kind") == "symbols" else None
+    if symbols is None or value["slice_hash"] != quarterly_universe.symbol_hash(symbols):
+        raise BindingError("quarterly universe slice hash mismatch")
+    return dict(value)
+
+
+def resolve_quarterly_universe_provenance(
+    reference: Mapping[str, Any],
+    content: Mapping[str, Any],
+    *,
+    artifact: Mapping[str, Any] | None = None,
+) -> dict[str, str] | None:
+    """Resolve production ``YYYYqN`` symbols against their immutable bundle."""
+    if not _quarterly_reference(reference):
+        return None
+    slice_name = quarterly_universe.PROFILE_TO_SLICE.get(reference["id"])
+    if slice_name is None:
+        raise BindingError(f"unsupported quarterly universe profile: {reference['id']}")
+    try:
+        bundle = quarterly_universe.validate_quarterly_universe_bundle(
+            artifact if artifact is not None else quarterly_universe.load_quarterly_universe_bundle(reference["version"]),
+            expected_version=reference["version"],
+        )
+    except quarterly_universe.QuarterlyUniverseError as exc:
+        raise BindingError(f"invalid quarterly universe artifact: {exc}") from exc
+    expected_symbols = bundle["universes"][slice_name]["symbols"]
+    if content.get("kind") != "symbols" or content.get("symbols") != expected_symbols:
+        raise BindingError("binding symbols do not exactly match the quarterly universe slice")
+    provenance = {
+        "schema_version": bundle["schema_version"],
+        "universe_profile": reference["id"],
+        "universe_version": reference["version"],
+        "artifact_version": bundle["version"],
+        "artifact_hash": bundle["artifact_hash"],
+        "slice_name": slice_name,
+        "slice_hash": bundle["universes"][slice_name]["symbol_hash"],
+    }
+    return _validate_quarterly_provenance(reference, content, provenance)
 
 
 def load_binding_registry(path: Path | None = None) -> dict[str, Any]:
@@ -240,19 +308,23 @@ def shared_binding_policy() -> dict[str, Any]:
 
 
 def _semantic_payload(semantics: dict[str, Any]) -> dict[str, Any]:
-    return _canonical({
+    payload = {
         "account_type": semantics["account_type"],
         "currency": semantics["currency"],
         "effective_strategy_base": semantics["effective_strategy_base"],
         "regime_policy": semantics["regime_policy"],
         "shared_policy": semantics["shared_policy"],
         "universe": semantics["universe"]["content"],
-    })
+    }
+    if "quarterly_universe" in semantics:
+        payload["quarterly_universe"] = semantics["quarterly_universe"]
+    return _canonical(payload)
 
 
 def resolve_account_binding(
     account_id: str, *, profiles: PaperAccountProfileConfig | None = None,
     registry: dict[str, Any] | None = None,
+    quarterly_artifact: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     profiles = profiles if profiles is not None else load_paper_account_profiles(allow_missing=False)
     if profiles.schema_version != VERSIONED_ACCOUNT_PROFILE_SCHEMA:
@@ -268,12 +340,20 @@ def resolve_account_binding(
             raise BindingError(f"unknown {kind} profile/version: {ref}") from exc
         resolved[kind] = {"reference": ref, "content": content}
     policy = _resolved_policy(resolved["strategy"]["content"]["parameters"])
-    semantics = _canonical({
+    semantics_value = {
         "account_type": profile.account_type,
         "currency": profile.currency,
         **policy,
         **resolved,
-    })
+    }
+    quarterly_provenance = resolve_quarterly_universe_provenance(
+        resolved["universe"]["reference"],
+        resolved["universe"]["content"],
+        artifact=quarterly_artifact,
+    )
+    if quarterly_provenance is not None:
+        semantics_value["quarterly_universe"] = quarterly_provenance
+    semantics = _canonical(semantics_value)
     payload = {"schema_version": BINDING_SCHEMA, "semantics": semantics}
     return {**payload, "digest": sha256_payload(_semantic_payload(semantics))}
 
@@ -284,9 +364,12 @@ def validate_binding(binding: Any) -> None:
     if binding["schema_version"] != BINDING_SCHEMA:
         raise BindingError("unsupported binding schema")
     semantics = binding["semantics"]
-    if not isinstance(semantics, dict) or set(semantics) != {
+    base_semantic_keys = {
         "account_type", "currency", "strategy", "universe", "effective_strategy_base",
         "regime_policy", "shared_policy",
+    }
+    if not isinstance(semantics, dict) or frozenset(semantics) not in {
+        frozenset(base_semantic_keys), frozenset(base_semantic_keys | {"quarterly_universe"}),
     }:
         raise BindingError("malformed binding semantics")
     for key in ("account_type", "currency"):
@@ -302,6 +385,16 @@ def validate_binding(binding: Any) -> None:
         _reference(ref["id"], ref["version"])
         if _content(kind, entry["content"]) != entry["content"]:
             raise BindingError("noncanonical profile content")
+    universe_reference = semantics["universe"]["reference"]
+    quarterly_required = _quarterly_reference(universe_reference)
+    if quarterly_required != ("quarterly_universe" in semantics):
+        raise BindingError("quarterly universe provenance requirement mismatch")
+    if quarterly_required:
+        _validate_quarterly_provenance(
+            universe_reference,
+            semantics["universe"]["content"],
+            semantics["quarterly_universe"],
+        )
     effective = _strategy_parameters(semantics["effective_strategy_base"], complete=True)
     if effective != semantics["effective_strategy_base"]:
         raise BindingError("noncanonical effective strategy")
@@ -324,3 +417,24 @@ def assert_binding_matches(frozen: Any, current: Any) -> None:
             raise BindingError(f"{kind} binding identity drift")
     if frozen["digest"] != current["digest"]:
         raise BindingError("binding drift")
+
+
+def assert_binding_matches_quarterly_artifact(binding: Any, artifact: Mapping[str, Any]) -> None:
+    """Revalidate a resolved production binding against a supplied bundle."""
+    validate_binding(binding)
+    semantics = binding["semantics"]
+    provenance = semantics.get("quarterly_universe")
+    if provenance is None:
+        raise BindingError("quarterly universe provenance required")
+    try:
+        bundle = quarterly_universe.validate_quarterly_universe_bundle(
+            artifact, expected_version=provenance["artifact_version"]
+        )
+    except quarterly_universe.QuarterlyUniverseError as exc:
+        raise BindingError(f"invalid quarterly universe artifact: {exc}") from exc
+    if bundle["artifact_hash"] != provenance["artifact_hash"]:
+        raise BindingError("quarterly artifact identity mismatch")
+    slice_row = bundle["universes"][provenance["slice_name"]]
+    if (slice_row["symbol_hash"] != provenance["slice_hash"]
+            or slice_row["symbols"] != semantics["universe"]["content"]["symbols"]):
+        raise BindingError("quarterly universe slice mismatch")

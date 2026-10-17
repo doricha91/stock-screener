@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Iterable
 from urllib.request import Request, urlopen
@@ -36,23 +37,51 @@ def _extract_symbols_from_tables(tables: list[pd.DataFrame], candidates: Iterabl
 
 
 def _read_html_tables(url: str) -> list[pd.DataFrame]:
+    return _parse_html_tables(_fetch_html_bytes(url))
+
+
+def _fetch_html_bytes(url: str) -> bytes:
     request = Request(url, headers=DEFAULT_HEADERS)
     with urlopen(request) as response:
-        html = response.read()
-    return pd.read_html(html)
+        return response.read()
+
+
+def _parse_html_tables(html: bytes) -> list[pd.DataFrame]:
+    return pd.read_html(BytesIO(html))
+
+
+def _fetch_source_capture(url: str, candidates: Iterable[str]) -> tuple[set[str], bytes]:
+    """Fetch once and derive symbols plus provenance from the same response bytes."""
+    html = _fetch_html_bytes(url)
+    symbols = _extract_symbols_from_tables(_parse_html_tables(html), candidates)
+    return symbols, html
+
+
+def fetch_sp500_symbols() -> set[str]:
+    """Fetch and normalize the current S&P 500 constituent set."""
+    sp500_tables = _read_html_tables(SP500_WIKI_URL)
+    return _extract_symbols_from_tables(sp500_tables, ["Symbol", "Ticker"])
+
+
+def fetch_nasdaq100_symbols() -> set[str]:
+    """Fetch and normalize the current NASDAQ 100 constituent set."""
+    nasdaq100_tables = _read_html_tables(NASDAQ100_WIKI_URL)
+    return _extract_symbols_from_tables(nasdaq100_tables, ["Ticker", "Symbol"])
+
+
+def fetch_sp500_source_capture() -> tuple[set[str], bytes]:
+    """Return normalized S&P 500 symbols and their exact raw response bytes."""
+    return _fetch_source_capture(SP500_WIKI_URL, ["Symbol", "Ticker"])
+
+
+def fetch_nasdaq100_source_capture() -> tuple[set[str], bytes]:
+    """Return normalized NASDAQ 100 symbols and their exact raw response bytes."""
+    return _fetch_source_capture(NASDAQ100_WIKI_URL, ["Ticker", "Symbol"])
 
 
 def fetch_live_basket_symbols() -> set[str]:
-    """
-    Fetch the latest S&P 500 and NASDAQ 100 constituents from Wikipedia and
-    return a merged unique symbol set.
-    """
-    sp500_tables = _read_html_tables(SP500_WIKI_URL)
-    nasdaq100_tables = _read_html_tables(NASDAQ100_WIKI_URL)
-
-    sp500_symbols = _extract_symbols_from_tables(sp500_tables, ["Symbol", "Ticker"])
-    nasdaq100_symbols = _extract_symbols_from_tables(nasdaq100_tables, ["Ticker", "Symbol"])
-    return sp500_symbols | nasdaq100_symbols
+    """Return the merged current S&P 500 and NASDAQ 100 constituent set."""
+    return fetch_sp500_symbols() | fetch_nasdaq100_symbols()
 
 
 def compare_universe(live_symbols: Iterable[str], local_symbols: Iterable[str]) -> dict[str, set[str]]:

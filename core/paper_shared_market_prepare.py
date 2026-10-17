@@ -18,7 +18,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from core.paper_account_binding import resolve_account_binding
+from core import quarterly_universe
+from core.paper_account_binding import (
+    assert_binding_matches_quarterly_artifact,
+    resolve_account_binding,
+)
 from core.paper_account_guard import require_initialized_writer_account_paths
 from core.paper_account_paths import build_paper_account_paths
 from core.paper_account_profile import (
@@ -158,11 +162,61 @@ def _participants(ids: list[str], data_date: str) -> list[dict]:
     return result
 
 
+def _quarterly_provenance(participants: list[dict]) -> dict[str, Any] | None:
+    rows = [
+        participant["binding"]["semantics"].get("quarterly_universe")
+        for participant in participants
+        if participant["binding"]["semantics"].get("quarterly_universe") is not None
+    ]
+    if not rows:
+        return None
+    identities = {(row["artifact_version"], row["artifact_hash"]) for row in rows}
+    _require(len(identities) == 1, "quarterly_artifact_conflict",
+             "Participants reference different quarterly universe artifacts")
+    return rows[0]
+
+
 def _universe_input(data_date: str, participants: list[dict], frozen: Path | None = None) -> tuple[list[dict], bytes | None]:
-    needed = any(p["binding"]["semantics"]["universe"]["content"]["kind"] == "shared_snapshot"
-                 or p["binding"]["semantics"]["regime_policy"]["USE_MARKET_BREADTH"] for p in participants)
+    quarterly = _quarterly_provenance(participants)
+    needed = quarterly is not None or any(
+        p["binding"]["semantics"]["universe"]["content"]["kind"] == "shared_snapshot"
+        or p["binding"]["semantics"]["regime_policy"]["USE_MARKET_BREADTH"]
+        for p in participants
+    )
     if not needed:
         return [], None
+    if quarterly is not None:
+        path = (quarterly_universe.quarterly_universe_artifact_path(quarterly["artifact_version"])
+                if frozen is None else frozen)
+        if frozen is not None:
+            _assert_safe_path(path)
+        raw = path.read_bytes()
+        payload = quarterly_universe.validate_quarterly_universe_bundle(
+            json.loads(raw.decode("utf-8")), expected_version=quarterly["artifact_version"]
+        )
+        _require(payload["artifact_hash"] == quarterly["artifact_hash"],
+                 "quarterly_artifact_conflict", "Quarterly artifact identity differs from participant binding")
+        for participant in participants:
+            if participant["binding"]["semantics"].get("quarterly_universe") is not None:
+                assert_binding_matches_quarterly_artifact(participant["binding"], payload)
+        slices = payload["universes"]
+        merged = sorted(set(slices["sp500_ex_ndx100"]["symbols"]) | set(slices["nasdaq100"]["symbols"]))
+        return [{
+            "relative_path": UNIVERSE,
+            "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "kind": "quarterly_universe_bundle",
+            "schema_version": payload["schema_version"],
+            "version": payload["version"],
+            "artifact_hash": payload["artifact_hash"],
+            "symbols": merged,
+            "breadth_symbols": slices["nasdaq100"]["symbols"],
+            "breadth_slice_hash": slices["nasdaq100"]["symbol_hash"],
+            "source": "quarterly_universe_bundle",
+            "source_metadata": payload["sources"],
+            "effective_as_of": payload["effective_as_of"],
+            "observed_at": payload["observed_at"],
+            "capture_mode": "immutable_quarterly_bundle",
+        }], raw
     if frozen is None:
         selection = load_universe_snapshot_as_of_quarter(data_date)
         raw_path = selection.get("metadata", {}).get("snapshot_path")
@@ -218,17 +272,32 @@ def _coverage(data_date: str, participants: list[dict], sources: list[dict], db_
             if regime["USE_VIX_BREAKOUT"]:
                 indexes["^VIX"] = max(indexes["^VIX"], int(regime["VIX_MA_PERIOD"]) + 1)
             breadth_needed |= bool(regime["USE_MARKET_BREADTH"])
+    quarterly_source = next(
+        (source for source in sources if source.get("kind") == "quarterly_universe_bundle"), None
+    )
     with closing(_read_only(db_path)) as conn:
-        breadth = _symbols([r[0] for r in conn.execute("SELECT symbol FROM tickers WHERE listing_board='NASDAQ100'")]) if breadth_needed else []
+        if breadth_needed and quarterly_source is not None:
+            breadth = _symbols(quarterly_source["breadth_symbols"])
+        else:
+            breadth = _symbols([r[0] for r in conn.execute("SELECT symbol FROM tickers WHERE listing_board='NASDAQ100'")]) if breadth_needed else []
         _require(not breadth_needed or bool(breadth), "breadth_missing", "Required NASDAQ100 breadth membership is empty")
         conn.execute("SELECT date, status FROM market_status_log WHERE date < ? LIMIT 1", (data_date,)).fetchall()
     stocks.update(holdings)
     stocks.update(breadth)
-    return {"stock_symbols": sorted(stocks), "mandatory_stock_symbols": sorted(holdings | set(breadth)),
+    coverage = {"stock_symbols": sorted(stocks), "mandatory_stock_symbols": sorted(holdings | set(breadth)),
             "breadth_symbols": breadth, "breadth_board": "NASDAQ100" if breadth_needed else None,
             "index_minimum_rows": dict(sorted(indexes.items())),
             "screen_start_date": DEFAULT_SCREEN_START_DATE, "entry_minimum_rows": 200,
             "cutoff": data_date, "regime_history": "market_status_log_before_cutoff_optional_rows"}
+    if breadth_needed and quarterly_source is not None:
+        coverage["breadth_provenance"] = {
+            "kind": quarterly_source["kind"],
+            "version": quarterly_source["version"],
+            "artifact_hash": quarterly_source["artifact_hash"],
+            "slice_name": "nasdaq100",
+            "slice_hash": quarterly_source["breadth_slice_hash"],
+        }
+    return coverage
 
 
 def _identity(data_date: str, participants: list[dict], sources: list[dict], coverage: dict) -> dict:
@@ -249,8 +318,9 @@ def validate_shared_snapshot(snapshot: Path, coverage: dict) -> dict:
     exclusions = []
     with closing(_read_only(snapshot)) as conn:
         _require(conn.execute("PRAGMA quick_check").fetchall() == [("ok",)], "snapshot_invalid", "SQLite integrity failure")
-        breadth = _symbols([r[0] for r in conn.execute("SELECT symbol FROM tickers WHERE listing_board='NASDAQ100'")]) if coverage["breadth_board"] else []
-        _require(breadth == coverage["breadth_symbols"], "coverage_conflict", "Breadth membership changed during refresh")
+        if coverage["breadth_board"] and "breadth_provenance" not in coverage:
+            breadth = _symbols([r[0] for r in conn.execute("SELECT symbol FROM tickers WHERE listing_board='NASDAQ100'")])
+            _require(breadth == coverage["breadth_symbols"], "coverage_conflict", "Breadth membership changed during refresh")
         conn.execute("SELECT date, status FROM market_status_log WHERE date < ? LIMIT 1", (cutoff,)).fetchall()
         for symbol in coverage["stock_symbols"]:
             metadata = conn.execute("SELECT symbol FROM tickers WHERE symbol=?", (symbol,)).fetchone()
@@ -349,7 +419,7 @@ def _validated_shared_market_input(*, data_date: str, participant_account_ids: l
     manifest = _reuse(package, normalized, _participants(participant_account_ids, normalized))
     def artifact(name: str, digest: str) -> dict:
         return {"path": str((package / name).absolute()), "sha256": digest}
-    return {
+    result = {
         "data_date": normalized,
         "participant_account_ids": manifest["participant_account_ids"],
         "shared_preparation_id": manifest["shared_preparation_id"],
@@ -360,6 +430,15 @@ def _validated_shared_market_input(*, data_date: str, participant_account_ids: l
                     if manifest["shared_universe_sources"] else None,
         "validation_result": "PASS",
     }
+    sources = manifest["shared_universe_sources"]
+    if sources and sources[0].get("kind") == "quarterly_universe_bundle":
+        result["quarterly_universe"] = {
+            "schema_version": sources[0]["schema_version"],
+            "version": sources[0]["version"],
+            "artifact_hash": sources[0]["artifact_hash"],
+            "nasdaq100_slice_hash": sources[0]["breadth_slice_hash"],
+        }
+    return result
 
 
 def validate_shared_market_input(*, data_date: str, participant_account_ids: list[str]) -> dict:
