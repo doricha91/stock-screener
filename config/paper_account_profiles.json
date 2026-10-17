@@ -1,0 +1,34 @@
+{
+  "accounts": [
+    {
+      "account_id": "paper_ndx100",
+      "account_type": "paper",
+      "benchmark_profile": null,
+      "currency": "USD",
+      "display_name": "NASDAQ 100 Paper",
+      "initial_cash": 10000.0,
+      "is_default": true,
+      "notion_profile": null,
+      "strategy_profile": "core_strategy",
+      "strategy_version": "ad7a8c6",
+      "universe_profile": "nasdaq100",
+      "universe_version": "2026q4"
+    },
+    {
+      "account_id": "paper_sp500_ex_ndx100",
+      "account_type": "paper",
+      "benchmark_profile": null,
+      "currency": "USD",
+      "display_name": "S&P 500 ex NASDAQ 100 Paper",
+      "initial_cash": 10000.0,
+      "is_default": false,
+      "notion_profile": null,
+      "strategy_profile": "core_strategy",
+      "strategy_version": "ad7a8c6",
+      "universe_profile": "sp500_ex_ndx100",
+      "universe_version": "2026q4"
+    }
+  ],
+  "default_account_id": "paper_ndx100",
+  "schema_version": "paper_account_profiles.v2"
+}
